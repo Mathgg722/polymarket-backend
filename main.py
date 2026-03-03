@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
+import threading
+import time
+from datetime import datetime
 
 app = FastAPI()
 
@@ -12,13 +15,17 @@ app.add_middleware(
 )
 
 NEWS_API_KEY = "a595b3e7d7a047fda7a934162cf9c3ad"
+EDGE_THRESHOLD = 0.08
 
-@app.get("/")
-def root():
-    return {"status": "ok"}
+# Cache em memoria
+cache = {
+    "markets": [],
+    "news": [],
+    "signals": [],
+    "last_update": None
+}
 
-@app.get("/markets")
-def get_markets():
+def fetch_markets_data():
     url = "https://gamma-api.polymarket.com/markets?limit=100&order=volume24hr&ascending=false&active=true"
     try:
         response = requests.get(url, timeout=10)
@@ -33,6 +40,7 @@ def get_markets():
                 yes_price = 50.0
                 no_price = 50.0
             markets.append({
+                "id": m.get("id"),
                 "question": m.get("question"),
                 "yes_price": yes_price,
                 "no_price": no_price,
@@ -42,10 +50,9 @@ def get_markets():
             })
         return markets
     except Exception as e:
-        return {"error": str(e)}
+        return []
 
-@app.get("/news")
-def get_news():
+def fetch_news_data():
     url = f"https://newsapi.org/v2/top-headlines?language=en&pageSize=50&apiKey={NEWS_API_KEY}"
     try:
         response = requests.get(url, timeout=10)
@@ -61,23 +68,115 @@ def get_news():
             })
         return news
     except Exception as e:
-        return {"error": str(e)}
+        return []
 
-@app.get("/news/topic/{topic}")
-def get_news_by_topic(topic: str):
-    url = f"https://newsapi.org/v2/everything?q={topic}&language=en&sortBy=publishedAt&pageSize=20&apiKey={NEWS_API_KEY}"
-    try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        news = []
-        for article in data.get("articles", []):
-            news.append({
-                "title": article.get("title"),
-                "description": article.get("description"),
-                "source": article.get("source", {}).get("name"),
-                "published_at": article.get("publishedAt"),
-                "url": article.get("url"),
-            })
-        return news
-    except Exception as e:
-        return {"error": str(e)}
+def analyze_signals(markets, news):
+    signals = []
+    keywords_yes = ["win", "approved", "confirmed", "yes", "rises", "increases", "launches", "passes", "beats"]
+    keywords_no = ["fails", "loses", "denied", "rejected", "falls", "decreases", "cancels", "drops", "miss"]
+
+    for market in markets:
+        question = market.get("question", "").lower()
+        yes_price = market.get("yes_price", 50)
+        no_price = market.get("no_price", 50)
+
+        for article in news:
+            title = (article.get("title") or "").lower()
+            description = (article.get("description") or "").lower()
+            content = title + " " + description
+
+            # Verificar palavras chave em comum com a pergunta
+            question_words = set(question.split())
+            content_words = set(content.split())
+            overlap = question_words & content_words
+
+            if len(overlap) < 2:
+                continue
+
+            # Calcular impacto
+            yes_score = sum(1 for k in keywords_yes if k in content)
+            no_score = sum(1 for k in keywords_no if k in content)
+
+            if yes_score == 0 and no_score == 0:
+                continue
+
+            direction = "YES" if yes_score >= no_score else "NO"
+            adjustment = round((yes_score - no_score) * 0.05, 2)
+            current_prob = yes_price / 100 if direction == "YES" else no_price / 100
+            estimated_prob = min(0.99, max(0.01, current_prob + abs(adjustment)))
+            edge = round(abs(estimated_prob - current_prob), 3)
+
+            if edge >= EDGE_THRESHOLD:
+                signals.append({
+                    "market": market.get("question"),
+                    "news_title": article.get("title"),
+                    "news_source": article.get("source"),
+                    "direction": direction,
+                    "current_probability": round(current_prob * 100, 1),
+                    "estimated_probability": round(estimated_prob * 100, 1),
+                    "edge": round(edge * 100, 1),
+                    "confidence": round(min(0.95, 0.5 + edge), 2),
+                    "generated_at": datetime.utcnow().isoformat(),
+                })
+
+    # Ordenar por edge
+    signals.sort(key=lambda x: x["edge"], reverse=True)
+    return signals[:20]
+
+def update_cache():
+    while True:
+        print(f"[{datetime.utcnow().isoformat()}] Atualizando cache...")
+        markets = fetch_markets_data()
+        news = fetch_news_data()
+        signals = analyze_signals(markets, news)
+
+        cache["markets"] = markets
+        cache["news"] = news
+        cache["signals"] = signals
+        cache["last_update"] = datetime.utcnow().isoformat()
+
+        print(f"Cache atualizado: {len(markets)} mercados, {len(news)} noticias, {len(signals)} sinais")
+        time.sleep(1800)  # 30 minutos
+
+# Iniciar thread de atualizacao
+threading.Thread(target=update_cache, daemon=True).start()
+
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "last_update": cache["last_update"],
+        "markets": len(cache["markets"]),
+        "news": len(cache["news"]),
+        "signals": len(cache["signals"])
+    }
+
+@app.get("/markets")
+def get_markets():
+    if not cache["markets"]:
+        cache["markets"] = fetch_markets_data()
+    return cache["markets"]
+
+@app.get("/news")
+def get_news():
+    if not cache["news"]:
+        cache["news"] = fetch_news_data()
+    return cache["news"]
+
+@app.get("/signals")
+def get_signals():
+    if not cache["signals"]:
+        markets = cache["markets"] or fetch_markets_data()
+        news = cache["news"] or fetch_news_data()
+        cache["signals"] = analyze_signals(markets, news)
+    return cache["signals"]
+
+@app.get("/status")
+def get_status():
+    return {
+        "last_update": cache["last_update"],
+        "total_markets": len(cache["markets"]),
+        "total_news": len(cache["news"]),
+        "total_signals": len(cache["signals"]),
+        "next_update": "30 minutos apos ultimo update"
+    }
