@@ -9,6 +9,7 @@ app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
 def save_snapshot(market_id, yes_price, no_price, volume):
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
@@ -39,20 +40,19 @@ def collect_markets():
         response = requests.get("https://gamma-api.polymarket.com/markets")
         markets = response.json()
 
-        for market in markets[:20]:  # limita para não sobrecarregar
+        for market in markets[:20]:
             market_id = market.get("id")
             volume = float(market.get("volume", 0))
 
             outcomes = market.get("outcomes", [])
+            outcome_prices = market.get("outcomePrices", [])
 
             yes_price = 0
             no_price = 0
 
-            for outcome in outcomes:
-                if outcome.get("name") == "Yes":
-                    yes_price = float(outcome.get("price", 0))
-                elif outcome.get("name") == "No":
-                    no_price = float(outcome.get("price", 0))
+            if len(outcomes) == 2 and len(outcome_prices) == 2:
+                yes_price = float(outcome_prices[0])
+                no_price = float(outcome_prices[1])
 
             save_snapshot(market_id, yes_price, no_price, volume)
 
@@ -65,7 +65,7 @@ def collect_markets():
 def background_collector():
     while True:
         collect_markets()
-        time.sleep(60)  # 1 minuto
+        time.sleep(60)
 
 
 @app.on_event("startup")
