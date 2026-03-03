@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from database import SessionLocal, engine
 from models import Base, Market
 from datetime import datetime
@@ -34,6 +35,20 @@ def status(db: Session = Depends(get_db)):
 
 @app.get("/markets")
 def get_active_markets(db: Session = Depends(get_db)):
+    # Converte end_date de String para DateTime direto no PostgreSQL
+    try:
+        db.execute(text("""
+            ALTER TABLE markets
+            ALTER COLUMN end_date TYPE TIMESTAMP
+            USING CASE
+                WHEN end_date IS NULL OR end_date = '' THEN NULL
+                ELSE end_date::TIMESTAMP
+            END
+        """))
+        db.commit()
+    except Exception:
+        db.rollback()  # Coluna ja foi convertida, tudo certo
+
     now = datetime.utcnow()
 
     markets = (
@@ -52,7 +67,7 @@ def get_active_markets(db: Session = Depends(get_db)):
             "id": m.id,
             "question": m.question,
             "slug": m.market_slug,
-            "end_date": m.end_date,
+            "end_date": str(m.end_date) if m.end_date else None,
             "tokens": [
                 {
                     "outcome": t.outcome,
