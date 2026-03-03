@@ -3,7 +3,6 @@ import threading
 import requests
 import psycopg2
 import os
-import json
 from fastapi import FastAPI
 
 app = FastAPI()
@@ -38,29 +37,19 @@ def save_snapshot(market_id, yes_price, no_price, volume):
 
 def collect_markets():
     try:
-        response = requests.get("https://gamma-api.polymarket.com/markets")
+        response = requests.get("https://clob.polymarket.com/markets")
         markets = response.json()
 
-        for market in markets:
+        for market in markets[:20]:
 
-            # 🔥 FILTRO CORRETO
             if market.get("closed") is True:
                 continue
 
-            market_id = market.get("id")
-            volume = float(market.get("liquidity", 0))
+            market_id = market.get("condition_id")
+            volume = float(market.get("volume", 0))
 
-            outcomes_raw = market.get("outcomes", "[]")
-            prices_raw = market.get("outcomePrices", "[]")
-
-            outcomes = json.loads(outcomes_raw)
-            prices = json.loads(prices_raw)
-
-            if len(prices) != 2:
-                continue
-
-            yes_price = float(prices[0])
-            no_price = float(prices[1])
+            yes_price = float(market.get("best_bid", 0))
+            no_price = float(market.get("best_ask", 0))
 
             save_snapshot(market_id, yes_price, no_price, volume)
 
