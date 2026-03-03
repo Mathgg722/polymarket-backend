@@ -164,25 +164,28 @@ def fetch_news_data():
 
 def fetch_top_traders():
     try:
-        url = "https://data-api.polymarket.com/profiles?limit=20&sortBy=volume&sortOrder=desc"
+        # Leaderboard por lucro - janela de 30 dias
+        url = "https://data-api.polymarket.com/leaderboard?window=1mo&sortBy=profit&limit=20"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             traders = []
             for t in data:
                 traders.append({
-                    "username": t.get("name") or t.get("pseudonym") or t.get("address", "")[:10],
-                    "profit": t.get("pnl") or t.get("profit"),
+                    "username": t.get("name") or t.get("pseudonym") or t.get("proxyWallet", "")[:10],
+                    "profit": t.get("profit") or t.get("pnl"),
                     "volume": t.get("volume"),
-                    "positions": t.get("positionsCount") or t.get("positions"),
+                    "profit_pct": t.get("profitPct"),
+                    "positions_won": t.get("positionsWon"),
+                    "positions_lost": t.get("positionsLost"),
                 })
             return traders
     except:
         pass
 
-    # Fallback: leaderboard
     try:
-        url = "https://gamma-api.polymarket.com/leaderboard?limit=20"
+        # Fallback sem filtro
+        url = "https://data-api.polymarket.com/leaderboard?limit=20"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             return response.json()
