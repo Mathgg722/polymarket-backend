@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 import threading
 import time
+import json
 from datetime import datetime
 
 app = FastAPI()
@@ -32,16 +33,14 @@ def fetch_markets_data():
 
         markets = []
         for m in markets_data:
-            # Tentar pegar precos do campo clobTokenIds
             yes_price = 50.0
             no_price = 50.0
 
-            # Campo outcomePrices pode estar como string JSON
+            # outcomePrices vem como string JSON ex: "[\"0.9995\", \"0.0005\"]"
             outcome_prices = m.get("outcomePrices")
             if outcome_prices:
                 try:
                     if isinstance(outcome_prices, str):
-                        import json
                         prices = json.loads(outcome_prices)
                     else:
                         prices = outcome_prices
@@ -51,10 +50,8 @@ def fetch_markets_data():
                 except:
                     pass
 
-            # Tentar outros campos
+            # Fallback para lastTradePrice
             if yes_price == 50.0:
-                best_ask = m.get("bestAsk")
-                best_bid = m.get("bestBid")
                 last_trade = m.get("lastTradePrice")
                 if last_trade:
                     try:
@@ -71,7 +68,8 @@ def fetch_markets_data():
                 "volume": m.get("volume"),
                 "liquidity": m.get("liquidity"),
                 "end_date": m.get("endDate"),
-                "raw_fields": list(m.keys())  # debug
+                "volume_24hr": m.get("volume24hr"),
+                "price_change_24h": m.get("oneDayPriceChange"),
             })
 
         return markets
@@ -171,12 +169,6 @@ def get_markets():
     if not cache["markets"]:
         cache["markets"] = fetch_markets_data()
     return cache["markets"]
-
-@app.get("/markets/debug")
-def get_markets_debug():
-    url = "https://gamma-api.polymarket.com/markets?limit=1&order=volume24hr&ascending=false&active=true"
-    response = requests.get(url, timeout=10)
-    return response.json()
 
 @app.get("/news")
 def get_news():
