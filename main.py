@@ -26,49 +26,57 @@ cache = {
 
 def fetch_markets_data():
     try:
-        # Buscar mercados
         url = "https://gamma-api.polymarket.com/markets?limit=100&order=volume24hr&ascending=false&active=true"
         response = requests.get(url, timeout=10)
         markets_data = response.json()
 
         markets = []
         for m in markets_data:
-            market_id = m.get("id")
-            question = m.get("question")
-
-            # Buscar precos reais via tokens
+            # Tentar pegar precos do campo clobTokenIds
             yes_price = 50.0
             no_price = 50.0
 
-            try:
-                tokens_url = f"https://clob.polymarket.com/markets/{market_id}"
-                token_resp = requests.get(tokens_url, timeout=5)
-                if token_resp.status_code == 200:
-                    token_data = token_resp.json()
-                    tokens = token_data.get("tokens", [])
-                    for token in tokens:
-                        outcome = token.get("outcome", "").upper()
-                        price = float(token.get("price", 0.5)) * 100
-                        if outcome == "YES":
-                            yes_price = round(price, 1)
-                        elif outcome == "NO":
-                            no_price = round(price, 1)
-            except:
-                pass
+            # Campo outcomePrices pode estar como string JSON
+            outcome_prices = m.get("outcomePrices")
+            if outcome_prices:
+                try:
+                    if isinstance(outcome_prices, str):
+                        import json
+                        prices = json.loads(outcome_prices)
+                    else:
+                        prices = outcome_prices
+                    if len(prices) >= 2:
+                        yes_price = round(float(prices[0]) * 100, 1)
+                        no_price = round(float(prices[1]) * 100, 1)
+                except:
+                    pass
+
+            # Tentar outros campos
+            if yes_price == 50.0:
+                best_ask = m.get("bestAsk")
+                best_bid = m.get("bestBid")
+                last_trade = m.get("lastTradePrice")
+                if last_trade:
+                    try:
+                        yes_price = round(float(last_trade) * 100, 1)
+                        no_price = round(100 - yes_price, 1)
+                    except:
+                        pass
 
             markets.append({
-                "id": market_id,
-                "question": question,
+                "id": m.get("id"),
+                "question": m.get("question"),
                 "yes_price": yes_price,
                 "no_price": no_price,
                 "volume": m.get("volume"),
                 "liquidity": m.get("liquidity"),
                 "end_date": m.get("endDate"),
+                "raw_fields": list(m.keys())  # debug
             })
 
         return markets
     except Exception as e:
-        return []
+        return [{"error": str(e)}]
 
 def fetch_news_data():
     url = f"https://newsapi.org/v2/top-headlines?language=en&pageSize=50&apiKey={NEWS_API_KEY}"
@@ -120,9 +128,9 @@ def analyze_signals(markets, news):
                 continue
 
             direction = "YES" if yes_score >= no_score else "NO"
-            adjustment = round((yes_score - no_score) * 0.05, 2)
             current_prob = yes_price / 100 if direction == "YES" else no_price / 100
-            estimated_prob = min(0.99, max(0.01, current_prob + abs(adjustment)))
+            adjustment = abs(yes_score - no_score) * 0.05
+            estimated_prob = min(0.99, max(0.01, current_prob + adjustment))
             edge = round(abs(estimated_prob - current_prob), 3)
 
             if edge >= EDGE_THRESHOLD:
@@ -143,7 +151,6 @@ def analyze_signals(markets, news):
 
 def update_cache():
     while True:
-        print(f"[{datetime.utcnow().isoformat()}] Atualizando cache...")
         markets = fetch_markets_data()
         news = fetch_news_data()
         signals = analyze_signals(markets, news)
@@ -151,7 +158,6 @@ def update_cache():
         cache["news"] = news
         cache["signals"] = signals
         cache["last_update"] = datetime.utcnow().isoformat()
-        print(f"Cache atualizado: {len(markets)} mercados, {len(news)} noticias, {len(signals)} sinais")
         time.sleep(1800)
 
 threading.Thread(target=update_cache, daemon=True).start()
@@ -165,6 +171,12 @@ def get_markets():
     if not cache["markets"]:
         cache["markets"] = fetch_markets_data()
     return cache["markets"]
+
+@app.get("/markets/debug")
+def get_markets_debug():
+    url = "https://gamma-api.polymarket.com/markets?limit=1&order=volume24hr&ascending=false&active=true"
+    response = requests.get(url, timeout=10)
+    return response.json()
 
 @app.get("/news")
 def get_news():
