@@ -11,6 +11,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+NEWS_API_KEY = "a595b3e7d7a047fda7a934162cf9c3ad"
+
 @app.get("/")
 def root():
     return {"status": "ok"}
@@ -39,5 +41,43 @@ def get_markets():
                 "end_date": m.get("endDate"),
             })
         return markets
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/news")
+def get_news():
+    url = f"https://newsapi.org/v2/top-headlines?language=en&pageSize=50&apiKey={NEWS_API_KEY}"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        news = []
+        for article in data.get("articles", []):
+            news.append({
+                "title": article.get("title"),
+                "description": article.get("description"),
+                "source": article.get("source", {}).get("name"),
+                "published_at": article.get("publishedAt"),
+                "url": article.get("url"),
+            })
+        return news
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/news/topic/{topic}")
+def get_news_by_topic(topic: str):
+    url = f"https://newsapi.org/v2/everything?q={topic}&language=en&sortBy=publishedAt&pageSize=20&apiKey={NEWS_API_KEY}"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        news = []
+        for article in data.get("articles", []):
+            news.append({
+                "title": article.get("title"),
+                "description": article.get("description"),
+                "source": article.get("source", {}).get("name"),
+                "published_at": article.get("publishedAt"),
+                "url": article.get("url"),
+            })
+        return news
     except Exception as e:
         return {"error": str(e)}
