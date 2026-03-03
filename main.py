@@ -1,6 +1,5 @@
 from fastapi import FastAPI
 import requests
-import time
 
 app = FastAPI()
 
@@ -10,21 +9,19 @@ BASE_URL = "https://gamma-api.polymarket.com/markets"
 def get_all_active_markets():
     try:
         all_markets = []
-        offset = 0
         limit = 100
 
-        while True:
+        # 🔒 Pegamos só até 5 páginas (máx 500 mercados)
+        for page in range(5):
+            offset = page * limit
             url = f"{BASE_URL}?active=true&limit={limit}&offset={offset}"
-            response = requests.get(url)
+            response = requests.get(url, timeout=10)
             markets = response.json()
 
             if not markets:
                 break
 
             all_markets.extend(markets)
-            offset += limit
-
-            time.sleep(0.2)  # evita rate limit
 
         return all_markets
 
