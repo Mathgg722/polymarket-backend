@@ -10,7 +10,7 @@ class Market(Base):
     id = Column(Integer, primary_key=True, index=True)
     market_slug = Column(String, unique=True, index=True)
     question = Column(String)
-    end_date = Column(String)
+    end_date = Column(DateTime, nullable=True)  # CORRIGIDO: era String, agora DateTime
 
     tokens = relationship("Token", back_populates="market")
 

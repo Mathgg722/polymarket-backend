@@ -1,5 +1,6 @@
 import requests
 import time
+from datetime import datetime
 from database import SessionLocal, engine
 from models import Base, Market, Token, Snapshot
 
@@ -8,16 +9,29 @@ Base.metadata.create_all(bind=engine)
 BASE_URL = "https://gamma-api.polymarket.com/markets"
 
 
+def parse_end_date(end_date_str):
+    """Converte string de data para objeto datetime."""
+    if not end_date_str:
+        return None
+    try:
+        # Formato: "2026-03-31T00:00:00Z"
+        return datetime.fromisoformat(end_date_str.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        try:
+            return datetime.strptime(end_date_str[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+
+
 def fetch_markets():
     try:
         response = requests.get(f"{BASE_URL}?limit=200")
         response.raise_for_status()
         data = response.json()
 
-        # Algumas vezes a API retorna dict com "markets"
         if isinstance(data, dict):
             return data.get("markets", [])
-        
+
         return data
 
     except Exception as e:
@@ -43,7 +57,7 @@ def run():
             try:
                 slug = m.get("slug")
                 question = m.get("question")
-                end_date = m.get("endDate")
+                end_date = parse_end_date(m.get("endDate"))  # CORRIGIDO: converte para datetime
 
                 if not slug:
                     continue
@@ -57,7 +71,10 @@ def run():
                         end_date=end_date
                     )
                     db.add(existing)
-                    db.flush()  # pega ID sem commit ainda
+                    db.flush()
+                else:
+                    # Atualiza end_date se mudou
+                    existing.end_date = end_date
 
                 tokens = m.get("tokens", [])
 
