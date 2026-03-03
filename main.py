@@ -249,3 +249,136 @@ def get_movers(db: Session = Depends(get_db)):
 
     movers.sort(key=lambda x: abs(x["change_1h"]), reverse=True)
     return movers[:20]
+
+
+# ─────────────────────────────────────────
+# SISTEMA DE TRADES
+# ─────────────────────────────────────────
+
+from models import Trade
+
+@app.post("/trades")
+def open_trade(
+    market_slug: str,
+    outcome: str,
+    amount: float,
+    notes: str = "",
+    db: Session = Depends(get_db)
+):
+    """Registra uma nova aposta."""
+    market = db.query(Market).filter(Market.market_slug == market_slug).first()
+    if not market:
+        return {"error": "Mercado nao encontrado"}
+
+    # Busca preco atual do outcome
+    token = db.query(Token).filter(
+        Token.market_id == market.id,
+        Token.outcome == outcome.upper()
+    ).first()
+
+    if not token:
+        return {"error": f"Token {outcome} nao encontrado"}
+
+    entry_price = round(token.price * 100, 2)
+    shares = round(amount / entry_price * 100, 4) if entry_price > 0 else 0
+
+    trade = Trade(
+        market_slug=market_slug,
+        question=market.question,
+        outcome=outcome.upper(),
+        amount=amount,
+        entry_price=entry_price,
+        shares=shares,
+        notes=notes,
+        status="open"
+    )
+    db.add(trade)
+    db.commit()
+    db.refresh(trade)
+
+    return {
+        "message": "Aposta registrada com sucesso!",
+        "trade_id": trade.id,
+        "market": market.question,
+        "outcome": outcome.upper(),
+        "amount": f"${amount}",
+        "entry_price": f"{entry_price}%",
+        "shares": shares,
+        "created_at": str(trade.created_at)
+    }
+
+
+@app.get("/trades")
+def list_trades(db: Session = Depends(get_db)):
+    """Lista todas as apostas com PnL atual."""
+    trades = db.query(Trade).order_by(Trade.created_at.desc()).all()
+    result = []
+
+    for t in trades:
+        # Preco atual
+        market = db.query(Market).filter(Market.market_slug == t.market_slug).first()
+        current_price = t.entry_price
+        if market:
+            token = db.query(Token).filter(
+                Token.market_id == market.id,
+                Token.outcome == t.outcome
+            ).first()
+            if token:
+                current_price = round(token.price * 100, 2)
+
+        # PnL atual
+        if t.status == "open":
+            pnl = round((current_price - t.entry_price) / 100 * t.shares, 2)
+            pnl_pct = round((current_price - t.entry_price), 1)
+        else:
+            pnl = t.pnl
+            pnl_pct = round((t.exit_price - t.entry_price), 1) if t.exit_price else 0
+
+        result.append({
+            "id": t.id,
+            "market": t.question,
+            "outcome": t.outcome,
+            "amount": t.amount,
+            "entry_price": t.entry_price,
+            "current_price": current_price,
+            "shares": t.shares,
+            "pnl_usd": pnl,
+            "pnl_pct": pnl_pct,
+            "status": t.status,
+            "notes": t.notes,
+            "created_at": str(t.created_at)
+        })
+
+    return result
+
+
+@app.post("/trades/{trade_id}/close")
+def close_trade(trade_id: int, db: Session = Depends(get_db)):
+    """Fecha uma aposta pelo preco atual."""
+    trade = db.query(Trade).filter(Trade.id == trade_id).first()
+    if not trade:
+        return {"error": "Trade nao encontrado"}
+
+    market = db.query(Market).filter(Market.market_slug == trade.market_slug).first()
+    token = db.query(Token).filter(
+        Token.market_id == market.id,
+        Token.outcome == trade.outcome
+    ).first()
+
+    exit_price = round(token.price * 100, 2) if token else trade.entry_price
+    pnl = round((exit_price - trade.entry_price) / 100 * trade.shares, 2)
+
+    trade.exit_price = exit_price
+    trade.pnl = pnl
+    trade.status = "won" if pnl > 0 else "lost"
+    trade.closed_at = datetime.utcnow()
+    db.commit()
+
+    return {
+        "message": "Aposta fechada!",
+        "outcome": trade.outcome,
+        "entry_price": trade.entry_price,
+        "exit_price": exit_price,
+        "pnl_usd": pnl,
+        "status": trade.status
+    }
