@@ -16,7 +16,9 @@ app.add_middleware(
 )
 
 NEWS_API_KEY = "a595b3e7d7a047fda7a934162cf9c3ad"
-EDGE_THRESHOLD = 0.08
+EDGE_THRESHOLD = 0.05
+
+STOPWORDS = {"will", "the", "a", "an", "in", "on", "at", "to", "for", "of", "and", "or", "is", "be", "by", "as", "it", "its", "this", "that", "with", "from", "are", "was", "were", "has", "have", "had", "not", "but", "what", "who", "how", "when", "up", "down", "out", "win", "vs"}
 
 cache = {
     "markets": [],
@@ -30,27 +32,19 @@ def fetch_markets_data():
         url = "https://gamma-api.polymarket.com/markets?limit=100&order=volume24hr&ascending=false&active=true"
         response = requests.get(url, timeout=10)
         markets_data = response.json()
-
         markets = []
         for m in markets_data:
             yes_price = 50.0
             no_price = 50.0
-
-            # outcomePrices vem como string JSON ex: "[\"0.9995\", \"0.0005\"]"
             outcome_prices = m.get("outcomePrices")
             if outcome_prices:
                 try:
-                    if isinstance(outcome_prices, str):
-                        prices = json.loads(outcome_prices)
-                    else:
-                        prices = outcome_prices
+                    prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
                     if len(prices) >= 2:
                         yes_price = round(float(prices[0]) * 100, 1)
                         no_price = round(float(prices[1]) * 100, 1)
                 except:
                     pass
-
-            # Fallback para lastTradePrice
             if yes_price == 50.0:
                 last_trade = m.get("lastTradePrice")
                 if last_trade:
@@ -59,7 +53,6 @@ def fetch_markets_data():
                         no_price = round(100 - yes_price, 1)
                     except:
                         pass
-
             markets.append({
                 "id": m.get("id"),
                 "question": m.get("question"),
@@ -71,7 +64,6 @@ def fetch_markets_data():
                 "volume_24hr": m.get("volume24hr"),
                 "price_change_24h": m.get("oneDayPriceChange"),
             })
-
         return markets
     except Exception as e:
         return [{"error": str(e)}]
@@ -94,53 +86,61 @@ def fetch_news_data():
     except Exception as e:
         return []
 
+def extract_keywords(text):
+    words = text.lower().replace("?", "").replace(",", "").replace(".", "").split()
+    return {w for w in words if len(w) > 3 and w not in STOPWORDS}
+
 def analyze_signals(markets, news):
     signals = []
-    keywords_yes = ["win", "approved", "confirmed", "rises", "increases", "launches", "passes", "beats", "surge", "gains"]
-    keywords_no = ["fails", "loses", "denied", "rejected", "falls", "decreases", "cancels", "drops", "miss", "crash"]
+    keywords_positive = ["win", "approved", "confirmed", "rises", "increases", "launches", "passes", "beats", "surge", "gains", "attack", "strike", "hit", "yes", "success"]
+    keywords_negative = ["fails", "loses", "denied", "rejected", "falls", "decreases", "cancels", "drops", "miss", "crash", "ceasefire", "peace", "retreat", "no"]
 
     for market in markets:
-        question = market.get("question", "").lower()
         yes_price = market.get("yes_price", 50)
         no_price = market.get("no_price", 50)
 
         if yes_price == 50.0 and no_price == 50.0:
             continue
+        if yes_price >= 99.0 or yes_price <= 1.0:
+            continue  # mercado ja resolvido
+
+        question = market.get("question", "")
+        market_keywords = extract_keywords(question)
 
         for article in news:
-            title = (article.get("title") or "").lower()
-            description = (article.get("description") or "").lower()
+            title = article.get("title") or ""
+            description = article.get("description") or ""
             content = title + " " + description
+            content_keywords = extract_keywords(content)
+            content_lower = content.lower()
 
-            question_words = set(question.split())
-            content_words = set(content.split())
-            overlap = question_words & content_words
-
-            if len(overlap) < 2:
+            overlap = market_keywords & content_keywords
+            if len(overlap) < 1:
                 continue
 
-            yes_score = sum(1 for k in keywords_yes if k in content)
-            no_score = sum(1 for k in keywords_no if k in content)
+            pos_score = sum(1 for k in keywords_positive if k in content_lower)
+            neg_score = sum(1 for k in keywords_negative if k in content_lower)
 
-            if yes_score == 0 and no_score == 0:
+            if pos_score == 0 and neg_score == 0:
                 continue
 
-            direction = "YES" if yes_score >= no_score else "NO"
+            direction = "YES" if pos_score >= neg_score else "NO"
             current_prob = yes_price / 100 if direction == "YES" else no_price / 100
-            adjustment = abs(yes_score - no_score) * 0.05
+            adjustment = abs(pos_score - neg_score) * 0.06
             estimated_prob = min(0.99, max(0.01, current_prob + adjustment))
             edge = round(abs(estimated_prob - current_prob), 3)
 
             if edge >= EDGE_THRESHOLD:
                 signals.append({
                     "market": market.get("question"),
-                    "news_title": article.get("title"),
+                    "news_title": title,
                     "news_source": article.get("source"),
                     "direction": direction,
                     "current_probability": round(current_prob * 100, 1),
                     "estimated_probability": round(estimated_prob * 100, 1),
                     "edge": round(edge * 100, 1),
                     "confidence": round(min(0.95, 0.5 + edge), 2),
+                    "overlap_keywords": list(overlap),
                     "generated_at": datetime.utcnow().isoformat(),
                 })
 
