@@ -18,36 +18,45 @@ app.add_middleware(
 )
 
 # ==============================
-# DATABASE CONNECTION
+# DATABASE SAFE CONNECTION
 # ==============================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-conn = psycopg2.connect(DATABASE_URL)
-cursor = conn.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS market_prices (
-    market_id TEXT,
-    question TEXT,
-    yes_price FLOAT,
-    no_price FLOAT,
-    volume FLOAT,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-""")
+conn = None
+cursor = None
 
-conn.commit()
+if DATABASE_URL:
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS market_prices (
+            market_id TEXT,
+            question TEXT,
+            yes_price FLOAT,
+            no_price FLOAT,
+            volume FLOAT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+        conn.commit()
+        print("Database connected successfully")
+
+    except Exception as e:
+        print("Database connection failed:", e)
+else:
+    print("DATABASE_URL not found")
 
 # ==============================
 # CONFIG
 # ==============================
 
 NEWS_API_KEY = "a595b3e7d7a047fda7a934162cf9c3ad"
-EDGE_THRESHOLD = 0.05
 
 cache = {
     "markets": [],
-    "news": [],
     "signals": [],
     "last_update": None
 }
@@ -88,19 +97,22 @@ def fetch_markets_data():
 
             markets.append(market)
 
-            # SAVE PRICE HISTORY
-            cursor.execute("""
-                INSERT INTO market_prices (market_id, question, yes_price, no_price, volume)
-                VALUES (%s, %s, %s, %s, %s)
-            """, (
-                market["id"],
-                market["question"],
-                yes_price,
-                no_price,
-                market["volume"]
-            ))
+            # Save history if DB exists
+            if cursor:
+                cursor.execute("""
+                    INSERT INTO market_prices (market_id, question, yes_price, no_price, volume)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (
+                    market["id"],
+                    market["question"],
+                    yes_price,
+                    no_price,
+                    market["volume"]
+                ))
 
-        conn.commit()
+        if conn:
+            conn.commit()
+
         return markets
 
     except Exception as e:
@@ -134,7 +146,7 @@ def analyze_signals(markets):
     return signals
 
 # ==============================
-# BACKGROUND UPDATE
+# BACKGROUND LOOP
 # ==============================
 
 def update_cache():
@@ -146,7 +158,7 @@ def update_cache():
         cache["signals"] = signals
         cache["last_update"] = datetime.utcnow().isoformat()
 
-        time.sleep(900)  # 15 min
+        time.sleep(900)
 
 threading.Thread(target=update_cache, daemon=True).start()
 
@@ -170,6 +182,9 @@ def get_signals():
 
 @app.get("/history/{market_id}")
 def get_history(market_id: str):
+    if not cursor:
+        return {"error": "Database not connected"}
+
     cursor.execute("""
         SELECT yes_price, no_price, volume, timestamp
         FROM market_prices
