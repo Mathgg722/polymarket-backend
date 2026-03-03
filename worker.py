@@ -24,7 +24,7 @@ def parse_end_date(end_date_str):
 
 def fetch_markets():
     try:
-        response = requests.get(f"{BASE_URL}?limit=200")
+        response = requests.get(f"{BASE_URL}?limit=200&active=true&order=volume24hr&ascending=false")
         response.raise_for_status()
         data = response.json()
         if isinstance(data, dict):
