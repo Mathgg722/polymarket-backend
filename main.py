@@ -342,3 +342,22 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS markets (
+    id TEXT PRIMARY KEY,
+    question TEXT,
+    end_date TIMESTAMP
+);
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS market_prices (
+    market_id TEXT,
+    yes_price FLOAT,
+    no_price FLOAT,
+    volume FLOAT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+""")
+
+conn.commit()
