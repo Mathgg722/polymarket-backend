@@ -335,3 +335,10 @@ def get_status():
         "total_signals": len(cache["signals"]),
         "top_traders": len(cache["top_traders"]),
     }
+    import os
+import psycopg2
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+conn = psycopg2.connect(DATABASE_URL)
+cursor = conn.cursor()
