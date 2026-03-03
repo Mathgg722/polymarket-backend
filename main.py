@@ -17,7 +17,6 @@ app.add_middleware(
 NEWS_API_KEY = "a595b3e7d7a047fda7a934162cf9c3ad"
 EDGE_THRESHOLD = 0.08
 
-# Cache em memoria
 cache = {
     "markets": [],
     "news": [],
@@ -26,28 +25,47 @@ cache = {
 }
 
 def fetch_markets_data():
-    url = "https://gamma-api.polymarket.com/markets?limit=100&order=volume24hr&ascending=false&active=true"
     try:
+        # Buscar mercados
+        url = "https://gamma-api.polymarket.com/markets?limit=100&order=volume24hr&ascending=false&active=true"
         response = requests.get(url, timeout=10)
-        data = response.json()
+        markets_data = response.json()
+
         markets = []
-        for m in data:
-            prices = m.get("outcomePrices", ["0.5", "0.5"])
+        for m in markets_data:
+            market_id = m.get("id")
+            question = m.get("question")
+
+            # Buscar precos reais via tokens
+            yes_price = 50.0
+            no_price = 50.0
+
             try:
-                yes_price = round(float(prices[0]) * 100, 1)
-                no_price = round(float(prices[1]) * 100, 1)
+                tokens_url = f"https://clob.polymarket.com/markets/{market_id}"
+                token_resp = requests.get(tokens_url, timeout=5)
+                if token_resp.status_code == 200:
+                    token_data = token_resp.json()
+                    tokens = token_data.get("tokens", [])
+                    for token in tokens:
+                        outcome = token.get("outcome", "").upper()
+                        price = float(token.get("price", 0.5)) * 100
+                        if outcome == "YES":
+                            yes_price = round(price, 1)
+                        elif outcome == "NO":
+                            no_price = round(price, 1)
             except:
-                yes_price = 50.0
-                no_price = 50.0
+                pass
+
             markets.append({
-                "id": m.get("id"),
-                "question": m.get("question"),
+                "id": market_id,
+                "question": question,
                 "yes_price": yes_price,
                 "no_price": no_price,
                 "volume": m.get("volume"),
                 "liquidity": m.get("liquidity"),
                 "end_date": m.get("endDate"),
             })
+
         return markets
     except Exception as e:
         return []
@@ -72,20 +90,22 @@ def fetch_news_data():
 
 def analyze_signals(markets, news):
     signals = []
-    keywords_yes = ["win", "approved", "confirmed", "yes", "rises", "increases", "launches", "passes", "beats"]
-    keywords_no = ["fails", "loses", "denied", "rejected", "falls", "decreases", "cancels", "drops", "miss"]
+    keywords_yes = ["win", "approved", "confirmed", "rises", "increases", "launches", "passes", "beats", "surge", "gains"]
+    keywords_no = ["fails", "loses", "denied", "rejected", "falls", "decreases", "cancels", "drops", "miss", "crash"]
 
     for market in markets:
         question = market.get("question", "").lower()
         yes_price = market.get("yes_price", 50)
         no_price = market.get("no_price", 50)
 
+        if yes_price == 50.0 and no_price == 50.0:
+            continue
+
         for article in news:
             title = (article.get("title") or "").lower()
             description = (article.get("description") or "").lower()
             content = title + " " + description
 
-            # Verificar palavras chave em comum com a pergunta
             question_words = set(question.split())
             content_words = set(content.split())
             overlap = question_words & content_words
@@ -93,7 +113,6 @@ def analyze_signals(markets, news):
             if len(overlap) < 2:
                 continue
 
-            # Calcular impacto
             yes_score = sum(1 for k in keywords_yes if k in content)
             no_score = sum(1 for k in keywords_no if k in content)
 
@@ -119,7 +138,6 @@ def analyze_signals(markets, news):
                     "generated_at": datetime.utcnow().isoformat(),
                 })
 
-    # Ordenar por edge
     signals.sort(key=lambda x: x["edge"], reverse=True)
     return signals[:20]
 
@@ -129,27 +147,18 @@ def update_cache():
         markets = fetch_markets_data()
         news = fetch_news_data()
         signals = analyze_signals(markets, news)
-
         cache["markets"] = markets
         cache["news"] = news
         cache["signals"] = signals
         cache["last_update"] = datetime.utcnow().isoformat()
-
         print(f"Cache atualizado: {len(markets)} mercados, {len(news)} noticias, {len(signals)} sinais")
-        time.sleep(1800)  # 30 minutos
+        time.sleep(1800)
 
-# Iniciar thread de atualizacao
 threading.Thread(target=update_cache, daemon=True).start()
 
 @app.get("/")
 def root():
-    return {
-        "status": "ok",
-        "last_update": cache["last_update"],
-        "markets": len(cache["markets"]),
-        "news": len(cache["news"]),
-        "signals": len(cache["signals"])
-    }
+    return {"status": "ok", "last_update": cache["last_update"]}
 
 @app.get("/markets")
 def get_markets():
@@ -178,5 +187,4 @@ def get_status():
         "total_markets": len(cache["markets"]),
         "total_news": len(cache["news"]),
         "total_signals": len(cache["signals"]),
-        "next_update": "30 minutos apos ultimo update"
     }
