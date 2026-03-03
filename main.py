@@ -3,6 +3,7 @@ import threading
 import requests
 import psycopg2
 import os
+import json
 from fastapi import FastAPI
 
 app = FastAPI()
@@ -42,17 +43,21 @@ def collect_markets():
 
         for market in markets[:20]:
             market_id = market.get("id")
-            volume = float(market.get("volume", 0))
+            volume = float(market.get("liquidity", 0))
 
-            outcomes = market.get("outcomes", [])
-            outcome_prices = market.get("outcomePrices", [])
+            # Converter string para lista real
+            outcomes_raw = market.get("outcomes", "[]")
+            prices_raw = market.get("outcomePrices", "[]")
+
+            outcomes = json.loads(outcomes_raw)
+            prices = json.loads(prices_raw)
 
             yes_price = 0
             no_price = 0
 
-            if len(outcomes) == 2 and len(outcome_prices) == 2:
-                yes_price = float(outcome_prices[0])
-                no_price = float(outcome_prices[1])
+            if len(outcomes) == 2 and len(prices) == 2:
+                yes_price = float(prices[0])
+                no_price = float(prices[1])
 
             save_snapshot(market_id, yes_price, no_price, volume)
 
