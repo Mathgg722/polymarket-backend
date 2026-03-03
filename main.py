@@ -38,7 +38,9 @@ def save_snapshot(market_id, yes_price, no_price, volume):
 def collect_markets():
     try:
         response = requests.get("https://clob.polymarket.com/markets")
-        markets = response.json()
+        data = response.json()
+
+        markets = data.get("data", [])  # 🔥 AQUI ESTÁ A DIFERENÇA
 
         for market in markets[:20]:
 
