@@ -4,12 +4,13 @@ from database import SessionLocal, engine
 from models import Base, Market
 from typing import List
 
+# cria tabelas
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
 
-# Dependency correta
+# conexão com banco
 def get_db():
     db = SessionLocal()
     try:
@@ -25,8 +26,10 @@ def home():
 
 @app.get("/status")
 def status(db: Session = Depends(get_db)):
-    count = db.query(Market).count()
-    return {"stored_markets": count}
+    markets = db.query(Market).all()
+    return {
+        "count": len(markets)
+    }
 
 
 @app.get("/markets")
@@ -41,8 +44,6 @@ def get_markets(db: Session = Depends(get_db)):
             "question": m.question,
             "slug": m.market_slug,
             "end_date": m.end_date,
-            "volume": m.volume,
-            "liquidity": m.liquidity,
             "tokens": [
                 {
                     "outcome": t.outcome,
