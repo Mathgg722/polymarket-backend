@@ -163,35 +163,34 @@ def fetch_news_data():
     return all_news
 
 def fetch_top_traders():
-    try:
-        # Leaderboard por lucro - janela de 30 dias
-        url = "https://data-api.polymarket.com/leaderboard?window=1mo&sortBy=profit&limit=20"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            traders = []
-            for t in data:
-                traders.append({
-                    "username": t.get("name") or t.get("pseudonym") or t.get("proxyWallet", "")[:10],
-                    "profit": t.get("profit") or t.get("pnl"),
-                    "volume": t.get("volume"),
-                    "profit_pct": t.get("profitPct"),
-                    "positions_won": t.get("positionsWon"),
-                    "positions_lost": t.get("positionsLost"),
-                })
-            return traders
-    except:
-        pass
-
-    try:
-        # Fallback sem filtro
-        url = "https://data-api.polymarket.com/leaderboard?limit=20"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            return response.json()
-    except:
-        pass
-
+    headers = {"User-Agent": "Mozilla/5.0"}
+    urls = [
+        "https://data-api.polymarket.com/leaderboard?window=1mo&limit=20",
+        "https://data-api.polymarket.com/leaderboard?limit=20",
+        "https://gamma-api.polymarket.com/leaderboard?limit=20",
+        "https://data-api.polymarket.com/profiles?limit=20&sortBy=profit&sortOrder=DESC",
+    ]
+    for url in urls:
+        try:
+            response = requests.get(url, headers=headers, timeout=8)
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    traders = []
+                    items = data if isinstance(data, list) else data.get("data", [])
+                    for t in items[:20]:
+                        traders.append({
+                            "username": t.get("name") or t.get("pseudonym") or t.get("proxyWallet", "")[:12] or "Anonymous",
+                            "profit": t.get("profit") or t.get("pnl") or t.get("profitAndLoss"),
+                            "volume": t.get("volume"),
+                            "profit_pct": t.get("profitPct") or t.get("roi"),
+                            "positions_won": t.get("positionsWon") or t.get("marketsWon"),
+                            "positions_lost": t.get("positionsLost") or t.get("marketsLost"),
+                        })
+                    if traders:
+                        return traders
+        except:
+            continue
     return []
 
 def extract_keywords(text):
