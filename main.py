@@ -1,33 +1,19 @@
 from fastapi import FastAPI
-import requests
+from sqlalchemy.orm import Session
+from database import SessionLocal, engine
+from models import Base, Market, Token, Snapshot
+
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-BASE_URL = "https://gamma-api.polymarket.com/markets"
 
-
-def get_all_active_markets():
+def get_db():
+    db = SessionLocal()
     try:
-        all_markets = []
-        limit = 100
-
-        # 🔒 Pegamos só até 5 páginas (máx 500 mercados)
-        for page in range(5):
-            offset = page * limit
-            url = f"{BASE_URL}?active=true&limit={limit}&offset={offset}"
-            response = requests.get(url, timeout=10)
-            markets = response.json()
-
-            if not markets:
-                break
-
-            all_markets.extend(markets)
-
-        return all_markets
-
-    except Exception as e:
-        print("Erro ao coletar:", e)
-        return []
+        yield db
+    finally:
+        db.close()
 
 
 @app.get("/")
@@ -37,12 +23,28 @@ def home():
 
 @app.get("/status")
 def status():
-    markets = get_all_active_markets()
-    return {
-        "open_markets": len(markets)
-    }
+    db: Session = next(get_db())
+    count = db.query(Market).count()
+    return {"stored_markets": count}
 
 
 @app.get("/markets")
 def markets():
-    return get_all_active_markets()
+    db: Session = next(get_db())
+    markets = db.query(Market).all()
+
+    result = []
+    for m in markets:
+        result.append({
+            "question": m.question,
+            "slug": m.market_slug,
+            "end_date": m.end_date,
+            "tokens": [
+                {
+                    "outcome": t.outcome,
+                    "price": t.price
+                } for t in m.tokens
+            ]
+        })
+
+    return result
