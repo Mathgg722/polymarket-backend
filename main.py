@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from database import SessionLocal, engine
 from models import Base, Market
-from typing import List
+from datetime import datetime
 
 # cria tabelas
 Base.metadata.create_all(bind=engine)
@@ -26,15 +26,24 @@ def home():
 
 @app.get("/status")
 def status(db: Session = Depends(get_db)):
-    markets = db.query(Market).all()
+    total = db.query(Market).count()
     return {
-        "count": len(markets)
+        "total_markets_in_database": total
     }
 
 
 @app.get("/markets")
-def get_markets(db: Session = Depends(get_db)):
-    markets = db.query(Market).all()
+def get_active_markets(db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+
+    markets = (
+        db.query(Market)
+        .filter(
+            (Market.end_date == None) |
+            (Market.end_date > now)
+        )
+        .all()
+    )
 
     result = []
 
