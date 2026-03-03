@@ -382,3 +382,147 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
         "pnl_usd": pnl,
         "status": trade.status
     }
+
+
+# ─────────────────────────────────────────
+# SISTEMA DE LÍDERES / TOP TRADERS
+# ─────────────────────────────────────────
+
+@app.get("/leaders")
+def get_leaders(db: Session = Depends(get_db)):
+    """
+    Busca top traders do Polymarket via API pública.
+    Mostra quem está lucrando mais e em quais mercados estão apostando.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+
+    leaders = []
+
+    # Tenta buscar leaderboard por diferentes janelas de tempo
+    windows = [
+        ("all", "Todo período"),
+        ("1mo", "Último mês"),
+        ("1w", "Última semana"),
+    ]
+
+    for window, label in windows:
+        try:
+            url = f"https://data-api.polymarket.com/leaderboard?window={window}&limit=20"
+            resp = requests.get(url, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data if isinstance(data, list) else data.get("data", [])
+                if items:
+                    for t in items[:20]:
+                        address = t.get("proxyWallet") or t.get("address") or ""
+                        leaders.append({
+                            "rank": len(leaders) + 1,
+                            "username": t.get("name") or t.get("pseudonym") or address[:10] + "...",
+                            "address": address,
+                            "profit_usd": t.get("profit") or t.get("pnl") or 0,
+                            "volume_usd": t.get("volume") or 0,
+                            "positions_won": t.get("positionsWon") or t.get("marketsWon") or 0,
+                            "positions_lost": t.get("positionsLost") or t.get("marketsLost") or 0,
+                            "win_rate": round(
+                                (t.get("positionsWon") or 0) /
+                                max((t.get("positionsWon") or 0) + (t.get("positionsLost") or 0), 1) * 100, 1
+                            ),
+                            "window": label,
+                            "polymarket_url": f"https://polymarket.com/profile/{address}" if address else None,
+                        })
+                    break  # Se achou dados para alguma janela, para
+        except:
+            continue
+
+    # Se API oficial não retornar, busca via gamma API profiles
+    if not leaders:
+        try:
+            url = "https://gamma-api.polymarket.com/profiles?limit=20&sortBy=profit&sortOrder=DESC"
+            resp = requests.get(url, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data if isinstance(data, list) else data.get("data", [])
+                for i, t in enumerate(items[:20]):
+                    address = t.get("proxyWallet") or t.get("address") or ""
+                    leaders.append({
+                        "rank": i + 1,
+                        "username": t.get("name") or t.get("pseudonym") or address[:10] + "...",
+                        "address": address,
+                        "profit_usd": t.get("profit") or t.get("pnl") or 0,
+                        "volume_usd": t.get("volume") or 0,
+                        "win_rate": None,
+                        "window": "Todo período",
+                        "polymarket_url": f"https://polymarket.com/profile/{address}" if address else None,
+                    })
+        except:
+            pass
+
+    if not leaders:
+        return {
+            "status": "unavailable",
+            "message": "API de traders não pública. Acesse manualmente:",
+            "links": {
+                "leaderboard_oficial": "https://polymarket.com/leaderboard",
+                "polymarket_whales": "https://polymarketwhales.info",
+                "grandes_apostas": "https://polymarket.com/activity"
+            }
+        }
+
+    return {
+        "status": "ok",
+        "total": len(leaders),
+        "leaders": leaders,
+        "sources": {
+            "leaderboard_oficial": "https://polymarket.com/leaderboard",
+            "polymarket_whales": "https://polymarketwhales.info"
+        }
+    }
+
+
+@app.get("/leaders/{address}/positions")
+def get_leader_positions(address: str):
+    """
+    Busca posições abertas de um trader específico pelo endereço da carteira.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+
+    positions = []
+
+    try:
+        # Busca posições via data-api
+        url = f"https://data-api.polymarket.com/positions?user={address}&sizeThreshold=10&limit=50"
+        resp = requests.get(url, headers=headers, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("data", [])
+            for p in items:
+                positions.append({
+                    "market": p.get("title") or p.get("market") or p.get("question"),
+                    "outcome": p.get("outcome"),
+                    "size": p.get("size") or p.get("currentValue"),
+                    "avg_price": p.get("avgPrice") or p.get("curPrice"),
+                    "pnl": p.get("cashPnl") or p.get("pnl"),
+                    "market_slug": p.get("conditionId") or p.get("marketSlug"),
+                })
+    except:
+        pass
+
+    if not positions:
+        return {
+            "status": "unavailable",
+            "message": f"Veja posições deste trader em:",
+            "url": f"https://polymarket.com/profile/{address}"
+        }
+
+    return {
+        "address": address,
+        "total_positions": len(positions),
+        "positions": positions,
+        "polymarket_url": f"https://polymarket.com/profile/{address}"
+    }
