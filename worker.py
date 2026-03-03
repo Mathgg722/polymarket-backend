@@ -9,56 +9,93 @@ BASE_URL = "https://gamma-api.polymarket.com/markets"
 
 
 def fetch_markets():
-    response = requests.get(f"{BASE_URL}?active=true&limit=200")
-    return response.json()
+    try:
+        response = requests.get(f"{BASE_URL}?limit=200")
+        response.raise_for_status()
+        data = response.json()
+
+        # Algumas vezes a API retorna dict com "markets"
+        if isinstance(data, dict):
+            return data.get("markets", [])
+        
+        return data
+
+    except Exception as e:
+        print("Erro ao buscar mercados:", e)
+        return []
 
 
 def run():
+    print("🚀 WORKER INICIOU")
+
     while True:
-        print("Atualizando mercados...")
+        print("🔄 Atualizando mercados...")
+
         db = SessionLocal()
 
         markets = fetch_markets()
+        print("📊 Quantidade recebida:", len(markets))
+
+        if len(markets) == 0:
+            print("⚠️ Nenhum mercado recebido da API")
 
         for m in markets:
-            existing = db.query(Market).filter_by(market_slug=m["slug"]).first()
+            try:
+                slug = m.get("slug")
+                question = m.get("question")
+                end_date = m.get("endDate")
 
-            if not existing:
-                existing = Market(
-                    market_slug=m["slug"],
-                    question=m["question"],
-                    end_date=m.get("endDate")
-                )
-                db.add(existing)
-                db.commit()
-                db.refresh(existing)
+                if not slug:
+                    continue
 
-            for token in m.get("tokens", []):
-                token_obj = db.query(Token).filter_by(
-                    token_id=token["tokenId"]
-                ).first()
+                existing = db.query(Market).filter_by(market_slug=slug).first()
 
-                if not token_obj:
-                    token_obj = Token(
-                        token_id=token["tokenId"],
-                        outcome=token["outcome"],
-                        price=float(token["price"]),
-                        market_id=existing.id
+                if not existing:
+                    existing = Market(
+                        market_slug=slug,
+                        question=question,
+                        end_date=end_date
                     )
-                    db.add(token_obj)
-                else:
-                    token_obj.price = float(token["price"])
+                    db.add(existing)
+                    db.flush()  # pega ID sem commit ainda
 
-                snapshot = Snapshot(
-                    token_id=token["tokenId"],
-                    price=float(token["price"])
-                )
-                db.add(snapshot)
+                tokens = m.get("tokens", [])
+
+                for token in tokens:
+                    token_id = token.get("tokenId")
+                    outcome = token.get("outcome")
+                    price = token.get("price")
+
+                    if not token_id:
+                        continue
+
+                    token_obj = db.query(Token).filter_by(token_id=token_id).first()
+
+                    if not token_obj:
+                        token_obj = Token(
+                            token_id=token_id,
+                            outcome=outcome,
+                            price=float(price or 0),
+                            market_id=existing.id
+                        )
+                        db.add(token_obj)
+                    else:
+                        token_obj.price = float(price or 0)
+
+                    snapshot = Snapshot(
+                        token_id=token_id,
+                        price=float(price or 0)
+                    )
+                    db.add(snapshot)
+
+            except Exception as e:
+                print("Erro ao processar mercado:", e)
 
         db.commit()
         db.close()
 
-        print("Atualização concluída.")
+        print("✅ Atualização concluída.\n")
+
         time.sleep(60)
 
 
