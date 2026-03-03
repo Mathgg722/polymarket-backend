@@ -5,7 +5,6 @@ import psycopg2
 import os
 import json
 from fastapi import FastAPI
-from datetime import datetime
 
 app = FastAPI()
 
@@ -42,19 +41,11 @@ def collect_markets():
         response = requests.get("https://gamma-api.polymarket.com/markets")
         markets = response.json()
 
-        now = datetime.utcnow()
-
         for market in markets:
-            end_date = market.get("endDate")
 
-            # Ignora mercados antigos
-            if not end_date:
+            # 🔥 FILTRO CORRETO
+            if market.get("closed") is True:
                 continue
-
-            end_date_obj = datetime.fromisoformat(end_date.replace("Z", ""))
-
-            if end_date_obj < now:
-                continue  # mercado já encerrado
 
             market_id = market.get("id")
             volume = float(market.get("liquidity", 0))
