@@ -986,3 +986,267 @@ def get_all_intelligence(db: Session = Depends(get_db)):
         "atualizados_em": now.isoformat(),
         "mercados": results
     }
+
+
+# ─────────────────────────────────────────
+# /best — MELHORES APOSTAS DO MOMENTO
+# Filtro rigoroso para o teste de $100
+# ─────────────────────────────────────────
+
+@app.get("/best")
+def get_best_opportunities(db: Session = Depends(get_db)):
+    """
+    Retorna apenas as MELHORES anomalias para apostar.
+    Critérios rigorosos:
+    - Score >= 50
+    - Preço entre 20% e 80% (tem edge real)
+    - Variação consistente em 15min E 1h
+    - Confirma com notícias via IA
+    Ideal para estratégia de $10 por aposta.
+    """
+    now = datetime.utcnow()
+    window_5m  = now - timedelta(minutes=5)
+    window_15m = now - timedelta(minutes=15)
+    window_1h  = now - timedelta(hours=1)
+
+    candidates = []
+    tokens = db.query(Token).all()
+
+    for token in tokens:
+        current_price = token.price
+
+        # FILTRO 1: Mercado entre 20% e 80% — tem edge real
+        if current_price < 0.20 or current_price > 0.80:
+            continue
+
+        if current_price == 0:
+            continue
+
+        def get_snap(window):
+            return (
+                db.query(Snapshot)
+                .filter(
+                    Snapshot.token_id == token.token_id,
+                    Snapshot.timestamp <= window
+                )
+                .order_by(Snapshot.timestamp.desc())
+                .first()
+            )
+
+        snap_5m  = get_snap(window_5m)
+        snap_15m = get_snap(window_15m)
+        snap_1h  = get_snap(window_1h)
+
+        if not snap_5m or not snap_15m:
+            continue
+
+        change_5m  = round((current_price - snap_5m.price) * 100, 2)
+        change_15m = round((current_price - snap_15m.price) * 100, 2)
+        change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
+
+        # FILTRO 2: Variação >= 5% em 5min
+        if abs(change_5m) < 5.0:
+            continue
+
+        # FILTRO 3: Tendência consistente — 15min na mesma direção
+        if change_5m > 0 and change_15m < 0:
+            continue
+        if change_5m < 0 and change_15m > 0:
+            continue
+
+        # FILTRO 4: 1h também na mesma direção (se disponível)
+        if change_1h is not None:
+            if change_5m > 0 and change_1h < -5:
+                continue
+            if change_5m < 0 and change_1h > 5:
+                continue
+
+        # Calcula score
+        score = 0
+        score += min(abs(change_5m) * 2, 40)
+        score += min(abs(change_15m) * 1.5, 25)
+        score += min(abs(change_1h or 0), 20)
+        # Bonus por estar em zona de valor (40-60%)
+        if 0.40 <= current_price <= 0.60:
+            score += 15
+        confianca_score = round(min(score, 100), 0)
+
+        # FILTRO 5: Score mínimo 40
+        if confianca_score < 40:
+            continue
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        # FILTRO 6: Confirma com notícias via IA
+        keywords = market.question.replace("?","").replace("Will ","")[:60]
+        articles = fetch_news_for_query(keywords, max_results=5)
+        analysis = analyze_with_claude(market.question, articles)
+
+        ai_score = analysis.get("score_yes", 50)
+        rec = analysis.get("recomendacao", "EVITE")
+        confianca_ia = analysis.get("confianca", 0)
+
+        # FILTRO 7: IA deve confirmar a direção
+        if change_5m > 0 and rec == "APOSTE NO":
+            continue
+        if change_5m < 0 and rec == "APOSTE YES":
+            continue
+
+        # Score final combinado (mercado + IA)
+        score_final = round((confianca_score * 0.6) + (confianca_ia * 100 * 0.4), 1)
+
+        # Direção recomendada
+        direcao = "YES" if change_5m > 0 else "NO"
+        preco_entrada = round(current_price * 100, 1)
+
+        # Potencial de lucro se resolver a favor
+        potencial_lucro = round((100 - preco_entrada) / preco_entrada * 10, 2) if direcao == "YES" else round(preco_entrada / (100 - preco_entrada) * 10, 2)
+
+        candidates.append({
+            "market": market.question,
+            "slug": market.market_slug,
+            "outcome": token.outcome,
+            "direcao": direcao,
+            "preco_entrada": preco_entrada,
+            "potencial_lucro_10usd": potencial_lucro,
+            "score_mercado": confianca_score,
+            "score_ia": round(confianca_ia * 100, 0),
+            "score_final": score_final,
+            "change_5m": change_5m,
+            "change_15m": change_15m,
+            "change_1h": change_1h,
+            "recomendacao_ia": rec,
+            "resumo_ia": analysis.get("resumo"),
+            "fontes": len(articles),
+            "noticias": [a["title"] for a in articles[:3]],
+            "sinal": "🟢 APOSTE" if score_final >= 60 else "🟡 CONSIDERE",
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
+            "detectado_em": now.isoformat(),
+        })
+
+    # Ordena pelo score final
+    candidates.sort(key=lambda x: x["score_final"], reverse=True)
+
+    total = len(candidates)
+    top = candidates[:5]  # Máximo 5 apostas por vez
+
+    return {
+        "total_oportunidades": total,
+        "top_apostas": top,
+        "capital_necessario": len(top) * 10,
+        "resumo": f"{total} oportunidades encontradas. Top {len(top)} recomendadas para $10 cada.",
+        "atualizado_em": now.isoformat(),
+    }
+
+
+# ─────────────────────────────────────────
+# /performance — DASHBOARD $100 EM 30 DIAS
+# ─────────────────────────────────────────
+
+@app.get("/performance")
+def get_performance(db: Session = Depends(get_db)):
+    """
+    Dashboard completo de performance das apostas.
+    Mostra ROI, taxa de acerto, e se o PolySignal está ajudando.
+    """
+    trades = db.query(Trade).order_by(Trade.created_at.asc()).all()
+
+    if not trades:
+        return {
+            "mensagem": "Nenhuma aposta registrada ainda.",
+            "capital_inicial": 100,
+            "capital_atual": 100,
+            "roi_pct": 0,
+            "trades": []
+        }
+
+    total_apostado = sum(t.amount for t in trades)
+    total_aberto = sum(t.amount for t in trades if t.status == "open")
+
+    # PnL de trades fechados
+    pnl_fechados = sum(t.pnl or 0 for t in trades if t.status in ["won", "lost"])
+
+    # PnL de trades abertos (calculado ao vivo)
+    pnl_abertos = 0
+    for t in trades:
+        if t.status == "open":
+            market = db.query(Market).filter(Market.market_slug == t.market_slug).first()
+            if market:
+                token = db.query(Token).filter(
+                    Token.market_id == market.id,
+                    Token.outcome == t.outcome
+                ).first()
+                if token:
+                    current = round(token.price * 100, 2)
+                    pnl_abertos += round((current - t.entry_price) / 100 * t.shares, 2)
+
+    pnl_total = round(pnl_fechados + pnl_abertos, 2)
+    capital_atual = round(100 + pnl_total, 2)
+    roi = round(pnl_total / 100 * 100, 1)
+
+    # Taxa de acerto
+    fechados = [t for t in trades if t.status in ["won", "lost"]]
+    ganhos = [t for t in fechados if t.status == "won"]
+    taxa_acerto = round(len(ganhos) / max(len(fechados), 1) * 100, 1)
+
+    # Maior ganho e maior perda
+    pnls = [t.pnl for t in fechados if t.pnl is not None]
+    maior_ganho = max(pnls) if pnls else 0
+    maior_perda = min(pnls) if pnls else 0
+
+    # Status geral
+    if roi > 10:
+        status = "🟢 EXCELENTE — Sistema funcionando!"
+    elif roi > 0:
+        status = "🟡 POSITIVO — Sistema ajudando"
+    elif roi > -10:
+        status = "🟠 NEGATIVO — Ajustar estratégia"
+    else:
+        status = "🔴 ATENÇÃO — Revisar sistema"
+
+    # Lista de trades
+    trades_lista = []
+    for t in trades:
+        market = db.query(Market).filter(Market.market_slug == t.market_slug).first()
+        current_price = t.entry_price
+        if market and t.status == "open":
+            token = db.query(Token).filter(
+                Token.market_id == market.id,
+                Token.outcome == t.outcome
+            ).first()
+            if token:
+                current_price = round(token.price * 100, 2)
+
+        pnl = t.pnl if t.status != "open" else round((current_price - t.entry_price) / 100 * t.shares, 2)
+
+        trades_lista.append({
+            "id": t.id,
+            "market": t.question,
+            "outcome": t.outcome,
+            "amount": t.amount,
+            "entry_price": t.entry_price,
+            "current_price": current_price,
+            "pnl_usd": round(pnl or 0, 2),
+            "pnl_pct": round((current_price - t.entry_price), 1),
+            "status": t.status,
+            "created_at": str(t.created_at),
+        })
+
+    return {
+        "status_geral": status,
+        "capital_inicial": 100,
+        "capital_atual": capital_atual,
+        "pnl_total_usd": pnl_total,
+        "roi_pct": roi,
+        "total_apostas": len(trades),
+        "apostas_abertas": len([t for t in trades if t.status == "open"]),
+        "apostas_fechadas": len(fechados),
+        "taxa_acerto_pct": taxa_acerto,
+        "maior_ganho_usd": maior_ganho,
+        "maior_perda_usd": maior_perda,
+        "total_apostado_usd": total_apostado,
+        "trades": trades_lista,
+        "atualizado_em": datetime.utcnow().isoformat(),
+    }
