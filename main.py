@@ -2408,3 +2408,18 @@ def backtest_v2():
         return {'total_simulados': total, 'acertos': acertos, 'erros': erros, 'win_rate_pct': win_rate, 'amostra': amostra, 'atualizado_em': datetime.utcnow().isoformat()}
     finally:
         db.close()
+
+@app.get('/debug/tokens')
+def debug_tokens():
+    db = SessionLocal()
+    try:
+        total_tokens = db.query(Token).count()
+        tokens_sample = db.query(Token).limit(20).all()
+        total_snaps = db.query(Snapshot).count()
+        return {
+            'total_tokens': total_tokens,
+            'total_snapshots': total_snaps,
+            'amostra_tokens': [{'id': t.token_id, 'outcome': t.outcome, 'price': t.price, 'price_pct': round(t.price * 100, 1)} for t in tokens_sample]
+        }
+    finally:
+        db.close()
