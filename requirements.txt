@@ -3,3 +3,4 @@ uvicorn
 requests
 sqlalchemy
 psycopg2-binary
+anthropic>=0.34.0
