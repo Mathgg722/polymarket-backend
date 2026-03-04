@@ -1979,3 +1979,308 @@ def refresh_markets(db: Session = Depends(get_db)):
         "atualizado_em": now.isoformat(),
     }
 
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# MARKET INEFFICIENCY ENGINE
+# Motor quantitativo â€” diferencial do PolySignal
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+@app.get("/metrics/{slug}")
+def get_market_metrics(slug: str, db: Session = Depends(get_db)):
+    """
+    4 mÃ©tricas quantitativas por mercado:
+    - volatility_score: movimento atual vs mÃ©dia histÃ³rica
+    - mispricing_score: desvio do preÃ§o justo histÃ³rico
+    - reversal_probability: % de vezes que reverteu apÃ³s movimento similar
+    - confidence_score: convicÃ§Ã£o 0-100 baseada em dados reais
+    """
+    now = datetime.utcnow()
+
+    market = db.query(Market).filter(Market.market_slug == slug).first()
+    if not market:
+        return {"error": "Mercado nÃ£o encontrado"}
+
+    metrics_por_token = []
+
+    for token in market.tokens:
+        current_price = token.price
+        if current_price == 0:
+            continue
+
+        # â”€â”€ Coleta histÃ³rico completo do token â”€â”€
+        snapshots = (
+            db.query(Snapshot)
+            .filter(Snapshot.token_id == token.token_id)
+            .order_by(Snapshot.timestamp.desc())
+            .limit(2000)
+            .all()
+        )
+
+        if len(snapshots) < 10:
+            continue
+
+        prices = [s.price for s in snapshots]
+        times  = [s.timestamp for s in snapshots]
+
+        # â”€â”€ 1. VOLATILITY SCORE â”€â”€
+        # Compara movimento recente vs mÃ©dia histÃ³rica
+        recent_prices = prices[:12]   # ~1h
+        all_changes = [abs(prices[i] - prices[i+1]) for i in range(len(prices)-1)]
+        recent_changes = [abs(recent_prices[i] - recent_prices[i+1]) for i in range(len(recent_prices)-1)]
+
+        avg_historical = sum(all_changes) / max(len(all_changes), 1)
+        avg_recent     = sum(recent_changes) / max(len(recent_changes), 1)
+
+        volatility_ratio = round(avg_recent / max(avg_historical, 0.0001), 2)
+        volatility_score = min(round(volatility_ratio * 25, 1), 100)
+
+        if volatility_ratio > 3:
+            volatility_label = "EXTREMA"
+        elif volatility_ratio > 2:
+            volatility_label = "ALTA"
+        elif volatility_ratio > 1.2:
+            volatility_label = "ELEVADA"
+        else:
+            volatility_label = "NORMAL"
+
+        # â”€â”€ 2. MISPRICING SCORE â”€â”€
+        # Compara preÃ§o atual com mÃ©dia histÃ³rica ponderada
+        if len(prices) >= 50:
+            hist_mean = sum(prices[12:62]) / 50   # mÃ©dia 1h-5h atrÃ¡s
+            deviation = abs(current_price - hist_mean)
+            mispricing_score = min(round(deviation * 300, 1), 100)
+            price_direction = "ACIMA" if current_price > hist_mean else "ABAIXO"
+            hist_mean_pct = round(hist_mean * 100, 1)
+        else:
+            mispricing_score = 0
+            price_direction = "NEUTRO"
+            hist_mean_pct = round(current_price * 100, 1)
+
+        # â”€â”€ 3. REVERSAL PROBABILITY â”€â”€
+        # % de vezes que apÃ³s subida/queda similar, o preÃ§o reverteu
+        reversals = 0
+        total_similar = 0
+        window = 6  # ~30 min
+
+        for i in range(window, len(prices) - window):
+            move = prices[i-window] - prices[i]  # movimento antes
+            future = prices[i] - prices[i+window]  # movimento depois
+
+            if abs(move) > 0.03:  # movimento > 3%
+                total_similar += 1
+                if (move > 0 and future < -0.01) or (move < 0 and future > 0.01):
+                    reversals += 1
+
+        reversal_probability = round(reversals / max(total_similar, 1) * 100, 1)
+
+        # â”€â”€ 4. CONFIDENCE SCORE â”€â”€
+        # ConvicÃ§Ã£o baseada em volume de evidÃªncias
+        evidence_points = 0
+        evidence_points += min(len(snapshots) / 100, 20)      # histÃ³rico longo
+        evidence_points += min(volatility_score * 0.3, 25)    # volatilidade
+        evidence_points += min(mispricing_score * 0.3, 25)    # distorÃ§Ã£o
+        evidence_points += min(total_similar / 5, 15)         # padrÃµes similares
+        if reversal_probability > 60:
+            evidence_points += 15                              # alta prob reversÃ£o
+
+        confidence_score = min(round(evidence_points, 1), 100)
+
+        # â”€â”€ Edge detectado â”€â”€
+        edge = None
+        edge_direction = None
+
+        if mispricing_score >= 20 and confidence_score >= 40:
+            if price_direction == "ACIMA":
+                edge = "POSSIVEL_QUEDA"
+                edge_direction = "NO"
+            else:
+                edge = "POSSIVEL_SUBIDA"
+                edge_direction = "YES"
+
+        if volatility_ratio > 2 and reversal_probability > 55:
+            edge = "REVERSAO_PROVAVEL"
+            recent_change = prices[0] - prices[min(12, len(prices)-1)]
+            edge_direction = "NO" if recent_change > 0 else "YES"
+
+        metrics_por_token.append({
+            "outcome": token.outcome,
+            "current_price_pct": round(current_price * 100, 1),
+            "volatility": {
+                "score": volatility_score,
+                "label": volatility_label,
+                "ratio_vs_historico": volatility_ratio,
+            },
+            "mispricing": {
+                "score": mispricing_score,
+                "preco_historico_medio_pct": hist_mean_pct,
+                "desvio_direcao": price_direction,
+            },
+            "reversal": {
+                "probability_pct": reversal_probability,
+                "padroes_similares_encontrados": total_similar,
+            },
+            "confidence_score": confidence_score,
+            "edge": edge,
+            "edge_direction": edge_direction,
+            "snapshots_analisados": len(snapshots),
+        })
+
+    if not metrics_por_token:
+        return {"error": "Dados insuficientes para anÃ¡lise"}
+
+    # Score geral do mercado
+    max_confidence = max(m["confidence_score"] for m in metrics_por_token)
+    has_edge = any(m["edge"] for m in metrics_por_token)
+
+    return {
+        "market": market.question,
+        "slug": slug,
+        "has_edge": has_edge,
+        "max_confidence": max_confidence,
+        "tokens": metrics_por_token,
+        "polymarket_url": f"https://polymarket.com/event/{slug}",
+        "analisado_em": now.isoformat(),
+    }
+
+
+@app.get("/inefficiencies")
+def get_inefficiencies(db: Session = Depends(get_db)):
+    """
+    TOP mercados com maior distorÃ§Ã£o estatÃ­stica agora.
+    SÃ³ mostra onde existe edge real baseado em histÃ³rico.
+    Este Ã© o diferencial do PolySignal.
+    """
+    now = datetime.utcnow()
+    window_5m  = now - timedelta(minutes=5)
+    window_1h  = now - timedelta(hours=1)
+
+    results = []
+    tokens = db.query(Token).all()
+
+    for token in tokens:
+        current_price = token.price
+        if current_price < 0.10 or current_price > 0.90:
+            continue
+        if current_price == 0:
+            continue
+
+        snapshots = (
+            db.query(Snapshot)
+            .filter(Snapshot.token_id == token.token_id)
+            .order_by(Snapshot.timestamp.desc())
+            .limit(500)
+            .all()
+        )
+
+        if len(snapshots) < 20:
+            continue
+
+        prices = [s.price for s in snapshots]
+
+        # Movimento recente
+        snap_5m = next((s for s in snapshots if s.timestamp <= window_5m), None)
+        snap_1h = next((s for s in snapshots if s.timestamp <= window_1h), None)
+
+        change_5m = round((current_price - snap_5m.price) * 100, 2) if snap_5m else 0
+        change_1h = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
+
+        if abs(change_5m) < 3:
+            continue
+
+        # Volatilidade histÃ³rica
+        all_changes = [abs(prices[i] - prices[i+1]) for i in range(min(len(prices)-1, 200))]
+        avg_hist = sum(all_changes) / max(len(all_changes), 1)
+        volatility_ratio = abs(change_5m / 100) / max(avg_hist, 0.0001)
+
+        # Mispricing
+        hist_mean = sum(prices[12:62]) / min(50, len(prices[12:62])) if len(prices) > 12 else current_price
+        mispricing = abs(current_price - hist_mean)
+        mispricing_score = min(round(mispricing * 300, 1), 100)
+
+        # ReversÃ£o histÃ³rica
+        reversals = 0
+        total_similar = 0
+        for i in range(6, min(len(prices) - 6, 200)):
+            move = prices[i-6] - prices[i]
+            future = prices[i] - prices[i+6]
+            if abs(move) > 0.03:
+                total_similar += 1
+                if (move > 0 and future < -0.01) or (move < 0 and future > 0.01):
+                    reversals += 1
+
+        reversal_prob = round(reversals / max(total_similar, 1) * 100, 1)
+
+        # Score de ineficiÃªncia
+        ineff_score = round(
+            (volatility_ratio * 20) +
+            (mispricing_score * 0.4) +
+            (reversal_prob * 0.4),
+            1
+        )
+        ineff_score = min(ineff_score, 100)
+
+        if ineff_score < 25:
+            continue
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        # Edge direction
+        if change_5m > 0 and reversal_prob > 55:
+            edge = "REVERSAO_QUEDA"
+            apostar = "NO"
+        elif change_5m < 0 and reversal_prob > 55:
+            edge = "REVERSAO_SUBIDA"
+            apostar = "YES"
+        elif abs(change_5m) > 8:
+            edge = "MOVIMENTO_EXTREMO"
+            apostar = "NO" if change_5m > 0 else "YES"
+        else:
+            edge = "DISTORCAO"
+            apostar = "YES" if current_price < hist_mean else "NO"
+
+        # ConvicÃ§Ã£o
+        if ineff_score >= 70:
+            conviction = "ðŸ”´ ALTA"
+        elif ineff_score >= 50:
+            conviction = "ðŸŸ  MÃ‰DIA"
+        elif ineff_score >= 35:
+            conviction = "ðŸŸ¡ MODERADA"
+        else:
+            conviction = "ðŸ”µ BAIXA"
+
+        results.append({
+            "market": market.question,
+            "slug": market.market_slug,
+            "outcome": token.outcome,
+            "current_price_pct": round(current_price * 100, 1),
+            "change_5m": change_5m,
+            "change_1h": change_1h,
+            "ineficiencia_score": ineff_score,
+            "conviction": conviction,
+            "edge_tipo": edge,
+            "apostar": apostar,
+            "metricas": {
+                "volatilidade_vs_historico": round(volatility_ratio, 2),
+                "mispricing_score": mispricing_score,
+                "reversal_probability_pct": reversal_prob,
+                "padroes_similares": total_similar,
+            },
+            "snapshots_analisados": len(snapshots),
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
+            "detectado_em": now.isoformat(),
+        })
+
+    results.sort(key=lambda x: x["ineficiencia_score"], reverse=True)
+    top = results[:10]
+
+    return {
+        "total_ineficiencias": len(results),
+        "top_10": top,
+        "resumo": f"{len(results)} distorÃ§Ãµes detectadas. Top 10 com maior edge.",
+        "metodologia": "Volatility Ratio + Mispricing Score + Reversal Probability",
+        "atualizado_em": now.isoformat(),
+    }
+
