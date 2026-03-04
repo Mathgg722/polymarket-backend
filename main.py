@@ -1541,3 +1541,441 @@ def get_best_v2(db: Session = Depends(get_db)):
         "resumo": f"{len(candidates)} oportunidades. Top {len(top)} confirmadas por m├║ltiplas fontes.",
         "atualizado_em": now.isoformat(),
     }
+# SISTEMA MULTI-FONTE DE INTELIGÃŠNCIA
+# Reddit + Google Trends + Whales + NewsAPI
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+def fetch_reddit(query: str) -> list:
+    """Busca posts relevantes no Reddit."""
+    results = []
+    subreddits = ["worldnews", "geopolitics", "politics", "economics", "sports"]
+    try:
+        for sub in subreddits[:3]:
+            url = f"https://www.reddit.com/r/{sub}/search.json"
+            params = {"q": query, "sort": "new", "limit": 5, "t": "day"}
+            headers = {"User-Agent": "PolySignal/1.0"}
+            resp = requests.get(url, params=params, headers=headers, timeout=6)
+            if resp.status_code == 200:
+                posts = resp.json().get("data", {}).get("children", [])
+                for p in posts:
+                    data = p.get("data", {})
+                    results.append({
+                        "title": data.get("title", ""),
+                        "score": data.get("score", 0),
+                        "comments": data.get("num_comments", 0),
+                        "url": f"https://reddit.com{data.get('permalink','')}",
+                        "fonte": f"Reddit r/{sub}"
+                    })
+    except Exception as e:
+        print(f"Reddit erro: {e}")
+    return results[:8]
+
+
+def fetch_google_trends(query: str) -> dict:
+    """Verifica se o assunto estÃ¡ em alta no Google."""
+    try:
+        url = "https://trends.google.com/trends/api/dailytrends"
+        params = {"hl": "en-US", "tz": "-180", "geo": "US", "ns": "15"}
+        resp = requests.get(url, params=params, timeout=6)
+        if resp.status_code == 200:
+            # Remove o prefixo de seguranÃ§a do Google
+            text = resp.text[6:]
+            import json
+            data = json.loads(text)
+            trends = data.get("default", {}).get("trendingSearchesDays", [])
+            query_lower = query.lower()
+            for day in trends:
+                for item in day.get("trendingSearches", []):
+                    title = item.get("title", {}).get("query", "").lower()
+                    if any(word in title for word in query_lower.split()[:3]):
+                        traffic = item.get("formattedTraffic", "")
+                        return {"trending": True, "traffic": traffic, "termo": title}
+    except Exception as e:
+        print(f"Google Trends erro: {e}")
+    return {"trending": False, "traffic": "0", "termo": ""}
+
+
+def fetch_whale_activity(slug: str) -> dict:
+    """Detecta apostas grandes no mercado via CLOB."""
+    try:
+        url = f"https://clob.polymarket.com/trades?limit=50"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            trades = data if isinstance(data, list) else data.get("data", [])
+            big_trades = []
+            total_volume = 0
+            for t in trades:
+                valor = float(t.get("size") or t.get("usdcSize") or 0)
+                total_volume += valor
+                if valor >= 500:  # Aposta >= $500 Ã© baleia
+                    big_trades.append({
+                        "valor": round(valor, 2),
+                        "outcome": t.get("outcome") or t.get("side"),
+                        "wallet": (t.get("maker") or "")[:8] + "...",
+                    })
+            big_trades.sort(key=lambda x: x["valor"], reverse=True)
+            return {
+                "total_volume_recente": round(total_volume, 2),
+                "num_baleias": len(big_trades),
+                "maior_aposta": big_trades[0] if big_trades else None,
+                "baleias": big_trades[:3],
+            }
+    except Exception as e:
+        print(f"Whale erro: {e}")
+    return {"total_volume_recente": 0, "num_baleias": 0, "maior_aposta": None, "baleias": []}
+
+
+def multi_source_analysis(question: str, slug: str, articles: list) -> dict:
+    """
+    Analisa uma oportunidade cruzando TODAS as fontes:
+    NewsAPI + Google News + Reddit + Google Trends + Whales + IA
+    """
+    keywords = question.replace("?","").replace("Will ","").replace("will ","")[:60]
+
+    # Busca em todas as fontes em paralelo
+    reddit_posts = fetch_reddit(keywords)
+    trends = fetch_google_trends(keywords)
+    whales = fetch_whale_activity(slug)
+
+    # Score por fonte
+    score_news = min(len(articles) * 8, 30)          # MÃ¡x 30pts
+    score_reddit = min(len(reddit_posts) * 5, 20)     # MÃ¡x 20pts
+    score_trends = 20 if trends.get("trending") else 0 # 20pts se trending
+    score_whales = min(whales.get("num_baleias", 0) * 10, 30)  # MÃ¡x 30pts
+
+    score_total = score_news + score_reddit + score_trends + score_whales
+
+    # AnÃ¡lise IA com contexto completo
+    reddit_text = "\n".join([f"- [Reddit {p['fonte']}] {p['title']} ({p['score']} upvotes)" for p in reddit_posts[:4]])
+    news_text = "\n".join([f"- [{a['source']}] {a['title']}" for a in articles[:5]])
+    whale_text = f"Apostas grandes detectadas: {whales.get('num_baleias', 0)} baleias, maior: ${whales.get('maior_aposta', {}).get('valor', 0) if whales.get('maior_aposta') else 0}"
+
+    prompt = f"""Analise esta oportunidade de prediction market:
+
+MERCADO: {question}
+
+NOTÃCIAS:
+{news_text or 'Nenhuma notÃ­cia encontrada'}
+
+REDDIT:
+{reddit_text or 'Nenhum post encontrado'}
+
+ATIVIDADE DE BALEIAS: {whale_text}
+GOOGLE TRENDS: {'EM ALTA: ' + trends.get('termo','') if trends.get('trending') else 'NÃ£o trending'}
+
+Responda APENAS com JSON:
+{{"score_yes": <0-100>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <max 80 chars em portuguÃªs>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">}}"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 200,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=15
+        )
+        if resp.status_code == 200:
+            import json
+            text = resp.json().get("content", [{}])[0].get("text", "{}")
+            text = text.replace("```json","").replace("```","").strip()
+            ai = json.loads(text)
+        else:
+            ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indisponÃ­vel", "sentimento": "NEUTRO"}
+    except:
+        ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indisponÃ­vel", "sentimento": "NEUTRO"}
+
+    # Score final combinado
+    score_final = round((score_total * 0.5) + (ai.get("confianca", 0) * 100 * 0.5), 1)
+
+    return {
+        "score_final": score_final,
+        "score_noticias": score_news,
+        "score_reddit": score_reddit,
+        "score_trends": score_trends,
+        "score_whales": score_whales,
+        "ai": ai,
+        "reddit_posts": reddit_posts[:3],
+        "trending": trends,
+        "whales": whales,
+        "num_fontes": sum([
+            1 if articles else 0,
+            1 if reddit_posts else 0,
+            1 if trends.get("trending") else 0,
+            1 if whales.get("num_baleias", 0) > 0 else 0,
+        ])
+    }
+
+
+@app.get("/best/v2")
+def get_best_v2(db: Session = Depends(get_db)):
+    """
+    VersÃ£o 2 do filtro de melhores apostas.
+    Cruza NewsAPI + Google News + Reddit + Google Trends + Whales + IA.
+    SÃ³ retorna oportunidades confirmadas por mÃºltiplas fontes.
+    """
+    now = datetime.utcnow()
+    window_5m  = now - timedelta(minutes=5)
+    window_15m = now - timedelta(minutes=15)
+    window_1h  = now - timedelta(hours=1)
+
+    candidates = []
+    tokens = db.query(Token).all()
+
+    for token in tokens:
+        current_price = token.price
+
+        # PreÃ§o entre 15% e 85%
+        if current_price < 0.15 or current_price > 0.85:
+            continue
+        if current_price == 0:
+            continue
+
+        def get_snap(window):
+            return (
+                db.query(Snapshot)
+                .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= window)
+                .order_by(Snapshot.timestamp.desc())
+                .first()
+            )
+
+        snap_5m  = get_snap(window_5m)
+        snap_15m = get_snap(window_15m)
+        snap_1h  = get_snap(window_1h)
+
+        if not snap_5m:
+            continue
+
+        change_5m  = round((current_price - snap_5m.price) * 100, 2)
+        change_15m = round((current_price - snap_15m.price) * 100, 2) if snap_15m else None
+        change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
+
+        # VariaÃ§Ã£o mÃ­nima 4%
+        if abs(change_5m) < 4.0:
+            continue
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        # Busca notÃ­cias
+        keywords = market.question.replace("?","").replace("Will ","")[:60]
+        articles = fetch_news_for_query(keywords, max_results=6)
+
+        # AnÃ¡lise multi-fonte
+        analysis = multi_source_analysis(market.question, market.market_slug, articles)
+
+        score_final = analysis["score_final"]
+        ai = analysis["ai"]
+        rec = ai.get("recomendacao", "EVITE")
+
+        # SÃ³ oportunidades com score >= 35 e IA nÃ£o diz EVITE
+        if score_final < 35 or rec == "EVITE":
+            continue
+
+        direcao = "YES" if change_5m > 0 else "NO"
+        preco = round(current_price * 100, 1)
+        potencial = round((100 - preco) / preco * 10, 2) if direcao == "YES" else round(preco / (100 - preco) * 10, 2)
+
+        # Sinal final
+        if score_final >= 65:
+            sinal = "ðŸŸ¢ APOSTE"
+        elif score_final >= 45:
+            sinal = "ðŸŸ¡ CONSIDERE"
+        else:
+            sinal = "âšª FRACO"
+
+        candidates.append({
+            "market": market.question,
+            "slug": market.market_slug,
+            "direcao": direcao,
+            "preco_entrada": preco,
+            "potencial_lucro_10usd": potencial,
+            "sinal": sinal,
+            "score_final": score_final,
+            "scores": {
+                "noticias": analysis["score_noticias"],
+                "reddit": analysis["score_reddit"],
+                "trends": analysis["score_trends"],
+                "baleias": analysis["score_whales"],
+            },
+            "num_fontes_confirmando": analysis["num_fontes"],
+            "change_5m": change_5m,
+            "change_1h": change_1h,
+            "resumo_ia": ai.get("resumo"),
+            "baleias": analysis["whales"].get("baleias", []),
+            "trending": analysis["trending"].get("trending", False),
+            "noticias_titulos": [a["title"] for a in articles[:3]],
+            "reddit_posts": [p["title"] for p in analysis["reddit_posts"][:2]],
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
+            "detectado_em": now.isoformat(),
+        })
+
+    candidates.sort(key=lambda x: x["score_final"], reverse=True)
+    top = candidates[:5]
+
+    return {
+        "total_oportunidades": len(candidates),
+        "top_apostas": top,
+        "capital_necessario": len(top) * 10,
+        "resumo": f"{len(candidates)} oportunidades. Top {len(top)} confirmadas por mÃºltiplas fontes.",
+        "atualizado_em": now.isoformat(),
+    }
+
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# /refresh â€” ATUALIZA MERCADOS MANUALMENTE
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+@app.post("/refresh")
+def refresh_markets(db: Session = Depends(get_db)):
+    """
+    ForÃ§a atualizaÃ§Ã£o completa dos mercados:
+    - Busca mercados novos da API do Polymarket
+    - Fecha mercados expirados
+    - Adiciona mercados novos
+    - Atualiza preÃ§os
+    """
+    import json as json_lib
+
+    BASE_URL = "https://gamma-api.polymarket.com/markets"
+    now = datetime.utcnow()
+
+    # Busca mercados ativos da API
+    try:
+        resp = requests.get(
+            f"{BASE_URL}?limit=200&active=true&order=volume24hr&ascending=false",
+            timeout=15
+        )
+        markets_raw = resp.json()
+        if isinstance(markets_raw, dict):
+            markets_raw = markets_raw.get("markets", [])
+    except Exception as e:
+        return {"error": f"Erro ao buscar mercados: {e}"}
+
+    novos = 0
+    atualizados = 0
+    fechados = 0
+
+    for m in markets_raw:
+        try:
+            slug = m.get("slug")
+            question = m.get("question")
+            if not slug:
+                continue
+
+            # Parse end_date
+            end_date = None
+            ed = m.get("endDate")
+            if ed:
+                try:
+                    end_date = datetime.fromisoformat(ed.replace("Z", "+00:00")).replace(tzinfo=None)
+                except:
+                    try:
+                        end_date = datetime.strptime(ed[:10], "%Y-%m-%d")
+                    except:
+                        pass
+
+            # Extrai preÃ§os
+            yes_price = None
+            no_price = None
+            tokens_data = []
+
+            # Tenta outcomePrices
+            op = m.get("outcomePrices")
+            if op:
+                try:
+                    prices = json_lib.loads(op) if isinstance(op, str) else op
+                    if len(prices) >= 2:
+                        yes_price = float(prices[0])
+                        no_price = float(prices[1])
+                        clob_ids = m.get("clobTokenIds", "[]")
+                        ids = json_lib.loads(clob_ids) if isinstance(clob_ids, str) else clob_ids
+                        tokens_data = [
+                            {"tokenId": ids[0] if ids else f"{slug}_YES", "outcome": "YES", "price": yes_price},
+                            {"tokenId": ids[1] if len(ids) > 1 else f"{slug}_NO", "outcome": "NO", "price": no_price},
+                        ]
+                except:
+                    pass
+
+            # Tenta tokens direto
+            if not tokens_data:
+                for t in m.get("tokens", []):
+                    outcome = (t.get("outcome") or "").upper()
+                    price = float(t.get("price") or 0)
+                    token_id = t.get("tokenId") or t.get("token_id")
+                    if token_id:
+                        tokens_data.append({"tokenId": token_id, "outcome": outcome, "price": price})
+
+            if not tokens_data:
+                continue
+
+            # Upsert mercado
+            market_obj = db.query(Market).filter(Market.market_slug == slug).first()
+            if not market_obj:
+                market_obj = Market(market_slug=slug, question=question, end_date=end_date)
+                db.add(market_obj)
+                db.flush()
+                novos += 1
+            else:
+                market_obj.end_date = end_date
+                atualizados += 1
+
+            # Upsert tokens e snapshot
+            for t in tokens_data:
+                token_id = t["tokenId"]
+                price = float(t.get("price") or 0)
+                outcome = t.get("outcome", "")
+
+                token_obj = db.query(Token).filter(Token.token_id == token_id).first()
+                if not token_obj:
+                    token_obj = Token(
+                        token_id=token_id,
+                        outcome=outcome,
+                        price=price,
+                        market_id=market_obj.id
+                    )
+                    db.add(token_obj)
+                else:
+                    token_obj.price = price
+
+                db.add(Snapshot(token_id=token_id, price=price))
+
+        except Exception as e:
+            print(f"Erro refresh mercado: {e}")
+            continue
+
+    # Fecha mercados expirados
+    expired = db.query(Market).filter(
+        Market.end_date != None,
+        Market.end_date < now
+    ).all()
+    for m in expired:
+        # Verifica se todos tokens estÃ£o em 0% ou 100%
+        all_resolved = all(
+            t.price <= 0.01 or t.price >= 0.99
+            for t in m.tokens
+        ) if m.tokens else False
+        if all_resolved:
+            fechados += 1
+
+    db.commit()
+
+    total = db.query(Market).count()
+    return {
+        "message": "AtualizaÃ§Ã£o concluÃ­da!",
+        "novos_mercados": novos,
+        "mercados_atualizados": atualizados,
+        "mercados_expirados_detectados": fechados,
+        "total_mercados": total,
+        "atualizado_em": now.isoformat(),
+    }
+
