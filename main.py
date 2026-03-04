@@ -1,4 +1,5 @@
 ﻿import os
+import os
 import requests
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
@@ -51,7 +52,7 @@ def status(db: Session = Depends(get_db)):
 
 @app.get("/markets")
 def get_active_markets(db: Session = Depends(get_db)):
-    # Converte end_date (roda sÃ³ uma vez)
+    # Converte end_date (roda s├│ uma vez)
     try:
         db.execute(text("""
             ALTER TABLE markets
@@ -309,9 +310,9 @@ def get_movers(db: Session = Depends(get_db)):
     return movers[:20]
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 # SISTEMA DE TRADES
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 from models import Trade
 
@@ -442,9 +443,9 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
     }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# CONFIGURAÃ‡Ã•ES GLOBAIS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# CONFIGURA├ç├òES GLOBAIS
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
@@ -458,13 +459,13 @@ HEADERS = {
 }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /news â€” NOTÃCIAS REAIS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# /news ÔÇö NOT├ìCIAS REAIS
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 @app.get("/news")
 def get_news(query: str = "prediction markets politics economy"):
-    """Busca notÃ­cias reais via NewsAPI + Google News RSS."""
+    """Busca not├¡cias reais via NewsAPI + Google News RSS."""
     articles = []
 
     # Fonte 1: NewsAPI
@@ -518,9 +519,9 @@ def get_news(query: str = "prediction markets politics economy"):
     }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /cleanup â€” LIMPEZA DE MERCADOS ANTIGOS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# /cleanup ÔÇö LIMPEZA DE MERCADOS ANTIGOS
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 @app.post("/cleanup")
 def cleanup_old_markets(db: Session = Depends(get_db)):
@@ -548,19 +549,19 @@ def cleanup_old_markets(db: Session = Depends(get_db)):
     db.commit()
     total = db.query(Market).count()
     return {
-        "message": "Limpeza concluÃ­da!",
+        "message": "Limpeza conclu├¡da!",
         "removidos": removed,
         "total_restante": total
     }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /signals â€” SINAIS DE OPORTUNIDADE
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# /signals ÔÇö SINAIS DE OPORTUNIDADE
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 @app.get("/signals")
 def get_signals(db: Session = Depends(get_db)):
-    """Sinais baseados em variaÃ§Ãµes de preÃ§o recentes."""
+    """Sinais baseados em varia├º├Áes de pre├ºo recentes."""
     now = datetime.utcnow()
     window_5m = now - timedelta(minutes=5)
     window_1h = now - timedelta(hours=1)
@@ -620,9 +621,9 @@ def get_signals(db: Session = Depends(get_db)):
     return signals[:30]
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /leaders â€” TOP TRADERS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# /leaders ÔÇö TOP TRADERS
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 @app.get("/leaders")
 def get_leaders():
@@ -752,12 +753,12 @@ def get_wallet_detail(address: str):
     }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /intelligence â€” SISTEMA DE INTELIGÃŠNCIA COM IA REAL
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# /intelligence ÔÇö SISTEMA DE INTELIG├èNCIA COM IA REAL
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 def fetch_news_for_query(query: str, max_results: int = 8):
-    """Busca notÃ­cias para uma query especÃ­fica."""
+    """Busca not├¡cias para uma query espec├¡fica."""
     articles = []
     try:
         params = {
@@ -804,7 +805,7 @@ def fetch_news_for_query(query: str, max_results: int = 8):
 
 
 def analyze_with_claude(question: str, articles: list) -> dict:
-    """Usa Claude Haiku para analisar notÃ­cias e dar score."""
+    """Usa Claude Haiku para analisar not├¡cias e dar score."""
     import json
 
     if not articles:
@@ -812,26 +813,26 @@ def analyze_with_claude(question: str, articles: list) -> dict:
             "score_yes": 50,
             "recomendacao": "EVITE",
             "confianca": 0.2,
-            "resumo": "Sem notÃ­cias suficientes para anÃ¡lise confiÃ¡vel.",
+            "resumo": "Sem not├¡cias suficientes para an├ílise confi├ível.",
             "sentimento": "NEUTRO",
             "fontes_relevantes": 0,
         }
 
     news_text = "\n".join([
-        f"[{a['source']}] {a['title']} â€” {a['description'][:150]}"
+        f"[{a['source']}] {a['title']} ÔÇö {a['description'][:150]}"
         for a in articles[:8]
     ])
 
-    prompt = f"""VocÃª Ã© um analista expert em prediction markets e geopolÃ­tica.
+    prompt = f"""Voc├¬ ├® um analista expert em prediction markets e geopol├¡tica.
 
 PERGUNTA DO MERCADO: {question}
 
-NOTÃCIAS RECENTES:
+NOT├ìCIAS RECENTES:
 {news_text}
 
-Analise as notÃ­cias e responda SOMENTE com JSON vÃ¡lido, sem texto antes ou depois:
+Analise as not├¡cias e responda SOMENTE com JSON v├ílido, sem texto antes ou depois:
 
-{{"score_yes": <0-100 probabilidade do YES acontecer>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <explicaÃ§Ã£o curta em portuguÃªs max 100 chars>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">, "fontes_relevantes": <nÃºmero de notÃ­cias relevantes>}}"""
+{{"score_yes": <0-100 probabilidade do YES acontecer>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <explica├º├úo curta em portugu├¬s max 100 chars>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">, "fontes_relevantes": <n├║mero de not├¡cias relevantes>}}"""
 
     try:
         resp = requests.post(
@@ -865,7 +866,7 @@ Analise as notÃ­cias e responda SOMENTE com JSON vÃ¡lido, sem texto antes ou
         "score_yes": score,
         "recomendacao": "APOSTE YES" if pos > neg else "APOSTE NO" if neg > pos else "EVITE",
         "confianca": min(len(articles) / 10, 0.7),
-        "resumo": f"{len(articles)} notÃ­cias analisadas. {pos} positivas, {neg} negativas.",
+        "resumo": f"{len(articles)} not├¡cias analisadas. {pos} positivas, {neg} negativas.",
         "sentimento": "POSITIVO" if pos > neg else "NEGATIVO" if neg > pos else "NEUTRO",
         "fontes_relevantes": len(articles),
     }
@@ -873,10 +874,10 @@ Analise as notÃ­cias e responda SOMENTE com JSON vÃ¡lido, sem texto antes ou
 
 @app.get("/intelligence/{slug}")
 def get_intelligence(slug: str, db: Session = Depends(get_db)):
-    """Score de inteligÃªncia completo para um mercado."""
+    """Score de intelig├¬ncia completo para um mercado."""
     market = db.query(Market).filter(Market.market_slug == slug).first()
     if not market:
-        return {"error": "Mercado nÃ£o encontrado"}
+        return {"error": "Mercado n├úo encontrado"}
 
     yes_price = None
     no_price = None
@@ -898,13 +899,13 @@ def get_intelligence(slug: str, db: Session = Depends(get_db)):
 
     # Sinal visual
     if rec == "APOSTE YES" and abs(edge) >= 5 and confianca >= 0.5:
-        sinal = "ðŸŸ¢ APOSTE YES"
+        sinal = "­ƒƒó APOSTE YES"
         sinal_cor = "green"
     elif rec == "APOSTE NO" and abs(edge) >= 5 and confianca >= 0.5:
-        sinal = "ðŸ”´ APOSTE NO"
+        sinal = "­ƒö┤ APOSTE NO"
         sinal_cor = "red"
     else:
-        sinal = "ðŸŸ¡ EVITE"
+        sinal = "­ƒƒí EVITE"
         sinal_cor = "yellow"
 
     return {
@@ -929,7 +930,7 @@ def get_intelligence(slug: str, db: Session = Depends(get_db)):
 
 @app.get("/intelligence")
 def get_all_intelligence(db: Session = Depends(get_db)):
-    """Score de inteligÃªncia para os top 15 mercados mais relevantes."""
+    """Score de intelig├¬ncia para os top 15 mercados mais relevantes."""
     now = datetime.utcnow()
     markets = (
         db.query(Market)
@@ -987,21 +988,21 @@ def get_all_intelligence(db: Session = Depends(get_db)):
     }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /best â€” MELHORES APOSTAS DO MOMENTO
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# /best ÔÇö MELHORES APOSTAS DO MOMENTO
 # Filtro rigoroso para o teste de $100
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 @app.get("/best")
 def get_best_opportunities(db: Session = Depends(get_db)):
     """
     Retorna apenas as MELHORES anomalias para apostar.
-    CritÃ©rios rigorosos:
+    Crit├®rios rigorosos:
     - Score >= 50
-    - PreÃ§o entre 20% e 80% (tem edge real)
-    - VariaÃ§Ã£o consistente em 15min E 1h
-    - Confirma com notÃ­cias via IA
-    Ideal para estratÃ©gia de $10 por aposta.
+    - Pre├ºo entre 20% e 80% (tem edge real)
+    - Varia├º├úo consistente em 15min E 1h
+    - Confirma com not├¡cias via IA
+    Ideal para estrat├®gia de $10 por aposta.
     """
     now = datetime.utcnow()
     window_5m  = now - timedelta(minutes=5)
@@ -1014,7 +1015,7 @@ def get_best_opportunities(db: Session = Depends(get_db)):
     for token in tokens:
         current_price = token.price
 
-        # FILTRO 1: Mercado entre 20% e 80% â€” tem edge real
+        # FILTRO 1: Mercado entre 20% e 80% ÔÇö tem edge real
         if current_price < 0.20 or current_price > 0.80:
             continue
 
@@ -1043,17 +1044,17 @@ def get_best_opportunities(db: Session = Depends(get_db)):
         change_15m = round((current_price - snap_15m.price) * 100, 2)
         change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
 
-        # FILTRO 2: VariaÃ§Ã£o >= 5% em 5min
+        # FILTRO 2: Varia├º├úo >= 5% em 5min
         if abs(change_5m) < 5.0:
             continue
 
-        # FILTRO 3: TendÃªncia consistente â€” 15min na mesma direÃ§Ã£o
+        # FILTRO 3: Tend├¬ncia consistente ÔÇö 15min na mesma dire├º├úo
         if change_5m > 0 and change_15m < 0:
             continue
         if change_5m < 0 and change_15m > 0:
             continue
 
-        # FILTRO 4: 1h tambÃ©m na mesma direÃ§Ã£o (se disponÃ­vel)
+        # FILTRO 4: 1h tamb├®m na mesma dire├º├úo (se dispon├¡vel)
         if change_1h is not None:
             if change_5m > 0 and change_1h < -5:
                 continue
@@ -1070,7 +1071,7 @@ def get_best_opportunities(db: Session = Depends(get_db)):
             score += 15
         confianca_score = round(min(score, 100), 0)
 
-        # FILTRO 5: Score mÃ­nimo 40
+        # FILTRO 5: Score m├¡nimo 40
         if confianca_score < 40:
             continue
 
@@ -1078,7 +1079,7 @@ def get_best_opportunities(db: Session = Depends(get_db)):
         if not market:
             continue
 
-        # FILTRO 6: Confirma com notÃ­cias via IA
+        # FILTRO 6: Confirma com not├¡cias via IA
         keywords = market.question.replace("?","").replace("Will ","")[:60]
         articles = fetch_news_for_query(keywords, max_results=5)
         analysis = analyze_with_claude(market.question, articles)
@@ -1087,7 +1088,7 @@ def get_best_opportunities(db: Session = Depends(get_db)):
         rec = analysis.get("recomendacao", "EVITE")
         confianca_ia = analysis.get("confianca", 0)
 
-        # FILTRO 7: IA deve confirmar a direÃ§Ã£o
+        # FILTRO 7: IA deve confirmar a dire├º├úo
         if change_5m > 0 and rec == "APOSTE NO":
             continue
         if change_5m < 0 and rec == "APOSTE YES":
@@ -1096,7 +1097,7 @@ def get_best_opportunities(db: Session = Depends(get_db)):
         # Score final combinado (mercado + IA)
         score_final = round((confianca_score * 0.6) + (confianca_ia * 100 * 0.4), 1)
 
-        # DireÃ§Ã£o recomendada
+        # Dire├º├úo recomendada
         direcao = "YES" if change_5m > 0 else "NO"
         preco_entrada = round(current_price * 100, 1)
 
@@ -1120,7 +1121,7 @@ def get_best_opportunities(db: Session = Depends(get_db)):
             "resumo_ia": analysis.get("resumo"),
             "fontes": len(articles),
             "noticias": [a["title"] for a in articles[:3]],
-            "sinal": "ðŸŸ¢ APOSTE" if score_final >= 60 else "ðŸŸ¡ CONSIDERE",
+            "sinal": "­ƒƒó APOSTE" if score_final >= 60 else "­ƒƒí CONSIDERE",
             "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
             "detectado_em": now.isoformat(),
         })
@@ -1129,7 +1130,7 @@ def get_best_opportunities(db: Session = Depends(get_db)):
     candidates.sort(key=lambda x: x["score_final"], reverse=True)
 
     total = len(candidates)
-    top = candidates[:5]  # MÃ¡ximo 5 apostas por vez
+    top = candidates[:5]  # M├íximo 5 apostas por vez
 
     return {
         "total_oportunidades": total,
@@ -1140,15 +1141,15 @@ def get_best_opportunities(db: Session = Depends(get_db)):
     }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /performance â€” DASHBOARD $100 EM 30 DIAS
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# /performance ÔÇö DASHBOARD $100 EM 30 DIAS
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 @app.get("/performance")
 def get_performance(db: Session = Depends(get_db)):
     """
     Dashboard completo de performance das apostas.
-    Mostra ROI, taxa de acerto, e se o PolySignal estÃ¡ ajudando.
+    Mostra ROI, taxa de acerto, e se o PolySignal est├í ajudando.
     """
     trades = db.query(Trade).order_by(Trade.created_at.asc()).all()
 
@@ -1197,13 +1198,13 @@ def get_performance(db: Session = Depends(get_db)):
 
     # Status geral
     if roi > 10:
-        status = "ðŸŸ¢ EXCELENTE â€” Sistema funcionando!"
+        status = "­ƒƒó EXCELENTE ÔÇö Sistema funcionando!"
     elif roi > 0:
-        status = "ðŸŸ¡ POSITIVO â€” Sistema ajudando"
+        status = "­ƒƒí POSITIVO ÔÇö Sistema ajudando"
     elif roi > -10:
-        status = "ðŸŸ  NEGATIVO â€” Ajustar estratÃ©gia"
+        status = "­ƒƒá NEGATIVO ÔÇö Ajustar estrat├®gia"
     else:
-        status = "ðŸ”´ ATENÃ‡ÃƒO â€” Revisar sistema"
+        status = "­ƒö┤ ATEN├ç├âO ÔÇö Revisar sistema"
 
     # Lista de trades
     trades_lista = []
@@ -1251,10 +1252,10 @@ def get_performance(db: Session = Depends(get_db)):
     }
 
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# SISTEMA MULTI-FONTE DE INTELIGÃŠNCIA
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# SISTEMA MULTI-FONTE DE INTELIG├èNCIA
 # Reddit + Google Trends + Whales + NewsAPI
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 def fetch_reddit(query: str) -> list:
     """Busca posts relevantes no Reddit."""
@@ -1283,13 +1284,13 @@ def fetch_reddit(query: str) -> list:
 
 
 def fetch_google_trends(query: str) -> dict:
-    """Verifica se o assunto estÃ¡ em alta no Google."""
+    """Verifica se o assunto est├í em alta no Google."""
     try:
         url = "https://trends.google.com/trends/api/dailytrends"
         params = {"hl": "en-US", "tz": "-180", "geo": "US", "ns": "15"}
         resp = requests.get(url, params=params, timeout=6)
         if resp.status_code == 200:
-            # Remove o prefixo de seguranÃ§a do Google
+            # Remove o prefixo de seguran├ºa do Google
             text = resp.text[6:]
             import json
             data = json.loads(text)
@@ -1320,7 +1321,7 @@ def fetch_whale_activity(slug: str) -> dict:
             for t in trades:
                 valor = float(t.get("size") or t.get("usdcSize") or 0)
                 total_volume += valor
-                if valor >= 500:  # Aposta >= $500 Ã© baleia
+                if valor >= 500:  # Aposta >= $500 ├® baleia
                     big_trades.append({
                         "valor": round(valor, 2),
                         "outcome": t.get("outcome") or t.get("side"),
@@ -1351,14 +1352,14 @@ def multi_source_analysis(question: str, slug: str, articles: list) -> dict:
     whales = fetch_whale_activity(slug)
 
     # Score por fonte
-    score_news = min(len(articles) * 8, 30)          # MÃ¡x 30pts
-    score_reddit = min(len(reddit_posts) * 5, 20)     # MÃ¡x 20pts
+    score_news = min(len(articles) * 8, 30)          # M├íx 30pts
+    score_reddit = min(len(reddit_posts) * 5, 20)     # M├íx 20pts
     score_trends = 20 if trends.get("trending") else 0 # 20pts se trending
-    score_whales = min(whales.get("num_baleias", 0) * 10, 30)  # MÃ¡x 30pts
+    score_whales = min(whales.get("num_baleias", 0) * 10, 30)  # M├íx 30pts
 
     score_total = score_news + score_reddit + score_trends + score_whales
 
-    # AnÃ¡lise IA com contexto completo
+    # An├ílise IA com contexto completo
     reddit_text = "\n".join([f"- [Reddit {p['fonte']}] {p['title']} ({p['score']} upvotes)" for p in reddit_posts[:4]])
     news_text = "\n".join([f"- [{a['source']}] {a['title']}" for a in articles[:5]])
     whale_text = f"Apostas grandes detectadas: {whales.get('num_baleias', 0)} baleias, maior: ${whales.get('maior_aposta', {}).get('valor', 0) if whales.get('maior_aposta') else 0}"
@@ -1367,17 +1368,17 @@ def multi_source_analysis(question: str, slug: str, articles: list) -> dict:
 
 MERCADO: {question}
 
-NOTÃCIAS:
-{news_text or 'Nenhuma notÃ­cia encontrada'}
+NOT├ìCIAS:
+{news_text or 'Nenhuma not├¡cia encontrada'}
 
 REDDIT:
 {reddit_text or 'Nenhum post encontrado'}
 
 ATIVIDADE DE BALEIAS: {whale_text}
-GOOGLE TRENDS: {'EM ALTA: ' + trends.get('termo','') if trends.get('trending') else 'NÃ£o trending'}
+GOOGLE TRENDS: {'EM ALTA: ' + trends.get('termo','') if trends.get('trending') else 'N├úo trending'}
 
 Responda APENAS com JSON:
-{{"score_yes": <0-100>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <max 80 chars em portuguÃªs>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">}}"""
+{{"score_yes": <0-100>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <max 80 chars em portugu├¬s>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">}}"""
 
     try:
         resp = requests.post(
@@ -1400,9 +1401,9 @@ Responda APENAS com JSON:
             text = text.replace("```json","").replace("```","").strip()
             ai = json.loads(text)
         else:
-            ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indisponÃ­vel", "sentimento": "NEUTRO"}
+            ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indispon├¡vel", "sentimento": "NEUTRO"}
     except:
-        ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indisponÃ­vel", "sentimento": "NEUTRO"}
+        ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indispon├¡vel", "sentimento": "NEUTRO"}
 
     # Score final combinado
     score_final = round((score_total * 0.5) + (ai.get("confianca", 0) * 100 * 0.5), 1)
@@ -1429,9 +1430,9 @@ Responda APENAS com JSON:
 @app.get("/best/v2")
 def get_best_v2(db: Session = Depends(get_db)):
     """
-    VersÃ£o 2 do filtro de melhores apostas.
+    Vers├úo 2 do filtro de melhores apostas.
     Cruza NewsAPI + Google News + Reddit + Google Trends + Whales + IA.
-    SÃ³ retorna oportunidades confirmadas por mÃºltiplas fontes.
+    S├│ retorna oportunidades confirmadas por m├║ltiplas fontes.
     """
     now = datetime.utcnow()
     window_5m  = now - timedelta(minutes=5)
@@ -1444,7 +1445,7 @@ def get_best_v2(db: Session = Depends(get_db)):
     for token in tokens:
         current_price = token.price
 
-        # PreÃ§o entre 15% e 85%
+        # Pre├ºo entre 15% e 85%
         if current_price < 0.15 or current_price > 0.85:
             continue
         if current_price == 0:
@@ -1469,7 +1470,7 @@ def get_best_v2(db: Session = Depends(get_db)):
         change_15m = round((current_price - snap_15m.price) * 100, 2) if snap_15m else None
         change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
 
-        # VariaÃ§Ã£o mÃ­nima 4%
+        # Varia├º├úo m├¡nima 4%
         if abs(change_5m) < 4.0:
             continue
 
@@ -1477,18 +1478,18 @@ def get_best_v2(db: Session = Depends(get_db)):
         if not market:
             continue
 
-        # Busca notÃ­cias
+        # Busca not├¡cias
         keywords = market.question.replace("?","").replace("Will ","")[:60]
         articles = fetch_news_for_query(keywords, max_results=6)
 
-        # AnÃ¡lise multi-fonte
+        # An├ílise multi-fonte
         analysis = multi_source_analysis(market.question, market.market_slug, articles)
 
         score_final = analysis["score_final"]
         ai = analysis["ai"]
         rec = ai.get("recomendacao", "EVITE")
 
-        # SÃ³ oportunidades com score >= 35 e IA nÃ£o diz EVITE
+        # S├│ oportunidades com score >= 35 e IA n├úo diz EVITE
         if score_final < 35 or rec == "EVITE":
             continue
 
@@ -1498,11 +1499,11 @@ def get_best_v2(db: Session = Depends(get_db)):
 
         # Sinal final
         if score_final >= 65:
-            sinal = "ðŸŸ¢ APOSTE"
+            sinal = "­ƒƒó APOSTE"
         elif score_final >= 45:
-            sinal = "ðŸŸ¡ CONSIDERE"
+            sinal = "­ƒƒí CONSIDERE"
         else:
-            sinal = "âšª FRACO"
+            sinal = "ÔÜ¬ FRACO"
 
         candidates.append({
             "market": market.question,
@@ -1537,156 +1538,6 @@ def get_best_v2(db: Session = Depends(get_db)):
         "total_oportunidades": len(candidates),
         "top_apostas": top,
         "capital_necessario": len(top) * 10,
-        "resumo": f"{len(candidates)} oportunidades. Top {len(top)} confirmadas por mÃºltiplas fontes.",
+        "resumo": f"{len(candidates)} oportunidades. Top {len(top)} confirmadas por m├║ltiplas fontes.",
         "atualizado_em": now.isoformat(),
     }
-
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /refresh â€” ATUALIZA MERCADOS MANUALMENTE
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/refresh")
-def refresh_markets(db: Session = Depends(get_db)):
-    """
-    ForÃ§a atualizaÃ§Ã£o completa dos mercados:
-    - Busca mercados novos da API do Polymarket
-    - Fecha mercados expirados
-    - Adiciona mercados novos
-    - Atualiza preÃ§os
-    """
-    import json as json_lib
-
-    BASE_URL = "https://gamma-api.polymarket.com/markets"
-    now = datetime.utcnow()
-
-    # Busca mercados ativos da API
-    try:
-        resp = requests.get(
-            f"{BASE_URL}?limit=200&active=true&order=volume24hr&ascending=false",
-            timeout=15
-        )
-        markets_raw = resp.json()
-        if isinstance(markets_raw, dict):
-            markets_raw = markets_raw.get("markets", [])
-    except Exception as e:
-        return {"error": f"Erro ao buscar mercados: {e}"}
-
-    novos = 0
-    atualizados = 0
-    fechados = 0
-
-    for m in markets_raw:
-        try:
-            slug = m.get("slug")
-            question = m.get("question")
-            if not slug:
-                continue
-
-            # Parse end_date
-            end_date = None
-            ed = m.get("endDate")
-            if ed:
-                try:
-                    end_date = datetime.fromisoformat(ed.replace("Z", "+00:00")).replace(tzinfo=None)
-                except:
-                    try:
-                        end_date = datetime.strptime(ed[:10], "%Y-%m-%d")
-                    except:
-                        pass
-
-            # Extrai preÃ§os
-            yes_price = None
-            no_price = None
-            tokens_data = []
-
-            # Tenta outcomePrices
-            op = m.get("outcomePrices")
-            if op:
-                try:
-                    prices = json_lib.loads(op) if isinstance(op, str) else op
-                    if len(prices) >= 2:
-                        yes_price = float(prices[0])
-                        no_price = float(prices[1])
-                        clob_ids = m.get("clobTokenIds", "[]")
-                        ids = json_lib.loads(clob_ids) if isinstance(clob_ids, str) else clob_ids
-                        tokens_data = [
-                            {"tokenId": ids[0] if ids else f"{slug}_YES", "outcome": "YES", "price": yes_price},
-                            {"tokenId": ids[1] if len(ids) > 1 else f"{slug}_NO", "outcome": "NO", "price": no_price},
-                        ]
-                except:
-                    pass
-
-            # Tenta tokens direto
-            if not tokens_data:
-                for t in m.get("tokens", []):
-                    outcome = (t.get("outcome") or "").upper()
-                    price = float(t.get("price") or 0)
-                    token_id = t.get("tokenId") or t.get("token_id")
-                    if token_id:
-                        tokens_data.append({"tokenId": token_id, "outcome": outcome, "price": price})
-
-            if not tokens_data:
-                continue
-
-            # Upsert mercado
-            market_obj = db.query(Market).filter(Market.market_slug == slug).first()
-            if not market_obj:
-                market_obj = Market(market_slug=slug, question=question, end_date=end_date)
-                db.add(market_obj)
-                db.flush()
-                novos += 1
-            else:
-                market_obj.end_date = end_date
-                atualizados += 1
-
-            # Upsert tokens e snapshot
-            for t in tokens_data:
-                token_id = t["tokenId"]
-                price = float(t.get("price") or 0)
-                outcome = t.get("outcome", "")
-
-                token_obj = db.query(Token).filter(Token.token_id == token_id).first()
-                if not token_obj:
-                    token_obj = Token(
-                        token_id=token_id,
-                        outcome=outcome,
-                        price=price,
-                        market_id=market_obj.id
-                    )
-                    db.add(token_obj)
-                else:
-                    token_obj.price = price
-
-                db.add(Snapshot(token_id=token_id, price=price))
-
-        except Exception as e:
-            print(f"Erro refresh mercado: {e}")
-            continue
-
-    # Fecha mercados expirados
-    expired = db.query(Market).filter(
-        Market.end_date != None,
-        Market.end_date < now
-    ).all()
-    for m in expired:
-        # Verifica se todos tokens estÃ£o em 0% ou 100%
-        all_resolved = all(
-            t.price <= 0.01 or t.price >= 0.99
-            for t in m.tokens
-        ) if m.tokens else False
-        if all_resolved:
-            fechados += 1
-
-    db.commit()
-
-    total = db.query(Market).count()
-    return {
-        "message": "AtualizaÃ§Ã£o concluÃ­da!",
-        "novos_mercados": novos,
-        "mercados_atualizados": atualizados,
-        "mercados_expirados_detectados": fechados,
-        "total_mercados": total,
-        "atualizado_em": now.isoformat(),
-    }
-
