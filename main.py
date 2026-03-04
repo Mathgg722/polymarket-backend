@@ -2600,13 +2600,12 @@ def intelligence_v3(slug: str, db: Session = Depends(get_db)):
         }
     except Exception as e:
         return {"error": "intelligence_v3_failed", "detail": str(e)}
-from models import Signal
 
 @app.get("/signals/v1")
 def signals_v1(limit: int = 50, db: Session = Depends(get_db)):
     rows = (
-        db.query(Signal)
-        .order_by(Signal.created_at.desc())
+        db.query()
+        .order_by(())
         .limit(min(limit, 200))
         .all()
     )
