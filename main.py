@@ -2633,27 +2633,30 @@ from models import Signal
 
 @app.get("/signals/v1")
 def signals_v1(limit: int = 50, db: Session = Depends(get_db)):
-    rows = (
-        db.query(Signal)
-        .order_by(Signal.created_at.desc())
-        .limit(min(limit, 200))
-        .all()
-    )
-
-    return {
-        "total": len(rows),
-        "signals": [
-            {
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "market": r.market,
-                "slug": r.slug,
-                "outcome": r.outcome,
-                "tipo": r.tipo,
-                "change_5m": r.change_5m,
-                "current_price": r.current_price,
-                "confidence": r.confidence,
-                "polymarket_url": r.polymarket_url,
-            }
-            for r in rows
-        ],
-    }
+    try:
+        rows = (
+            db.query(Signal)
+            .order_by(Signal.created_at.desc())
+            .limit(min(limit, 200))
+            .all()
+        )
+        return {
+            "total": len(rows),
+            "signals": [
+                {
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "market": r.market,
+                    "slug": r.slug,
+                    "outcome": r.outcome,
+                    "tipo": r.tipo,
+                    "change_5m": r.change_5m,
+                    "current_price": r.current_price,
+                    "confidence": r.confidence,
+                    "polymarket_url": r.polymarket_url,
+                }
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        # Se a tabela ainda não existir, pelo menos não derruba a API
+        return {"total": 0, "signals": [], "error": str(e)}
