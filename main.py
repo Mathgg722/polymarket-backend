@@ -1,3 +1,4 @@
+import os
 import requests
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
@@ -392,8 +393,8 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
 # CONFIGURAÇÕES GLOBAIS
 # ─────────────────────────────────────────
 
-NEWSAPI_KEY = "a595b3e7d7a047fda7a934162cf9c3ad"
-ANTHROPIC_KEY = "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"
+NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "a595b3e7d7a047fda7a934162cf9c3ad")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 POLYMARKET_CLOB = "https://clob.polymarket.com"
 GAMMA_API = "https://gamma-api.polymarket.com"
 DATA_API = "https://data-api.polymarket.com"
