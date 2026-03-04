@@ -119,70 +119,117 @@ def get_history(token_id: str, limit: int = 100, db: Session = Depends(get_db)):
 @app.get("/anomalies")
 def get_anomalies(db: Session = Depends(get_db)):
     """
-    Detecta mercados com variacao de preco suspeita.
-    Compara preco atual com preco de 5 min atras e 15 min atras.
+    Deteccao avancada de anomalias com classificacao por tipo,
+    score de confianca, multiplas janelas temporais e filtro
+    de mercados ja resolvidos.
     """
     now = datetime.utcnow()
-    window_5m = now - timedelta(minutes=5)
+    window_1m  = now - timedelta(minutes=1)
+    window_5m  = now - timedelta(minutes=5)
     window_15m = now - timedelta(minutes=15)
-    window_1h = now - timedelta(hours=1)
+    window_1h  = now - timedelta(hours=1)
 
     anomalies = []
-
     tokens = db.query(Token).all()
 
     for token in tokens:
         current_price = token.price
 
-        # Preco 5 minutos atras
-        snap_5m = (
-            db.query(Snapshot)
-            .filter(
-                Snapshot.token_id == token.token_id,
-                Snapshot.timestamp <= window_5m
-            )
-            .order_by(Snapshot.timestamp.desc())
-            .first()
-        )
+        # Ignora mercados ja resolvidos (>95% ou <5%)
+        if current_price >= 0.95 or current_price <= 0.05:
+            continue
 
-        # Preco 1 hora atras
-        snap_1h = (
-            db.query(Snapshot)
-            .filter(
-                Snapshot.token_id == token.token_id,
-                Snapshot.timestamp <= window_1h
+        if current_price == 0:
+            continue
+
+        def get_snap(window):
+            return (
+                db.query(Snapshot)
+                .filter(
+                    Snapshot.token_id == token.token_id,
+                    Snapshot.timestamp <= window
+                )
+                .order_by(Snapshot.timestamp.desc())
+                .first()
             )
-            .order_by(Snapshot.timestamp.desc())
-            .first()
-        )
+
+        snap_1m  = get_snap(window_1m)
+        snap_5m  = get_snap(window_5m)
+        snap_15m = get_snap(window_15m)
+        snap_1h  = get_snap(window_1h)
 
         if not snap_5m:
             continue
 
-        price_5m_ago = snap_5m.price
-        change_5m = round((current_price - price_5m_ago) * 100, 2)
+        change_1m  = round((current_price - snap_1m.price) * 100, 2) if snap_1m else None
+        change_5m  = round((current_price - snap_5m.price) * 100, 2)
+        change_15m = round((current_price - snap_15m.price) * 100, 2) if snap_15m else None
+        change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
 
-        change_1h = None
-        if snap_1h:
-            change_1h = round((current_price - snap_1h.price) * 100, 2)
+        if abs(change_5m) < 5.0:
+            continue
 
-        # Anomalia: variacao maior que 5% em 5 minutos
-        if abs(change_5m) >= 5.0:
-            market = db.query(Market).filter(Market.id == token.market_id).first()
-            anomalies.append({
-                "market": market.question if market else "Unknown",
-                "slug": market.market_slug if market else None,
-                "outcome": token.outcome,
-                "current_price": round(current_price * 100, 1),
-                "price_5m_ago": round(price_5m_ago * 100, 1),
-                "change_5m": change_5m,
-                "change_1h": change_1h,
-                "alert_level": "HIGH" if abs(change_5m) >= 10 else "MEDIUM",
-                "detected_at": now.isoformat(),
-            })
+        # Classifica tipo de anomalia
+        if abs(change_5m) >= 20:
+            tipo = "EXTREME"
+            alert_level = "EXTREME"
+        elif change_5m > 0 and (change_1h or 0) > 0:
+            tipo = "SPIKE"
+            alert_level = "HIGH"
+        elif change_5m < 0 and (change_1h or 0) < 0:
+            tipo = "DUMP"
+            alert_level = "HIGH"
+        elif change_5m > 0 and (change_1h or 0) < 0:
+            tipo = "REVERSAL_UP"
+            alert_level = "HIGH"
+        elif change_5m < 0 and (change_1h or 0) > 0:
+            tipo = "REVERSAL_DOWN"
+            alert_level = "HIGH"
+        else:
+            tipo = "MOVE"
+            alert_level = "MEDIUM"
 
-    # Ordena por maior variacao
-    anomalies.sort(key=lambda x: abs(x["change_5m"]), reverse=True)
+        # Score de confianca (0-100)
+        score = 0
+        score += min(abs(change_5m) * 2, 40)
+        score += min(abs(change_1h or 0), 20)
+        if change_1m and abs(change_1m) > 2:
+            score += 20
+        if change_15m and abs(change_15m) > abs(change_5m):
+            score += 20
+        confianca_score = round(min(score, 100), 0)
+
+        # Oportunidade
+        if change_5m > 0 and current_price < 0.8:
+            oportunidade = "POSSIVEL_YES"
+        elif change_5m < 0 and current_price > 0.2:
+            oportunidade = "POSSIVEL_NO"
+        else:
+            oportunidade = "AGUARDAR"
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        anomalies.append({
+            "market": market.question,
+            "slug": market.market_slug,
+            "outcome": token.outcome,
+            "tipo": tipo,
+            "alert_level": alert_level,
+            "oportunidade": oportunidade,
+            "confianca_score": confianca_score,
+            "current_price": round(current_price * 100, 1),
+            "price_5m_ago": round(snap_5m.price * 100, 1),
+            "change_1m": change_1m,
+            "change_5m": change_5m,
+            "change_15m": change_15m,
+            "change_1h": change_1h,
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
+            "detected_at": now.isoformat(),
+        })
+
+    anomalies.sort(key=lambda x: x["confianca_score"], reverse=True)
     return anomalies[:20]
 
 
