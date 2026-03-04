@@ -5,7 +5,7 @@ from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from database import SessionLocal, engine
-from models import Base, Market, Token, Snapshot
+from models import Base, Market, Token, Snapshot,Trade,Signal
 from datetime import datetime, timedelta
 
 Base.metadata.create_all(bind=engine)
