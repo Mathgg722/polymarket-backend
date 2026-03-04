@@ -52,26 +52,7 @@ class Trade(Base):
     notes = Column(String, nullable=True)     # observacoes
     created_at = Column(DateTime, default=datetime.utcnow)
     closed_at = Column(DateTime, nullable=True)
-    from sqlalchemy import Column, Integer, String, Float, DateTime
 
-class Signal(Base):
-    __tablename__ = "signals"
-
-    id = Column(Integer, primary_key=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
-
-    market = Column(String, nullable=False)
-    slug = Column(String, nullable=False, index=True)
-    outcome = Column(String, nullable=False)  # YES/NO
-
-    tipo = Column(String, nullable=False)  # SPIKE/DUMP/REVERSAL/EXTREME
-    change_5m = Column(Float, default=0.0)  # em %
-    current_price = Column(Float, default=0.0)  # em %
-    confidence = Column(Float, default=0.0)  # 0-1
-
-    polymarket_url = Column(String, nullable=False)
-    from datetime import datetime
-from sqlalchemy import Column, Integer, String, Float, DateTime
 
 class Signal(Base):
     __tablename__ = "signals"
