@@ -2284,3 +2284,64 @@ def get_inefficiencies(db: Session = Depends(get_db)):
         "atualizado_em": now.isoformat(),
     }
 
+
+@app.get('/inefficiencies/v2')
+def get_inefficiencies_v2():
+    db = SessionLocal()
+    try:
+        mercados = db.query(Market).filter(Market.tokens.any()).all()
+        resultados = []
+        for m in mercados:
+            for t in m.tokens:
+                snaps = db.query(Snapshot).filter_by(token_id=t.token_id).order_by(Snapshot.timestamp.desc()).limit(200).all()
+                if len(snaps) < 10:
+                    continue
+                preco_atual = t.price * 100
+                if preco_atual < 5 or preco_atual > 95:
+                    continue
+                precos = [s.price * 100 for s in snaps]
+                media = sum(precos) / len(precos)
+                desvio = abs(preco_atual - media)
+                volatilidade = max(precos) - min(precos)
+                if desvio < 1.5:
+                    continue
+                score = round(min(100, (desvio / max(volatilidade, 1)) * 100), 1)
+                resultados.append({'market': m.question, 'slug': m.market_slug, 'outcome': t.outcome, 'preco_atual': round(preco_atual, 1), 'media_historica': round(media, 1), 'desvio': round(desvio, 1), 'score': score, 'snapshots': len(snaps), 'polymarket_url': f'https://polymarket.com/event/{m.market_slug}'})
+        resultados.sort(key=lambda x: x['score'], reverse=True)
+        return {'total': len(resultados), 'top_10': resultados[:10], 'metodologia': 'Desvio do preco historico medio', 'atualizado_em': datetime.utcnow().isoformat()}
+    finally:
+        db.close()
+
+@app.get('/backtest')
+def backtest():
+    db = SessionLocal()
+    try:
+        mercados = db.query(Market).filter(Market.tokens.any()).all()
+        acertos = 0
+        erros = 0
+        amostra = []
+        for m in mercados:
+            for t in m.tokens:
+                snaps = db.query(Snapshot).filter_by(token_id=t.token_id).order_by(Snapshot.timestamp.asc()).all()
+                if len(snaps) < 50:
+                    continue
+                for i in range(10, len(snaps) - 10):
+                    preco_entrada = snaps[i].price * 100
+                    if preco_entrada < 10 or preco_entrada > 90:
+                        continue
+                    precos_ant = [s.price * 100 for s in snaps[max(0,i-10):i]]
+                    media_ant = sum(precos_ant) / len(precos_ant)
+                    variacao = preco_entrada - media_ant
+                    if abs(variacao) < 5:
+                        continue
+                    preco_futuro = snaps[min(i+10, len(snaps)-1)].price * 100
+                    acertou = (variacao > 0 and preco_futuro > preco_entrada) or (variacao < 0 and preco_futuro < preco_entrada)
+                    if acertou: acertos += 1
+                    else: erros += 1
+                    if len(amostra) < 20:
+                        amostra.append({'market': m.question, 'outcome': t.outcome, 'entrada': round(preco_entrada,1), 'saida': round(preco_futuro,1), 'resultado': 'ACERTO' if acertou else 'ERRO'})
+        total = acertos + erros
+        win_rate = round((acertos / total * 100), 1) if total > 0 else 0
+        return {'total_simulados': total, 'acertos': acertos, 'erros': erros, 'win_rate_pct': win_rate, 'amostra': amostra, 'atualizado_em': datetime.utcnow().isoformat()}
+    finally:
+        db.close()
