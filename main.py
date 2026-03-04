@@ -1,3 +1,4 @@
+import requests
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
@@ -8,6 +9,15 @@ from datetime import datetime, timedelta
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def get_db():
@@ -389,207 +399,189 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
 
 # ─────────────────────────────────────────
 # SISTEMA DE LÍDERES / TOP TRADERS
-# Via Gamma API Polymarket + Blockchain
+# Via blockchain Polygon (Etherscan API V2)
 # ─────────────────────────────────────────
 
 ETHERSCAN_API_KEY = "K7GC9Q61CN7XB9NS8GR1YHPFQF7JHFCWJK"
-POLYMARKET_CLOB = "https://clob.polymarket.com"
-GAMMA_API = "https://gamma-api.polymarket.com"
-DATA_API = "https://data-api.polymarket.com"
+POLYGON_CHAIN_ID = "137"
+ETHERSCAN_BASE = "https://api.etherscan.io/v2/api"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://polymarket.com",
-}
+# Contrato principal do Polymarket na Polygon
+POLYMARKET_CONTRACT = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
 
 
-@app.get("/leaders")
-def get_leaders():
-    """Top traders do Polymarket via múltiplas fontes."""
-    leaders = []
-
-    # Fonte 1: data-api leaderboard
-    for window in ["all", "1mo", "1w", "1d"]:
-        try:
-            url = f"{DATA_API}/leaderboard?window={window}&limit=20"
-            resp = requests.get(url, headers=HEADERS, timeout=8)
-            if resp.status_code == 200:
-                data = resp.json()
-                items = data if isinstance(data, list) else data.get("data", [])
-                if items:
-                    for i, t in enumerate(items[:20]):
-                        address = t.get("proxyWallet") or t.get("address") or ""
-                        name = t.get("name") or t.get("pseudonym") or (address[:8] + "..." if address else "Anonymous")
-                        won = t.get("positionsWon") or t.get("marketsWon") or 0
-                        lost = t.get("positionsLost") or t.get("marketsLost") or 0
-                        leaders.append({
-                            "rank": i + 1,
-                            "username": name,
-                            "address": address,
-                            "profit_usd": t.get("profit") or t.get("pnl") or 0,
-                            "volume_usd": t.get("volume") or 0,
-                            "win_rate": round(won / max(won + lost, 1) * 100, 1),
-                            "positions_won": won,
-                            "positions_lost": lost,
-                            "window": window,
-                            "ver_apostas": f"https://polymarket.com/profile/{address}",
-                        })
-                    return {
-                        "status": "ok",
-                        "fonte": "data-api",
-                        "window": window,
-                        "total": len(leaders),
-                        "leaders": leaders,
-                    }
-        except Exception as e:
-            print(f"Erro leaders {window}:", e)
-            continue
-
-    # Fonte 2: gamma-api profiles
+def get_recent_trades_blockchain(limit=50):
+    """Busca apostas recentes diretamente da blockchain Polygon."""
     try:
-        url = f"{GAMMA_API}/profiles?limit=20&sortBy=profit&sortOrder=DESC"
-        resp = requests.get(url, headers=HEADERS, timeout=8)
+        params = {
+            "chainid": POLYGON_CHAIN_ID,
+            "module": "account",
+            "action": "tokentx",
+            "contractaddress": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # USDC Polygon
+            "address": POLYMARKET_CONTRACT,
+            "page": 1,
+            "offset": limit,
+            "sort": "desc",
+            "apikey": ETHERSCAN_API_KEY,
+        }
+        resp = requests.get(ETHERSCAN_BASE, params=params, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            items = data if isinstance(data, list) else data.get("data", [])
-            if items:
-                for i, t in enumerate(items[:20]):
-                    address = t.get("proxyWallet") or t.get("address") or ""
-                    leaders.append({
-                        "rank": i + 1,
-                        "username": t.get("name") or t.get("pseudonym") or address[:8] + "...",
-                        "address": address,
-                        "profit_usd": t.get("profit") or t.get("pnl") or 0,
-                        "volume_usd": t.get("volume") or 0,
-                        "win_rate": None,
-                        "ver_apostas": f"https://polymarket.com/profile/{address}",
-                    })
-                return {
-                    "status": "ok",
-                    "fonte": "gamma-api",
-                    "total": len(leaders),
-                    "leaders": leaders,
-                }
+            if data.get("status") == "1":
+                return data.get("result", [])
     except Exception as e:
-        print("Erro gamma profiles:", e)
+        print("Erro blockchain:", e)
+    return []
 
-    # Nenhuma fonte funcionou
-    return {
-        "status": "unavailable",
-        "mensagem": "API de traders não pública. Acesse manualmente:",
-        "links": {
-            "leaderboard": "https://polymarket.com/leaderboard",
-            "whales": "https://polymarketwhales.info",
-            "atividade": "https://polymarket.com/activity",
+
+def get_wallet_trades(address, limit=20):
+    """Busca apostas de uma carteira específica."""
+    try:
+        params = {
+            "chainid": POLYGON_CHAIN_ID,
+            "module": "account",
+            "action": "tokentx",
+            "contractaddress": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+            "address": address,
+            "page": 1,
+            "offset": limit,
+            "sort": "desc",
+            "apikey": ETHERSCAN_API_KEY,
         }
-    }
+        resp = requests.get(ETHERSCAN_BASE, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "1":
+                return data.get("result", [])
+    except Exception as e:
+        print("Erro wallet:", e)
+    return []
 
 
 @app.get("/leaders/live")
 def get_live_trades():
     """
-    Apostas recentes de alto valor via CLOB API da Polymarket.
-    Mostra as maiores apostas feitas recentemente.
+    Apostas ao vivo na blockchain Polygon.
+    Mostra quem apostou, quanto e quando em tempo real.
     """
-    try:
-        # Busca trades recentes via CLOB
-        url = f"{POLYMARKET_CLOB}/trades?limit=50&maker_asset=0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-        resp = requests.get(url, headers=HEADERS, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            trades_raw = data if isinstance(data, list) else data.get("data", [])
+    from datetime import timezone
+    txs = get_recent_trades_blockchain(limit=50)
 
-            trades = []
-            wallets_seen = {}
-
-            for tx in trades_raw:
-                valor = float(tx.get("size") or tx.get("usdcSize") or 0)
-                if valor < 50:
-                    continue
-
-                wallet = tx.get("maker") or tx.get("owner") or ""
-                wallets_seen[wallet] = wallets_seen.get(wallet, 0) + 1
-
-                trades.append({
-                    "wallet": wallet[:8] + "..." + wallet[-4:] if wallet else "Unknown",
-                    "wallet_full": wallet,
-                    "valor_usd": round(valor, 2),
-                    "outcome": tx.get("outcome") or tx.get("side"),
-                    "preco": tx.get("price"),
-                    "market": tx.get("market") or tx.get("conditionId", "")[:16],
-                    "timestamp": tx.get("timestamp") or tx.get("matchedAt"),
-                    "polymarket_url": f"https://polymarket.com/profile/{wallet}",
-                })
-
-            top_wallets = sorted(wallets_seen.items(), key=lambda x: x[1], reverse=True)[:10]
-
-            return {
-                "status": "ok",
-                "total_apostas": len(trades),
-                "apostas_recentes": sorted(trades, key=lambda x: x["valor_usd"], reverse=True)[:20],
-                "top_carteiras": [
-                    {
-                        "wallet": w[:8] + "..." + w[-4:],
-                        "wallet_full": w,
-                        "num_apostas": n,
-                        "polymarket_url": f"https://polymarket.com/profile/{w}",
-                    }
-                    for w, n in top_wallets
-                ]
+    if not txs:
+        return {
+            "status": "unavailable",
+            "message": "Sem dados no momento",
+            "links": {
+                "leaderboard": "https://polymarket.com/leaderboard",
+                "whales": "https://polymarketwhales.info",
+                "activity": "https://polymarket.com/activity"
             }
-    except Exception as e:
-        print("Erro live trades:", e)
+        }
+
+    trades = []
+    wallets_seen = {}
+
+    for tx in txs:
+        valor_usdc = round(int(tx.get("value", 0)) / 1e6, 2)
+        if valor_usdc < 10:  # Ignora apostas menores que $10
+            continue
+
+        wallet = tx.get("from", "")
+        timestamp = int(tx.get("timeStamp", 0))
+        dt = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Conta quantas vezes essa carteira aparece (frequência)
+        wallets_seen[wallet] = wallets_seen.get(wallet, 0) + 1
+
+        trades.append({
+            "wallet": wallet[:8] + "..." + wallet[-4:] if wallet else "Unknown",
+            "wallet_full": wallet,
+            "valor_usd": valor_usdc,
+            "timestamp": dt,
+            "tx_hash": tx.get("hash", "")[:16] + "...",
+            "polygonscan_url": f"https://polygonscan.com/tx/{tx.get('hash', '')}",
+            "polymarket_url": f"https://polymarket.com/profile/{wallet}",
+        })
+
+    # Top carteiras mais ativas
+    top_wallets = sorted(wallets_seen.items(), key=lambda x: x[1], reverse=True)[:10]
 
     return {
-        "status": "unavailable",
-        "mensagem": "Veja apostas ao vivo em:",
-        "links": {
-            "atividade": "https://polymarket.com/activity",
-            "whales": "https://polymarketwhales.info",
-        }
+        "status": "ok",
+        "total_apostas": len(trades),
+        "apostas_recentes": trades[:20],
+        "top_carteiras_ativas": [
+            {
+                "wallet": w[:8] + "..." + w[-4:],
+                "wallet_full": w,
+                "num_apostas": n,
+                "polymarket_url": f"https://polymarket.com/profile/{w}",
+            }
+            for w, n in top_wallets
+        ]
     }
 
 
 @app.get("/leaders/wallet/{address}")
 def get_wallet_detail(address: str):
-    """Posições abertas de uma carteira específica."""
-    try:
-        url = f"{DATA_API}/positions?user={address}&sizeThreshold=10&limit=50"
-        resp = requests.get(url, headers=HEADERS, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            items = data if isinstance(data, list) else data.get("data", [])
-            if items:
-                positions = []
-                total = 0
-                for p in items:
-                    valor = float(p.get("currentValue") or p.get("size") or 0)
-                    total += valor
-                    positions.append({
-                        "mercado": p.get("title") or p.get("market") or p.get("question"),
-                        "outcome": p.get("outcome"),
-                        "valor_usd": round(valor, 2),
-                        "preco_medio": p.get("avgPrice") or p.get("curPrice"),
-                        "pnl": p.get("cashPnl") or p.get("pnl"),
-                        "polymarket_url": f"https://polymarket.com/event/{p.get('slug', '')}",
-                    })
-                return {
-                    "status": "ok",
-                    "wallet": address[:8] + "..." + address[-4:],
-                    "wallet_full": address,
-                    "total_posicoes": len(positions),
-                    "total_exposto_usd": round(total, 2),
-                    "posicoes": positions,
-                    "polymarket_url": f"https://polymarket.com/profile/{address}",
-                }
-    except Exception as e:
-        print("Erro wallet detail:", e)
+    """
+    Detalhe completo de uma carteira — histórico de apostas.
+    """
+    txs = get_wallet_trades(address, limit=20)
+
+    if not txs:
+        return {
+            "status": "unavailable",
+            "wallet": address,
+            "polymarket_url": f"https://polymarket.com/profile/{address}",
+            "message": "Nenhuma transação encontrada"
+        }
+
+    trades = []
+    total_apostado = 0
+
+    for tx in txs:
+        valor_usdc = round(int(tx.get("value", 0)) / 1e6, 2)
+        if valor_usdc < 1:
+            continue
+
+        timestamp = int(tx.get("timeStamp", 0))
+        dt = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        total_apostado += valor_usdc
+
+        trades.append({
+            "valor_usd": valor_usdc,
+            "timestamp": dt,
+            "tx_hash": tx.get("hash", "")[:16] + "...",
+            "polygonscan_url": f"https://polygonscan.com/tx/{tx.get('hash', '')}",
+        })
 
     return {
-        "status": "unavailable",
-        "wallet": address,
-        "mensagem": "Veja as apostas desta carteira em:",
+        "status": "ok",
+        "wallet": address[:8] + "..." + address[-4:],
+        "wallet_full": address,
+        "total_transacoes": len(trades),
+        "total_apostado_usd": round(total_apostado, 2),
+        "historico": trades,
         "polymarket_url": f"https://polymarket.com/profile/{address}",
         "polygonscan_url": f"https://polygonscan.com/address/{address}",
+    }
+
+
+@app.get("/leaders")
+def get_leaders():
+    """
+    Redireciona para os melhores recursos de líderes.
+    Use /leaders/live para apostas em tempo real.
+    """
+    return {
+        "endpoints": {
+            "apostas_ao_vivo": "/leaders/live",
+            "detalhe_carteira": "/leaders/wallet/{address}",
+        },
+        "links_externos": {
+            "leaderboard_oficial": "https://polymarket.com/leaderboard",
+            "polymarket_whales": "https://polymarketwhales.info",
+            "atividade_geral": "https://polymarket.com/activity",
+        }
     }
