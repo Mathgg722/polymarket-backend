@@ -386,202 +386,548 @@ def close_trade(trade_id: int, db: Session = Depends(get_db)):
 
     return {
         "message": "Aposta fechada!",
-        "outcome": trade.outcome,
-        "entry_price": trade.entry_price,
-        "exit_price": exit_price,
-        "pnl_usd": pnl,
-        "status": trade.status
+
+
+# ─────────────────────────────────────────
+# CONFIGURAÇÕES GLOBAIS
+# ─────────────────────────────────────────
+
+NEWSAPI_KEY = "a595b3e7d7a047fda7a934162cf9c3ad"
+ANTHROPIC_KEY = "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"
+POLYMARKET_CLOB = "https://clob.polymarket.com"
+GAMMA_API = "https://gamma-api.polymarket.com"
+DATA_API = "https://data-api.polymarket.com"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Referer": "https://polymarket.com",
+}
+
+
+# ─────────────────────────────────────────
+# /news — NOTÍCIAS REAIS
+# ─────────────────────────────────────────
+
+@app.get("/news")
+def get_news(query: str = "prediction markets politics economy"):
+    """Busca notícias reais via NewsAPI + Google News RSS."""
+    articles = []
+
+    # Fonte 1: NewsAPI
+    try:
+        params = {
+            "q": query,
+            "language": "en",
+            "sortBy": "publishedAt",
+            "pageSize": 30,
+            "apiKey": NEWSAPI_KEY,
+        }
+        resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
+        if resp.status_code == 200:
+            for a in resp.json().get("articles", []):
+                if not a.get("title") or "[Removed]" in a.get("title", ""):
+                    continue
+                articles.append({
+                    "title": a.get("title"),
+                    "description": a.get("description") or "",
+                    "source": a.get("source", {}).get("name", ""),
+                    "url": a.get("url"),
+                    "published_at": a.get("publishedAt"),
+                    "fonte": "NewsAPI"
+                })
+    except Exception as e:
+        print(f"Erro NewsAPI: {e}")
+
+    # Fonte 2: Google News RSS
+    try:
+        import xml.etree.ElementTree as ET
+        params = {"q": "polymarket OR prediction market OR geopolitics", "hl": "en", "gl": "US", "ceid": "US:en"}
+        resp = requests.get("https://news.google.com/rss/search", params=params, timeout=8)
+        if resp.status_code == 200:
+            root = ET.fromstring(resp.content)
+            for item in root.findall(".//item")[:20]:
+                title = item.findtext("title", "")
+                articles.append({
+                    "title": title,
+                    "description": item.findtext("description", "")[:200],
+                    "source": "Google News",
+                    "url": item.findtext("link", ""),
+                    "published_at": item.findtext("pubDate", ""),
+                    "fonte": "Google News"
+                })
+    except Exception as e:
+        print(f"Erro Google News RSS: {e}")
+
+    return {
+        "total": len(articles),
+        "articles": articles[:40]
     }
 
 
 # ─────────────────────────────────────────
+# /cleanup — LIMPEZA DE MERCADOS ANTIGOS
+# ─────────────────────────────────────────
+
+@app.post("/cleanup")
+def cleanup_old_markets(db: Session = Depends(get_db)):
+    """Remove mercados antigos com preco zero."""
+    years_old = ["2020", "2021", "2019", "2018", "2017"]
+
+    markets_all = db.query(Market).all()
+    removed = 0
+
+    for m in markets_all:
+        slug = m.market_slug or ""
+        question = m.question or ""
+        is_old = any(y in slug or y in question for y in years_old)
+
+        # Verifica se todos tokens tem preco zero
+        all_zero = all(t.price == 0 for t in m.tokens) if m.tokens else True
+
+        if is_old and all_zero:
+            for token in m.tokens:
+                db.query(Snapshot).filter(Snapshot.token_id == token.token_id).delete()
+                db.delete(token)
+            db.delete(m)
+            removed += 1
+
+    db.commit()
+    total = db.query(Market).count()
+    return {
+        "message": "Limpeza concluída!",
+        "removidos": removed,
+        "total_restante": total
+    }
 
 
 # ─────────────────────────────────────────
-# SISTEMA DE LÍDERES / TOP TRADERS
-# Via blockchain Polygon (Etherscan API V2)
+# /signals — SINAIS DE OPORTUNIDADE
 # ─────────────────────────────────────────
 
-ETHERSCAN_API_KEY = "K7GC9Q61CN7XB9NS8GR1YHPFQF7JHFCWJK"
-POLYGON_CHAIN_ID = "137"
-ETHERSCAN_BASE = "https://api.etherscan.io/v2/api"
+@app.get("/signals")
+def get_signals(db: Session = Depends(get_db)):
+    """Sinais baseados em variações de preço recentes."""
+    now = datetime.utcnow()
+    window_5m = now - timedelta(minutes=5)
+    window_1h = now - timedelta(hours=1)
 
-# Contrato principal do Polymarket na Polygon
-POLYMARKET_CONTRACT = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+    signals = []
+    tokens = db.query(Token).all()
+
+    for token in tokens:
+        current_price = token.price
+        if current_price == 0:
+            continue
+
+        snap_5m = (
+            db.query(Snapshot)
+            .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= window_5m)
+            .order_by(Snapshot.timestamp.desc())
+            .first()
+        )
+        snap_1h = (
+            db.query(Snapshot)
+            .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= window_1h)
+            .order_by(Snapshot.timestamp.desc())
+            .first()
+        )
+
+        if not snap_5m:
+            continue
+
+        change_5m = round((current_price - snap_5m.price) * 100, 2)
+        if abs(change_5m) < 3.0:
+            continue
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        edge = abs(change_5m)
+        confidence = min(edge / 20, 1.0)
+        kelly = round(edge / 100 * 0.25 * 100, 2)
+        change_1h = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
+
+        signals.append({
+            "market": market.question,
+            "slug": market.market_slug,
+            "outcome": token.outcome,
+            "signal_type": "YES" if change_5m > 0 else "NO",
+            "market_prob": round(snap_5m.price * 100, 1),
+            "estimated_prob": round(current_price * 100, 1),
+            "edge": edge,
+            "confidence": round(confidence, 2),
+            "kelly_position_pct": kelly,
+            "change_1h": change_1h,
+            "detected_at": now.isoformat(),
+        })
+
+    signals.sort(key=lambda x: abs(x["edge"]), reverse=True)
+    return signals[:30]
 
 
-def get_recent_trades_blockchain(limit=50):
-    """Busca apostas recentes diretamente da blockchain Polygon."""
-    try:
-        params = {
-            "chainid": POLYGON_CHAIN_ID,
-            "module": "account",
-            "action": "tokentx",
-            "contractaddress": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # USDC Polygon
-            "address": POLYMARKET_CONTRACT,
-            "page": 1,
-            "offset": limit,
-            "sort": "desc",
-            "apikey": ETHERSCAN_API_KEY,
+# ─────────────────────────────────────────
+# /leaders — TOP TRADERS
+# ─────────────────────────────────────────
+
+@app.get("/leaders")
+def get_leaders():
+    for window in ["all", "1mo", "1w", "1d"]:
+        try:
+            url = f"{DATA_API}/leaderboard?window={window}&limit=20"
+            resp = requests.get(url, headers=HEADERS, timeout=8)
+            if resp.status_code == 200:
+                items = resp.json()
+                items = items if isinstance(items, list) else items.get("data", [])
+                if items:
+                    leaders = []
+                    for i, t in enumerate(items[:20]):
+                        address = t.get("proxyWallet") or t.get("address") or ""
+                        won = t.get("positionsWon") or 0
+                        lost = t.get("positionsLost") or 0
+                        leaders.append({
+                            "rank": i + 1,
+                            "username": t.get("name") or t.get("pseudonym") or address[:10] + "...",
+                            "address": address,
+                            "profit_usd": t.get("profit") or t.get("pnl") or 0,
+                            "volume_usd": t.get("volume") or 0,
+                            "win_rate": round(won / max(won + lost, 1) * 100, 1),
+                            "ver_apostas": f"https://polymarket.com/profile/{address}",
+                        })
+                    return {"status": "ok", "leaders": leaders}
+        except:
+            continue
+
+    return {
+        "status": "unavailable",
+        "links": {
+            "leaderboard": "https://polymarket.com/leaderboard",
+            "whales": "https://polymarketwhales.info",
+            "atividade": "https://polymarket.com/activity",
         }
-        resp = requests.get(ETHERSCAN_BASE, params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") == "1":
-                return data.get("result", [])
-    except Exception as e:
-        print("Erro blockchain:", e)
-    return []
-
-
-def get_wallet_trades(address, limit=20):
-    """Busca apostas de uma carteira específica."""
-    try:
-        params = {
-            "chainid": POLYGON_CHAIN_ID,
-            "module": "account",
-            "action": "tokentx",
-            "contractaddress": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-            "address": address,
-            "page": 1,
-            "offset": limit,
-            "sort": "desc",
-            "apikey": ETHERSCAN_API_KEY,
-        }
-        resp = requests.get(ETHERSCAN_BASE, params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("status") == "1":
-                return data.get("result", [])
-    except Exception as e:
-        print("Erro wallet:", e)
-    return []
+    }
 
 
 @app.get("/leaders/live")
 def get_live_trades():
-    """
-    Apostas ao vivo na blockchain Polygon.
-    Mostra quem apostou, quanto e quando em tempo real.
-    """
-    from datetime import timezone
-    txs = get_recent_trades_blockchain(limit=50)
+    """Apostas recentes na blockchain."""
+    try:
+        url = f"{POLYMARKET_CLOB}/trades?limit=100"
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            trades_raw = data if isinstance(data, list) else data.get("data", [])
+            trades = []
+            wallets_seen = {}
 
-    if not txs:
-        return {
-            "status": "unavailable",
-            "message": "Sem dados no momento",
-            "links": {
-                "leaderboard": "https://polymarket.com/leaderboard",
-                "whales": "https://polymarketwhales.info",
-                "activity": "https://polymarket.com/activity"
+            for tx in trades_raw:
+                valor = float(tx.get("size") or tx.get("usdcSize") or 0)
+                wallet = tx.get("maker") or tx.get("owner") or ""
+                if not wallet:
+                    continue
+                wallets_seen[wallet] = wallets_seen.get(wallet, 0) + 1
+                trades.append({
+                    "wallet": wallet[:8] + "..." + wallet[-4:],
+                    "wallet_full": wallet,
+                    "valor_usd": round(valor, 2),
+                    "outcome": tx.get("outcome") or tx.get("side"),
+                    "preco": tx.get("price"),
+                    "timestamp": tx.get("timestamp") or tx.get("matchedAt"),
+                    "polymarket_url": f"https://polymarket.com/profile/{wallet}",
+                })
+
+            top_wallets = sorted(wallets_seen.items(), key=lambda x: x[1], reverse=True)[:10]
+            return {
+                "status": "ok",
+                "total_apostas": len(trades),
+                "apostas_recentes": sorted(trades, key=lambda x: x["valor_usd"], reverse=True)[:20],
+                "top_carteiras": [
+                    {"wallet": w[:8] + "..." + w[-4:], "wallet_full": w, "num_apostas": n,
+                     "polymarket_url": f"https://polymarket.com/profile/{w}"}
+                    for w, n in top_wallets
+                ]
             }
-        }
-
-    trades = []
-    wallets_seen = {}
-
-    for tx in txs:
-        valor_usdc = round(int(tx.get("value", 0)) / 1e6, 2)
-        if valor_usdc < 10:  # Ignora apostas menores que $10
-            continue
-
-        wallet = tx.get("from", "")
-        timestamp = int(tx.get("timeStamp", 0))
-        dt = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-
-        # Conta quantas vezes essa carteira aparece (frequência)
-        wallets_seen[wallet] = wallets_seen.get(wallet, 0) + 1
-
-        trades.append({
-            "wallet": wallet[:8] + "..." + wallet[-4:] if wallet else "Unknown",
-            "wallet_full": wallet,
-            "valor_usd": valor_usdc,
-            "timestamp": dt,
-            "tx_hash": tx.get("hash", "")[:16] + "...",
-            "polygonscan_url": f"https://polygonscan.com/tx/{tx.get('hash', '')}",
-            "polymarket_url": f"https://polymarket.com/profile/{wallet}",
-        })
-
-    # Top carteiras mais ativas
-    top_wallets = sorted(wallets_seen.items(), key=lambda x: x[1], reverse=True)[:10]
+    except Exception as e:
+        print(f"Erro live trades: {e}")
 
     return {
-        "status": "ok",
-        "total_apostas": len(trades),
-        "apostas_recentes": trades[:20],
-        "top_carteiras_ativas": [
-            {
-                "wallet": w[:8] + "..." + w[-4:],
-                "wallet_full": w,
-                "num_apostas": n,
-                "polymarket_url": f"https://polymarket.com/profile/{w}",
-            }
-            for w, n in top_wallets
-        ]
+        "status": "unavailable",
+        "links": {
+            "atividade": "https://polymarket.com/activity",
+            "whales": "https://polymarketwhales.info",
+        }
     }
 
 
 @app.get("/leaders/wallet/{address}")
 def get_wallet_detail(address: str):
-    """
-    Detalhe completo de uma carteira — histórico de apostas.
-    """
-    txs = get_wallet_trades(address, limit=20)
-
-    if not txs:
-        return {
-            "status": "unavailable",
-            "wallet": address,
-            "polymarket_url": f"https://polymarket.com/profile/{address}",
-            "message": "Nenhuma transação encontrada"
-        }
-
-    trades = []
-    total_apostado = 0
-
-    for tx in txs:
-        valor_usdc = round(int(tx.get("value", 0)) / 1e6, 2)
-        if valor_usdc < 1:
-            continue
-
-        timestamp = int(tx.get("timeStamp", 0))
-        dt = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-        total_apostado += valor_usdc
-
-        trades.append({
-            "valor_usd": valor_usdc,
-            "timestamp": dt,
-            "tx_hash": tx.get("hash", "")[:16] + "...",
-            "polygonscan_url": f"https://polygonscan.com/tx/{tx.get('hash', '')}",
-        })
+    try:
+        url = f"{DATA_API}/positions?user={address}&sizeThreshold=10&limit=50"
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        if resp.status_code == 200:
+            items = resp.json()
+            items = items if isinstance(items, list) else items.get("data", [])
+            if items:
+                positions = []
+                total = 0
+                for p in items:
+                    valor = float(p.get("currentValue") or p.get("size") or 0)
+                    total += valor
+                    positions.append({
+                        "mercado": p.get("title") or p.get("market") or p.get("question"),
+                        "outcome": p.get("outcome"),
+                        "valor_usd": round(valor, 2),
+                        "preco_medio": p.get("avgPrice") or p.get("curPrice"),
+                        "pnl": p.get("cashPnl") or p.get("pnl"),
+                    })
+                return {
+                    "status": "ok",
+                    "wallet": address[:8] + "..." + address[-4:],
+                    "total_posicoes": len(positions),
+                    "total_exposto_usd": round(total, 2),
+                    "posicoes": positions,
+                    "polymarket_url": f"https://polymarket.com/profile/{address}",
+                }
+    except Exception as e:
+        print(f"Erro wallet: {e}")
 
     return {
-        "status": "ok",
-        "wallet": address[:8] + "..." + address[-4:],
-        "wallet_full": address,
-        "total_transacoes": len(trades),
-        "total_apostado_usd": round(total_apostado, 2),
-        "historico": trades,
+        "status": "unavailable",
         "polymarket_url": f"https://polymarket.com/profile/{address}",
         "polygonscan_url": f"https://polygonscan.com/address/{address}",
     }
 
 
-@app.get("/leaders")
-def get_leaders():
-    """
-    Redireciona para os melhores recursos de líderes.
-    Use /leaders/live para apostas em tempo real.
-    """
-    return {
-        "endpoints": {
-            "apostas_ao_vivo": "/leaders/live",
-            "detalhe_carteira": "/leaders/wallet/{address}",
-        },
-        "links_externos": {
-            "leaderboard_oficial": "https://polymarket.com/leaderboard",
-            "polymarket_whales": "https://polymarketwhales.info",
-            "atividade_geral": "https://polymarket.com/activity",
+# ─────────────────────────────────────────
+# /intelligence — SISTEMA DE INTELIGÊNCIA COM IA REAL
+# ─────────────────────────────────────────
+
+def fetch_news_for_query(query: str, max_results: int = 8):
+    """Busca notícias para uma query específica."""
+    articles = []
+    try:
+        params = {
+            "q": query,
+            "language": "en",
+            "sortBy": "publishedAt",
+            "pageSize": max_results,
+            "apiKey": NEWSAPI_KEY,
         }
+        resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
+        if resp.status_code == 200:
+            for a in resp.json().get("articles", []):
+                if not a.get("title") or "[Removed]" in a.get("title", ""):
+                    continue
+                articles.append({
+                    "title": a.get("title", ""),
+                    "description": (a.get("description") or "")[:300],
+                    "source": a.get("source", {}).get("name", ""),
+                    "url": a.get("url", ""),
+                    "published_at": a.get("publishedAt", ""),
+                })
+    except Exception as e:
+        print(f"Erro news query: {e}")
+
+    # Google News RSS como complemento
+    try:
+        import xml.etree.ElementTree as ET
+        params = {"q": query, "hl": "en", "gl": "US", "ceid": "US:en"}
+        resp = requests.get("https://news.google.com/rss/search", params=params, timeout=6)
+        if resp.status_code == 200:
+            root = ET.fromstring(resp.content)
+            for item in root.findall(".//item")[:5]:
+                articles.append({
+                    "title": item.findtext("title", ""),
+                    "description": item.findtext("description", "")[:200],
+                    "source": "Google News",
+                    "url": item.findtext("link", ""),
+                    "published_at": item.findtext("pubDate", ""),
+                })
+    except:
+        pass
+
+    return articles[:12]
+
+
+def analyze_with_claude(question: str, articles: list) -> dict:
+    """Usa Claude Haiku para analisar notícias e dar score."""
+    import json
+
+    if not articles:
+        return {
+            "score_yes": 50,
+            "recomendacao": "EVITE",
+            "confianca": 0.2,
+            "resumo": "Sem notícias suficientes para análise confiável.",
+            "sentimento": "NEUTRO",
+            "fontes_relevantes": 0,
+        }
+
+    news_text = "\n".join([
+        f"[{a['source']}] {a['title']} — {a['description'][:150]}"
+        for a in articles[:8]
+    ])
+
+    prompt = f"""Você é um analista expert em prediction markets e geopolítica.
+
+PERGUNTA DO MERCADO: {question}
+
+NOTÍCIAS RECENTES:
+{news_text}
+
+Analise as notícias e responda SOMENTE com JSON válido, sem texto antes ou depois:
+
+{{"score_yes": <0-100 probabilidade do YES acontecer>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <explicação curta em português max 100 chars>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">, "fontes_relevantes": <número de notícias relevantes>}}"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 300,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=15
+        )
+        if resp.status_code == 200:
+            text = resp.json().get("content", [{}])[0].get("text", "{}")
+            text = text.replace("```json", "").replace("```", "").strip()
+            return json.loads(text)
+    except Exception as e:
+        print(f"Erro Claude API: {e}")
+
+    # Fallback por palavras-chave
+    all_text = " ".join([a["title"] + " " + a["description"] for a in articles]).lower()
+    pos = sum(1 for w in ["confirmed","approved","wins","rises","signed","passes"] if w in all_text)
+    neg = sum(1 for w in ["fails","rejected","loses","denied","cancelled","drops"] if w in all_text)
+    score = 50 + (pos - neg) * 8
+    score = max(10, min(90, score))
+    return {
+        "score_yes": score,
+        "recomendacao": "APOSTE YES" if pos > neg else "APOSTE NO" if neg > pos else "EVITE",
+        "confianca": min(len(articles) / 10, 0.7),
+        "resumo": f"{len(articles)} notícias analisadas. {pos} positivas, {neg} negativas.",
+        "sentimento": "POSITIVO" if pos > neg else "NEGATIVO" if neg > pos else "NEUTRO",
+        "fontes_relevantes": len(articles),
+    }
+
+
+@app.get("/intelligence/{slug}")
+def get_intelligence(slug: str, db: Session = Depends(get_db)):
+    """Score de inteligência completo para um mercado."""
+    market = db.query(Market).filter(Market.market_slug == slug).first()
+    if not market:
+        return {"error": "Mercado não encontrado"}
+
+    yes_price = None
+    no_price = None
+    for token in market.tokens:
+        if token.outcome and token.outcome.upper() == "YES":
+            yes_price = round(token.price * 100, 1)
+        elif token.outcome and token.outcome.upper() == "NO":
+            no_price = round(token.price * 100, 1)
+
+    # Keywords da pergunta
+    keywords = market.question.replace("?","").replace("Will ","").replace("will ","")[:80]
+    articles = fetch_news_for_query(keywords)
+    analysis = analyze_with_claude(market.question, articles)
+
+    score_yes = analysis.get("score_yes", 50)
+    edge = round(score_yes - (yes_price or 50), 1)
+    rec = analysis.get("recomendacao", "EVITE")
+    confianca = analysis.get("confianca", 0.5)
+
+    # Sinal visual
+    if rec == "APOSTE YES" and abs(edge) >= 5 and confianca >= 0.5:
+        sinal = "🟢 APOSTE YES"
+        sinal_cor = "green"
+    elif rec == "APOSTE NO" and abs(edge) >= 5 and confianca >= 0.5:
+        sinal = "🔴 APOSTE NO"
+        sinal_cor = "red"
+    else:
+        sinal = "🟡 EVITE"
+        sinal_cor = "yellow"
+
+    return {
+        "market": market.question,
+        "slug": slug,
+        "yes_price_mercado": yes_price,
+        "no_price_mercado": no_price,
+        "score_yes_ia": score_yes,
+        "edge": edge,
+        "sinal": sinal,
+        "sinal_cor": sinal_cor,
+        "recomendacao": rec,
+        "confianca": confianca,
+        "resumo": analysis.get("resumo"),
+        "sentimento": analysis.get("sentimento"),
+        "fontes_relevantes": analysis.get("fontes_relevantes", 0),
+        "noticias": articles[:5],
+        "polymarket_url": f"https://polymarket.com/event/{slug}",
+        "atualizado_em": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/intelligence")
+def get_all_intelligence(db: Session = Depends(get_db)):
+    """Score de inteligência para os top 15 mercados mais relevantes."""
+    now = datetime.utcnow()
+    markets = (
+        db.query(Market)
+        .join(Token)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct()
+        .limit(15)
+        .all()
+    )
+
+    results = []
+    for m in markets:
+        yes_price = None
+        for token in m.tokens:
+            if token.outcome and token.outcome.upper() == "YES":
+                yes_price = round(token.price * 100, 1)
+
+        if not yes_price or yes_price == 0:
+            continue
+
+        keywords = m.question.replace("?","").replace("Will ","")[:60]
+        articles = fetch_news_for_query(keywords, max_results=5)
+        analysis = analyze_with_claude(m.question, articles)
+
+        score_yes = analysis.get("score_yes", 50)
+        edge = round(score_yes - yes_price, 1)
+        rec = analysis.get("recomendacao", "EVITE")
+        confianca = analysis.get("confianca", 0.5)
+
+        if rec == "APOSTE YES" and abs(edge) >= 5 and confianca >= 0.5:
+            sinal_cor = "green"
+        elif rec == "APOSTE NO" and abs(edge) >= 5 and confianca >= 0.5:
+            sinal_cor = "red"
+        else:
+            sinal_cor = "yellow"
+
+        results.append({
+            "market": m.question,
+            "slug": m.market_slug,
+            "yes_price": yes_price,
+            "score_yes_ia": score_yes,
+            "edge": edge,
+            "sinal_cor": sinal_cor,
+            "recomendacao": rec,
+            "confianca": confianca,
+            "resumo": analysis.get("resumo"),
+            "fontes": analysis.get("fontes_relevantes", 0),
+        })
+
+    results.sort(key=lambda x: abs(x["edge"]), reverse=True)
+    return {
+        "total": len(results),
+        "atualizados_em": now.isoformat(),
+        "mercados": results
     }
