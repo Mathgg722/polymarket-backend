@@ -1,169 +1,160 @@
-import requests
 import time
-import json
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
+
 from database import SessionLocal, engine
-from models import Base, Market, Token, Snapshot
+from models import Base, Market, Token, Snapshot, Signal
 
 Base.metadata.create_all(bind=engine)
 
-BASE_URL = "https://gamma-api.polymarket.com/markets"
-
-
-def parse_end_date(end_date_str):
-    if not end_date_str:
-        return None
-    try:
-        return datetime.fromisoformat(end_date_str.replace("Z", "+00:00")).replace(tzinfo=None)
-    except Exception:
-        try:
-            return datetime.strptime(end_date_str[:10], "%Y-%m-%d")
-        except Exception:
-            return None
+POLYMARKET_API = "https://clob.polymarket.com/markets"
 
 
 def fetch_markets():
     try:
-        response = requests.get(f"{BASE_URL}?limit=200&active=true&order=volume24hr&ascending=false")
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, dict):
-            return data.get("markets", [])
-        return data
+        r = requests.get(POLYMARKET_API, timeout=10)
+        return r.json()
     except Exception as e:
         print("Erro ao buscar mercados:", e)
         return []
 
 
-def extract_prices(market):
-    """Extrai precos YES/NO de qualquer formato da API."""
-    yes_price = None
-    no_price = None
+def detect_signal(db, token_id, current_price, market):
+    try:
+        five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
 
-    # Formato 1: campo tokens []
-    tokens = market.get("tokens", [])
-    if tokens:
-        for t in tokens:
-            outcome = (t.get("outcome") or "").upper()
-            price = t.get("price")
-            if outcome == "YES" and price is not None:
-                yes_price = float(price)
-            elif outcome == "NO" and price is not None:
-                no_price = float(price)
-        if yes_price is not None:
-            return tokens, yes_price, no_price
+        prev = (
+            db.query(Snapshot)
+            .filter(Snapshot.token_id == token_id)
+            .order_by(Snapshot.timestamp.desc())
+            .limit(50)
+            .all()
+        )
 
-    # Formato 2: outcomePrices como string JSON
-    outcome_prices = market.get("outcomePrices")
-    if outcome_prices:
-        try:
-            prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
-            if len(prices) >= 2:
-                yes_price = float(prices[0])
-                no_price = float(prices[1])
-                # Cria tokens sinteticos
-                clob_ids = market.get("clobTokenIds", "[]")
-                ids = json.loads(clob_ids) if isinstance(clob_ids, str) else clob_ids
-                synth_tokens = [
-                    {"tokenId": ids[0] if ids else f"{market.get('id')}_YES", "outcome": "YES", "price": yes_price},
-                    {"tokenId": ids[1] if len(ids) > 1 else f"{market.get('id')}_NO", "outcome": "NO", "price": no_price},
-                ]
-                return synth_tokens, yes_price, no_price
-        except:
-            pass
+        prev_5m = None
+        for s in prev:
+            if s.timestamp <= five_minutes_ago:
+                prev_5m = s
+                break
 
-    # Formato 3: lastTradePrice
-    last_trade = market.get("lastTradePrice")
-    if last_trade:
-        yes_price = float(last_trade)
-        no_price = round(1 - yes_price, 4)
-        synth_tokens = [
-            {"tokenId": f"{market.get('id')}_YES", "outcome": "YES", "price": yes_price},
-            {"tokenId": f"{market.get('id')}_NO", "outcome": "NO", "price": no_price},
-        ]
-        return synth_tokens, yes_price, no_price
+        if not prev_5m:
+            return
 
-    return [], None, None
+        prev_price = prev_5m.price * 100
+        current_price = current_price * 100
+
+        if prev_price == 0:
+            return
+
+        change = ((current_price - prev_price) / prev_price) * 100
+        change = round(change, 1)
+
+        signal_type = None
+
+        if abs(change) >= 20:
+            signal_type = "EXTREME"
+        elif change >= 8:
+            signal_type = "SPIKE"
+        elif change <= -8:
+            signal_type = "DUMP"
+
+        if not signal_type:
+            return
+
+        confidence = min(1.0, abs(change) / 20)
+
+        signal = Signal(
+            market=market.question,
+            slug=market.market_slug,
+            outcome="YES",
+            tipo=signal_type,
+            change_5m=change,
+            current_price=current_price,
+            confidence=confidence,
+            polymarket_url=f"https://polymarket.com/event/{market.market_slug}",
+        )
+
+        db.add(signal)
+
+    except Exception as e:
+        print("Erro detectando sinal:", e)
 
 
-def run():
-    print("🚀 WORKER INICIOU")
-    first_run = True
-
+def run_worker():
     while True:
+
         print("🔄 Atualizando mercados...")
 
         db = SessionLocal()
         markets = fetch_markets()
-        print("📊 Quantidade recebida:", len(markets))
 
-        # Debug: mostra campos do primeiro mercado na primeira execucao
-        if first_run and markets:
-            print("🔍 CAMPOS DO PRIMEIRO MERCADO:", list(markets[0].keys()))
-            print("🔍 EXEMPLO:", json.dumps(markets[0], indent=2)[:500])
-            first_run = False
+        print("📊 Mercados recebidos:", len(markets))
 
-        saved_tokens = 0
+        saved = 0
 
         for m in markets:
+
             try:
                 slug = m.get("slug")
                 question = m.get("question")
-                end_date = parse_end_date(m.get("endDate"))
-
-                if not slug:
-                    continue
 
                 existing = db.query(Market).filter_by(market_slug=slug).first()
+
                 if not existing:
                     existing = Market(
                         market_slug=slug,
                         question=question,
-                        end_date=end_date
+                        end_date=m.get("endDate"),
                     )
                     db.add(existing)
                     db.flush()
-                else:
-                    existing.end_date = end_date
 
-                tokens, yes_price, no_price = extract_prices(m)
+                tokens = m.get("tokens", [])
 
-                for token in tokens:
-                    token_id = token.get("tokenId")
-                    outcome = token.get("outcome")
-                    price = token.get("price")
+                for t in tokens:
 
-                    if not token_id:
-                        continue
+                    token_id = t.get("token_id")
+                    outcome = t.get("outcome")
+                    price = float(t.get("price") or 0)
 
-                    token_obj = db.query(Token).filter_by(token_id=token_id).first()
+                    token_obj = (
+                        db.query(Token)
+                        .filter_by(token_id=token_id)
+                        .first()
+                    )
+
                     if not token_obj:
                         token_obj = Token(
                             token_id=token_id,
                             outcome=outcome,
-                            price=float(price or 0),
-                            market_id=existing.id
+                            price=price,
+                            market_id=existing.id,
                         )
                         db.add(token_obj)
                     else:
-                        token_obj.price = float(price or 0)
+                        token_obj.price = price
 
                     snapshot = Snapshot(
                         token_id=token_id,
-                        price=float(price or 0)
+                        price=price,
                     )
+
                     db.add(snapshot)
-                    saved_tokens += 1
+
+                    detect_signal(db, token_id, price, existing)
+
+                    saved += 1
 
             except Exception as e:
-                print("Erro ao processar mercado:", e)
+                print("Erro no mercado:", e)
 
         db.commit()
         db.close()
 
-        print(f"✅ Atualização concluída. Tokens salvos: {saved_tokens}\n")
+        print("💾 Snapshots salvos:", saved)
+
         time.sleep(60)
 
 
 if __name__ == "__main__":
-    run()
+    run_worker()
