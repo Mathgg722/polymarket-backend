@@ -2484,3 +2484,34 @@ def backtest_v3():
         return {'total_simulados': total, 'acertos': acertos, 'erros': erros, 'win_rate_pct': win_rate, 'tokens_ativos': len(tokens_ativos), 'amostra': amostra, 'atualizado_em': datetime.utcnow().isoformat()}
     finally:
         db.close()
+
+
+@app.get('/intelligence/v2/{slug}')
+def intelligence_v2(slug: str):
+    import anthropic, os, json, re
+    db = SessionLocal()
+    try:
+        mercado = db.query(Market).filter_by(market_slug=slug).first()
+        if not mercado:
+            return {'erro': 'Mercado nao encontrado'}
+        token_yes = db.query(Token).filter_by(market_id=mercado.id, outcome='YES').first()
+        yes_price = round(token_yes.price * 100, 1) if token_yes else 50
+        noticias = cache.get('news', {}).get('articles', [])[:8]
+        noticias_texto = chr(10).join(['- ' + n.get('title','') for n in noticias])
+        prompt = 'Mercado: ' + mercado.question + chr(10) + 'YES: ' + str(yes_price) + '%' + chr(10) + 'Noticias:' + chr(10) + noticias_texto + chr(10) + 'Responda so com JSON: {score_yes: 0-100, recomendacao: texto, razao: texto}'
+        key = os.environ.get('ANTHROPIC_KEY','')
+        if not key:
+            return {'erro': 'Chave nao configurada'}
+        client = anthropic.Anthropic(api_key=key)
+        msg = client.messages.create(model='claude-haiku-4-5-20251001', max_tokens=200, messages=[{'role':'user','content':prompt}])
+        resposta = msg.content[0].text.strip()
+        match = re.search(r'\{.*\}', resposta, re.DOTALL)
+        dados = json.loads(match.group()) if match else {'score_yes':50,'recomendacao':'NEUTRO','razao':'Sem dados'}
+        score = dados.get('score_yes', 50)
+        sinal = 'APOSTE YES' if score >= 60 else ('APOSTE NO' if score <= 40 else 'EVITE')
+        cor = 'green' if score >= 60 else ('red' if score <= 40 else 'yellow')
+        return {'market': mercado.question, 'yes_price': yes_price, 'score_yes_ia': score, 'sinal': sinal, 'cor': cor, 'razao': dados.get('razao',''), 'atualizado_em': datetime.utcnow().isoformat()}
+    except Exception as e:
+        return {'erro': str(e)}
+    finally:
+        db.close()
