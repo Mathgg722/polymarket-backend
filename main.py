@@ -2516,7 +2516,7 @@ def intelligence_v3(slug: str, db: Session = Depends(get_db)):
         deviation = round(abs(yes_price - hist_mean), 1) if hist_mean is not None else None
 
         # Notícias do cache (mesma fonte que você já usa no /intelligence atual)
-        articles = (cache.get("news", {}) or {}).get("articles", [])[:12]
+        articles = []
 
         # Sentimento simples por palavras-chave
         POS = ["confirmed", "wins", "approved", "deal", "ceasefire", "success", "announced", "elected", "signed", "released"]
