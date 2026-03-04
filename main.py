@@ -2481,3 +2481,123 @@ def backtest_v3():
         return {'total_simulados': total, 'acertos': acertos, 'erros': erros, 'win_rate_pct': win_rate, 'tokens_ativos': len(tokens_ativos), 'amostra': amostra, 'atualizado_em': datetime.utcnow().isoformat()}
     finally:
         db.close() 
+@app.get("/intelligence/v3/{slug}")
+def intelligence_v3(slug: str, db: Session = Depends(get_db)):
+    """
+    Intelligence determinística (sem Anthropic):
+    - score baseado em: desvio do preço vs média recente + sentimento simples das notícias
+    """
+    try:
+        market = db.query(Market).filter_by(market_slug=slug).first()
+        if not market:
+            return {"error": "market_not_found", "slug": slug}
+
+        token_yes = db.query(Token).filter_by(market_id=market.id, outcome="YES").first()
+        token_no = db.query(Token).filter_by(market_id=market.id, outcome="NO").first()
+
+        yes_price = round((token_yes.price or 0) * 100, 1) if token_yes else 0.0
+        no_price = round((token_no.price or 0) * 100, 1) if token_no else round(100 - yes_price, 1)
+
+        # snapshots recentes do YES (se existir)
+        snaps = []
+        if token_yes:
+            snaps = (
+                db.query(Snapshot)
+                .filter_by(token_id=token_yes.token_id)
+                .order_by(Snapshot.timestamp.desc())
+                .limit(60)
+                .all()
+            )
+
+        hist = [s.price * 100 for s in snaps if s.price is not None]
+        hist_mean = round(sum(hist) / len(hist), 1) if len(hist) >= 10 else None
+        hist_min = round(min(hist), 1) if len(hist) >= 10 else None
+        hist_max = round(max(hist), 1) if len(hist) >= 10 else None
+        deviation = round(abs(yes_price - hist_mean), 1) if hist_mean is not None else None
+
+        # Notícias do cache (mesma fonte que você já usa no /intelligence atual)
+        articles = (cache.get("news", {}) or {}).get("articles", [])[:12]
+
+        # Sentimento simples por palavras-chave
+        POS = ["confirmed", "wins", "approved", "deal", "ceasefire", "success", "announced", "elected", "signed", "released"]
+        NEG = ["killed", "dead", "attack", "war", "explosion", "sanctions", "crisis", "fails", "rejects", "collapse"]
+
+        pos_count = 0
+        neg_count = 0
+        for a in articles:
+            t = (a.get("title", "") or "").lower()
+            d = (a.get("description", "") or "").lower()
+            text = t + " " + d
+            if any(w in text for w in POS):
+                pos_count += 1
+            if any(w in text for w in NEG):
+                neg_count += 1
+
+        if pos_count > neg_count:
+            sentimento = "POSITIVO"
+        elif neg_count > pos_count:
+            sentimento = "NEGATIVO"
+        else:
+            sentimento = "NEUTRO"
+
+        # Score base: começa neutro
+        score = 50.0
+
+        # Ajuste por desvio do preço vs média (se o mercado “mudou muito”, aumenta score de “sinal”)
+        if deviation is not None:
+            # cada 5 pontos de desvio adiciona 10 pontos (cap)
+            score += min(25.0, (deviation / 5.0) * 10.0)
+
+        # Ajuste por sentimento das notícias
+        if sentimento == "POSITIVO":
+            score += 10.0
+        elif sentimento == "NEGATIVO":
+            score -= 10.0
+
+        # Clamp 0-100
+        score = max(0.0, min(100.0, score))
+        score = round(score, 1)
+
+        if score >= 65:
+            recomendacao = "APOSTE YES"
+            cor = "green"
+        elif score <= 35:
+            recomendacao = "APOSTE NO"
+            cor = "red"
+        else:
+            recomendacao = "EVITE"
+            cor = "yellow"
+
+        razao = []
+        if deviation is not None:
+            razao.append(f"Preço YES={yes_price}% vs média recente={hist_mean}% (desvio {deviation} pts)")
+        else:
+            razao.append("Histórico insuficiente para média/ desvio")
+
+        razao.append(f"Notícias: {pos_count} positivas, {neg_count} negativas → {sentimento}")
+
+        return {
+            "market": market.question,
+            "slug": slug,
+            "yes_price_mercado": yes_price,
+            "no_price_mercado": no_price,
+            "score_yes": score,
+            "recomendacao": recomendacao,
+            "sinal_cor": cor,
+            "explicacao": " | ".join(razao),
+            "news_count": len(articles),
+            "noticias": [
+                {
+                    "title": a.get("title"),
+                    "source": a.get("source"),
+                    "url": a.get("url"),
+                    "published_at": a.get("published_at"),
+                }
+                for a in articles[:5]
+            ],
+            "polymarket_url": f"https://polymarket.com/event/{slug}",
+            "atualizado_em": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        return {"error": "intelligence_v3_failed", "detail": str(e)}
+    
