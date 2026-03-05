@@ -2457,18 +2457,31 @@ from models import Signal
 from sqlalchemy import and_
 from models import Signal
 
-# ============================
-# /signals/scan (COMPLETO)
-# ============================
+# ============================================================
+# SIGNALS: /signals/scan + /signals/v1/top + TELEGRAM + CRON
+# (BLOCO COMPLETO - COLAR INTEIRO)
+# ============================================================
 
 from datetime import datetime, timedelta
-from sqlalchemy import func
-from sqlalchemy.orm import Session
+import os
+import requests
+
 from fastapi import Depends
+from sqlalchemy import text, func, desc
+from sqlalchemy.orm import Session
 
 from models import Signal, Market, Token, Snapshot
 
 
+# ----------------------------
+# TELEGRAM STATE (evita spam)
+# ----------------------------
+_LAST_ALERT_SENT_AT = None
+
+
+# ----------------------------
+# HELPERS
+# ----------------------------
 def _level_from_move(abs_move: float) -> str:
     # abs_move em pontos percentuais (ex: 6.5 = 6.5 pts)
     if abs_move >= 12:
@@ -2508,7 +2521,7 @@ def _get_ref_snapshot_price(
     max_age_minutes: int = 25,
 ):
     """
-    Queremos algo próximo de (now - 5m), mas sem travar:
+    Quer algo próximo de (now - 5m), mas sem travar:
     - tenta <= now-5m
     - se não achar, tenta <= now-10m
     - se não achar, tenta <= now-15m
@@ -2531,12 +2544,14 @@ def _get_ref_snapshot_price(
             .first()
         )
         if snap and snap.price is not None:
-            return float(snap.price), f"closest <= now-{mins}m (max age {max_age_minutes}m)"
+            return float(snap.price), f"closest <= now-{mins}m (fallback; max age {max_age_minutes}m)"
 
     return None, f"missing (wanted now-{target_minutes}m; fallback 10/15; max age {max_age_minutes}m)"
 
 
-# Aceita GET e POST (pra você não ficar preso em Method Not Allowed)
+# ----------------------------
+# /signals/scan  (GET e POST)
+# ----------------------------
 @app.get("/signals/scan")
 @app.post("/signals/scan")
 def signals_scan(
@@ -2562,7 +2577,6 @@ def signals_scan(
     scanned_tokens = 0
     preview = []
 
-    # Pega mercados com tokens (evita join pesado)
     markets = (
         db.query(Market)
         .join(Token, Token.market_id == Market.id)
@@ -2579,7 +2593,6 @@ def signals_scan(
         scanned_markets += 1
 
         try:
-            # achar YES/NO
             yes_t = None
             no_t = None
             for t in (market.tokens or []):
@@ -2595,16 +2608,14 @@ def signals_scan(
             yes = float(yes_t.price or 0.0)
             no = float(no_t.price or 0.0)
 
-            # -------- filtros de lixo --------
-            # se os dois são zero (ou quase), é lixo
+            # lixo
             if yes <= 0.00000001 and no <= 0.00000001:
                 continue
-
-            # se é resolvido (YES ~0% ou ~100%), ignora
+            # resolvido / travado
             if yes >= 0.999 or yes <= 0.001:
                 continue
 
-            scanned_tokens += 2  # YES + NO
+            scanned_tokens += 2
 
             slug = market.market_slug or ""
             if not slug:
@@ -2615,14 +2626,13 @@ def signals_scan(
             # --------------------------
             # 1) ARBITRAGE (YES+NO != 1)
             # --------------------------
-            # Observação: NÃO faz arbitrage se alguma perna é zero real (evita spam de market quebrado)
+            # NÃO faz arbitrage se alguma perna é 0 real (evita spam em market quebrado)
             if yes > 0.0 and no > 0.0:
                 if total >= float(arb_over):
                     prev = _last_recent_signal(db, slug, "ARBITRAGE_OVER", cooldown_minutes)
-                    err_pct = round((total - 1.0) * 100, 2)  # em pontos (%)
+                    err_pts = round((total - 1.0) * 100, 2)  # pontos %
                     if prev and float(prev.change_5m or 0.0) != 0:
-                        # só repete se ficou bem pior
-                        if abs(err_pct) < abs(float(prev.change_5m)) * float(repeat_boost):
+                        if abs(err_pts) < abs(float(prev.change_5m)) * float(repeat_boost):
                             continue
 
                     for outcome, price in [("YES", yes), ("NO", no)]:
@@ -2631,7 +2641,7 @@ def signals_scan(
                             slug=slug,
                             outcome=outcome,
                             tipo="ARBITRAGE_OVER",
-                            change_5m=err_pct,
+                            change_5m=err_pts,
                             current_price=round(price * 100, 2),
                             confidence=min(1.0, (total - 1.0) / 0.08),
                             polymarket_url=f"https://polymarket.com/event/{slug}",
@@ -2641,19 +2651,14 @@ def signals_scan(
                             break
 
                     if len(preview) < 10:
-                        preview.append({
-                            "slug": slug,
-                            "tipo": "ARBITRAGE_OVER",
-                            "sum_pct": round(total * 100, 2),
-                            "err_pct": err_pct
-                        })
+                        preview.append({"slug": slug, "tipo": "ARBITRAGE_OVER", "err_pts": err_pts, "sum_pct": round(total * 100, 2)})
                     continue
 
                 if total <= float(arb_under):
                     prev = _last_recent_signal(db, slug, "ARBITRAGE_UNDER", cooldown_minutes)
-                    err_pct = round((1.0 - total) * 100, 2)
+                    err_pts = round((1.0 - total) * 100, 2)
                     if prev and float(prev.change_5m or 0.0) != 0:
-                        if abs(err_pct) < abs(float(prev.change_5m)) * float(repeat_boost):
+                        if abs(err_pts) < abs(float(prev.change_5m)) * float(repeat_boost):
                             continue
 
                     for outcome, price in [("YES", yes), ("NO", no)]:
@@ -2662,7 +2667,7 @@ def signals_scan(
                             slug=slug,
                             outcome=outcome,
                             tipo="ARBITRAGE_UNDER",
-                            change_5m=-abs(err_pct),  # mantém negativo p/ UNDER
+                            change_5m=-abs(err_pts),  # under = negativo
                             current_price=round(price * 100, 2),
                             confidence=min(1.0, (1.0 - total) / 0.08),
                             polymarket_url=f"https://polymarket.com/event/{slug}",
@@ -2672,24 +2677,18 @@ def signals_scan(
                             break
 
                     if len(preview) < 10:
-                        preview.append({
-                            "slug": slug,
-                            "tipo": "ARBITRAGE_UNDER",
-                            "sum_pct": round(total * 100, 2),
-                            "err_pct": -abs(err_pct)
-                        })
+                        preview.append({"slug": slug, "tipo": "ARBITRAGE_UNDER", "err_pts": -abs(err_pts), "sum_pct": round(total * 100, 2)})
                     continue
 
             # --------------------------
-            # 2) MOVIMENTO: YES agora vs ~5 min atrás (fallback 10/15)
+            # 2) MOVIMENTO: YES agora vs ~5m atrás
             # --------------------------
             old_price, ref_label = _get_ref_snapshot_price(db, yes_t.token_id, now, target_minutes=5, max_age_minutes=25)
             if old_price is None or old_price <= 0:
                 continue
 
-            move = round((yes - old_price) * 100, 2)   # pontos %
+            move = round((yes - old_price) * 100, 2)
             abs_move = abs(move)
-
             if abs_move < float(min_move):
                 continue
 
@@ -2742,12 +2741,15 @@ def signals_scan(
             "ref_snapshot": "closest <= now-5m (fallback 10m/15m; max age 25m)",
         }
     }
-        
-# ==============================
-# SIGNALS TOP (v1/top)
-# ==============================
-from sqlalchemy import text
-from models import Signal
+
+
+# ----------------------------
+# /signals/v1 (ALIAS) e /signals/v1/top
+# ----------------------------
+@app.get("/signals/v1")
+def signals_v1_alias(limit: int = 50, db: Session = Depends(get_db)):
+    return signals_v1_top(limit=limit, db=db)
+
 
 @app.get("/signals/v1/top")
 def signals_v1_top(limit: int = 50, db: Session = Depends(get_db)):
@@ -2761,7 +2763,6 @@ def signals_v1_top(limit: int = 50, db: Session = Depends(get_db)):
 
         limit_n = min(max(int(limit), 1), 200)
 
-        # puxa bastante coisa recente pra deduplicar bem
         rows = (
             db.query(Signal)
             .order_by(Signal.created_at.desc())
@@ -2769,19 +2770,17 @@ def signals_v1_top(limit: int = 50, db: Session = Depends(get_db)):
             .all()
         )
 
-        # dedupe por mercado (slug): como já está desc, o primeiro é o mais recente
         seen = set()
         uniq = []
         for r in rows:
             if not r.slug:
                 continue
-            key = r.slug  # se quiser mais rígido: (r.slug, r.outcome)
+            key = r.slug
             if key in seen:
                 continue
             seen.add(key)
             uniq.append(r)
 
-        # ordena por força do movimento
         uniq = sorted(uniq, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:limit_n]
 
         return {
@@ -2806,13 +2805,13 @@ def signals_v1_top(limit: int = 50, db: Session = Depends(get_db)):
     except Exception as e:
         return {"total": 0, "signals": [], "error": str(e)}
 
-# ==============================
-# TELEGRAM HELPERS
-# ==============================
-import requests
 
+# ----------------------------
+# TELEGRAM HELPERS
+# ----------------------------
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
 
 def _telegram_send(text: str) -> dict:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -2829,13 +2828,14 @@ def _telegram_send(text: str) -> dict:
     try:
         return r.json()
     except Exception:
-        return {"ok": False, "error": f"Telegram non-json response: {r.text[:200]}"}    
+        return {"ok": False, "error": f"Telegram non-json response: {r.text[:200]}"}
+
 
 @app.get("/alerts/test")
 def alerts_test():
-    """Testa se o Telegram está configurado."""
     resp = _telegram_send("✅ <b>PolySignal</b> conectado! (teste)")
     return {"status": "ok", "telegram": resp}
+
 
 @app.get("/alerts/run")
 def alerts_run(
@@ -2855,13 +2855,11 @@ def alerts_run(
     now = datetime.utcnow()
     cutoff = now - timedelta(minutes=max(int(minutes), 1))
 
-    # dedupe: se rodou há <60s, não manda de novo
     if _LAST_ALERT_SENT_AT and (now - _LAST_ALERT_SENT_AT).total_seconds() < 60:
         return {"status": "skip", "reason": "too_soon"}
 
     limit_n = min(max(int(limit), 1), 30)
 
-    # 1) tenta buscar fortes primeiro
     strong = (
         db.query(Signal)
         .filter(
@@ -2879,14 +2877,12 @@ def alerts_run(
     rows = strong
     mode = "STRONG"
 
-    # 2) se não tiver fortes, pega MED
     if not rows:
         med = (
             db.query(Signal)
             .filter(
                 Signal.created_at >= cutoff,
-                (Signal.tipo.like("%MED%"))
-                | (Signal.tipo.like("ARBITRAGE_%"))
+                (Signal.tipo.like("%MED%")) | (Signal.tipo.like("ARBITRAGE_%"))
             )
             .order_by(Signal.created_at.desc())
             .limit(800)
@@ -2899,16 +2895,12 @@ def alerts_run(
     if not rows:
         return {"status": "ok", "sent": 0, "message": "no signals in window", "mode": mode}
 
-    # --- resumo do alert ---
     spike_n = sum(1 for r in rows if "SPIKE" in (r.tipo or ""))
     dump_n = sum(1 for r in rows if "DUMP" in (r.tipo or ""))
     arb_n = sum(1 for r in rows if (r.tipo or "").startswith("ARBITRAGE_"))
-    max_abs = 0.0
-    for r in rows:
-        max_abs = max(max_abs, abs(float(r.change_5m or 0.0)))
+    max_abs = max(abs(float(r.change_5m or 0.0)) for r in rows) if rows else 0.0
     summary_line = f"Resumo: {spike_n} SPIKE | {dump_n} DUMP | {arb_n} ARB | Max: {max_abs:.2f} pts"
 
-    # monta mensagem
     lines = []
     title = "🚨 <b>PolySignal</b> — sinais fortes agora" if mode == "STRONG" else "🟡 <b>PolySignal</b> — top sinais (MED)"
     lines.append(title)
@@ -2938,13 +2930,12 @@ def alerts_run(
         lines.append(f"<a href=\"{url}\">{market[:120]}</a>")
         lines.append("")
 
-    text = "\n".join(lines).strip()
+    text_out = "\n".join(lines).strip()
 
-    # DRY RUN
     if int(dry_run) == 1:
-        return {"status": "dry_run", "would_send": len(rows), "mode": mode, "text": text}
+        return {"status": "dry_run", "would_send": len(rows), "mode": mode, "text": text_out}
 
-    telegram_resp = _telegram_send(text)
+    telegram_resp = _telegram_send(text_out)
     ok = bool(telegram_resp.get("ok"))
 
     if ok:
@@ -2952,8 +2943,10 @@ def alerts_run(
 
     return {"status": "ok" if ok else "fail", "sent": len(rows) if ok else 0, "mode": mode, "telegram": telegram_resp}
 
-from sqlalchemy import func
 
+# ----------------------------
+# DEBUG: last snapshot
+# ----------------------------
 @app.get("/debug/last_snapshot")
 def debug_last_snapshot(db: Session = Depends(get_db)):
     last_ts = db.query(func.max(Snapshot.timestamp)).scalar()
@@ -2961,29 +2954,29 @@ def debug_last_snapshot(db: Session = Depends(get_db)):
         "last_snapshot_timestamp": last_ts.isoformat() if last_ts else None,
         "now": datetime.utcnow().isoformat()
     }
-from sqlalchemy import desc
 
+
+# ----------------------------
+# CRON: /cron/tick
+# ----------------------------
 @app.get("/cron/tick")
 def cron_tick(db: Session = Depends(get_db)):
     """
     Cron endpoint:
-    1) roda refresh_markets()
+    1) roda refresh_markets(db)
     2) roda signals_scan(...)
     3) retorna last_snapshot_timestamp
     """
     try:
-        # 1) refresh
         try:
             refresh_markets(db)
         except Exception as e:
             print(f"[cron] refresh error: {e}")
 
-        # 2) scan
         scan_resp = None
         try:
             scan_resp = signals_scan(
                 limit_markets=300,
-                hist_limit=80,
                 min_move=0.4,
                 arb_over=1.02,
                 arb_under=0.98,
@@ -2995,7 +2988,6 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] scan error: {e}")
 
-        # 3) last snapshot
         last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
 
         return {
