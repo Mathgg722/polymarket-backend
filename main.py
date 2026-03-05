@@ -2862,22 +2862,22 @@ def anomalies_mispricing(limit: int = 20, db: Session = Depends(get_db)):
 
     return {"total": len(top), "mispricing": top}
 # ==============================
-# TELEGRAM ALERTS (Signals)
+# TELEGRAM ALERTS (Signals) + DRY RUN
 # ==============================
 import requests
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN = os.environ.get("8738723316:AAHqlYOCw2Z4XlQ5B3Ld4ZRJ55z2y5lncq0", "")
+TELEGRAM_CHAT_ID = os.environ.get("1236462706", "")
 
-# memória simples pra não spammar (reseta se redeploy)
+# memória simples pra evitar spam (reseta se redeploy)
 _LAST_ALERT_SENT_AT = None
 
 
 def _telegram_send(text: str) -> dict:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return {"ok": False, "error": "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"}
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"ok": False, "error": "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID"}
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
@@ -2902,18 +2902,19 @@ def alerts_test():
 def alerts_run(
     minutes: int = 10,
     limit: int = 12,
+    dry_run: int = 0,
     db: Session = Depends(get_db),
 ):
     """
-    Envia no Telegram os TOP sinais (HIGH/EXTREME) dos últimos X minutos.
-    Chame isso manualmente ou via cron.
+    Envia no Telegram os TOP sinais (HIGH/EXTREME + ARBITRAGE) dos últimos X minutos.
+    Use dry_run=1 para NÃO enviar e apenas ver o texto.
     """
     global _LAST_ALERT_SENT_AT
 
     now = datetime.utcnow()
     cutoff = now - timedelta(minutes=max(int(minutes), 1))
 
-    # dedupe simples: se já rodou e enviou há pouco, não envia de novo
+    # dedupe: se rodou há <60s, não manda de novo
     if _LAST_ALERT_SENT_AT and (now - _LAST_ALERT_SENT_AT).total_seconds() < 60:
         return {"status": "skip", "reason": "too_soon"}
 
@@ -2925,7 +2926,7 @@ def alerts_run(
             (Signal.tipo.like("%HIGH%")) | (Signal.tipo.like("%EXTREME%")) | (Signal.tipo.like("ARBITRAGE_%"))
         )
         .order_by(Signal.created_at.desc())
-        .limit(500)
+        .limit(800)
         .all()
     )
 
@@ -2949,13 +2950,25 @@ def alerts_run(
         slug = r.slug or ""
         url = r.polymarket_url or f"https://polymarket.com/event/{slug}"
 
-        emoji = "🟢" if "SPIKE" in tipo else ("🔴" if "DUMP" in tipo else "🟣")
+        if tipo.startswith("ARBITRAGE_"):
+            emoji = "🟣"
+        elif "SPIKE" in tipo:
+            emoji = "🟢"
+        elif "DUMP" in tipo:
+            emoji = "🔴"
+        else:
+            emoji = "⚪"
+
         sign = "+" if change >= 0 else ""
         lines.append(f"{emoji} <b>{tipo}</b> | {sign}{change:.2f} pts | {price:.2f}%")
         lines.append(f"<a href=\"{url}\">{market[:120]}</a>")
         lines.append("")
 
     text = "\n".join(lines).strip()
+
+    # DRY RUN: não envia, só mostra o texto
+    if int(dry_run) == 1:
+        return {"status": "dry_run", "would_send": len(rows), "text": text}
 
     telegram_resp = _telegram_send(text)
     ok = bool(telegram_resp.get("ok"))
