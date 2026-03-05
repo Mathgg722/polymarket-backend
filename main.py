@@ -2648,7 +2648,7 @@ from fastapi import Query
 from sqlalchemy import text
 from models import Signal
 
-@app.post("/signals/scan")
+@app.api_route("/signals/scan", methods=["GET", "POST"])
 def signals_scan(
     limit_tokens: int = Query(400, ge=10, le=3000),
     min_change_5m: float = Query(5.0, ge=0.5, le=50.0),  # em pontos percentuais (ex: 5.0 = 5%)
