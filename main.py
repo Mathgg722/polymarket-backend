@@ -2648,138 +2648,159 @@ from fastapi import Query
 from sqlalchemy import text
 from models import Signal
 
+from sqlalchemy import text
+from models import Signal
+
 @app.api_route("/signals/scan", methods=["GET", "POST"])
 def signals_scan(
-    limit_tokens: int = Query(400, ge=10, le=3000),
-    min_change_5m: float = Query(5.0, ge=0.5, le=50.0),  # em pontos percentuais (ex: 5.0 = 5%)
+    limit_tokens: int = 200,
+    min_move_5m: float = 1.5,
+    arb_over: float = 1.05,   # YES+NO >= 1.05 => OVER
+    arb_under: float = 0.95,  # YES+NO <= 0.95 => UNDER
     db: Session = Depends(get_db),
 ):
-    """
-    Escaneia tokens, detecta variação em 5 minutos, classifica tipo e SALVA em signals.
-    - Nunca derruba a API: retorna error se algo falhar
-    - Evita mercados "resolvidos" (>=95% ou <=5%)
-    - Evita duplicar: se já existe signal igual (slug+outcome+tipo) nos últimos ~10 min, não salva de novo
-    """
+    now = datetime.utcnow()
+    window_5m = now - timedelta(minutes=5)
+    cutoff = now - timedelta(minutes=10)  # dedupe 10min
+
     try:
-        now = datetime.utcnow()
-        window_5m = now - timedelta(minutes=5)
-        window_10m = now - timedelta(minutes=10)
-
-        # sanity check conexão
         db.execute(text("SELECT 1"))
+    except Exception as e:
+        return {"status": "fail", "error": f"db_down: {e}"}
 
-        # pega tokens ativos (evita extremos 0/100)
-        tokens = (
-            db.query(Token)
-            .filter(Token.price > 0.05, Token.price < 0.95)
-            .limit(int(limit_tokens))
-            .all()
-        )
+    created = 0
+    scanned = 0
+    errors = 0
+    preview = []
 
-        created = 0
-        scanned = 0
-        errors = 0
-        saved_rows = []
+    # pega tokens "ativos"
+    tokens = (
+        db.query(Token)
+        .filter(Token.price > 0.01, Token.price < 0.99)
+        .limit(int(limit_tokens))
+        .all()
+    )
 
-        for token in tokens:
-            scanned += 1
-            try:
-                current_price = float(token.price or 0.0)
-                if current_price <= 0:
-                    continue
+    # agrupa por market_id para ter YES e NO juntos
+    markets_map = {}
+    for t in tokens:
+        key = t.market_id
+        if not key:
+            continue
+        markets_map.setdefault(key, {})
+        outcome = (t.outcome or "").upper()
+        markets_map[key][outcome] = t
 
-                # snapshot mais recente ANTES de window_5m
-                snap_5m = (
-                    db.query(Snapshot)
-                    .filter(
-                        Snapshot.token_id == token.token_id,
-                        Snapshot.timestamp <= window_5m
-                    )
-                    .order_by(Snapshot.timestamp.desc())
-                    .first()
-                )
-                if not snap_5m or snap_5m.price is None:
-                    continue
+    for market_id, outs in markets_map.items():
+        scanned += 1
+        try:
+            yes_t = outs.get("YES")
+            no_t = outs.get("NO")
+            if not yes_t or not no_t:
+                continue
 
-                old_price = float(snap_5m.price or 0.0)
-                if old_price <= 0:
-                    continue
+            yes = float(yes_t.price or 0.0)
+            no = float(no_t.price or 0.0)
+            if yes <= 0 or no <= 0:
+                continue
 
-                # variação em pontos percentuais (0-100)
-                change_5m = (current_price - old_price) * 100.0
+            total = yes + no
 
-                if abs(change_5m) < float(min_change_5m):
-                    continue
+            market = db.query(Market).filter(Market.id == market_id).first()
+            if not market:
+                continue
 
-                # pega market
-                market = db.query(Market).filter(Market.id == token.market_id).first()
-                if not market:
-                    continue
-
-                # classificação de tipo
-                if abs(change_5m) >= 20:
-                    tipo = "EXTREME"
-                elif change_5m > 0:
-                    tipo = "SPIKE"
-                else:
-                    tipo = "DUMP"
-
-                # confiança simples (0-1): escala por magnitude (cap)
-                confidence = min(abs(change_5m) / 20.0, 1.0)
-
-                # dedupe: mesmo slug+outcome+tipo nos últimos 10 min
-                exists = (
+            # dedupe: não repetir o mesmo tipo em 10min
+            def recently(tipo: str) -> bool:
+                return (
                     db.query(Signal)
                     .filter(
                         Signal.slug == market.market_slug,
-                        Signal.outcome == (token.outcome or "").upper(),
                         Signal.tipo == tipo,
-                        Signal.created_at >= window_10m
+                        Signal.created_at >= cutoff
                     )
                     .first()
+                ) is not None
+
+            # --- ARBITRAGE (erro de soma) ---
+            if total >= arb_over and not recently("ARBITRAGE_OVER"):
+                # cria 2 sinais (YES e NO)
+                for outcome, price in [("YES", yes), ("NO", no)]:
+                    db.add(Signal(
+                        market=market.question,
+                        slug=market.market_slug,
+                        outcome=outcome,
+                        tipo="ARBITRAGE_OVER",
+                        change_5m=round((total - 1.0) * 100, 2),
+                        current_price=round(price * 100, 2),
+                        confidence=min(1.0, (total - 1.0) / 0.12),
+                        polymarket_url=f"https://polymarket.com/event/{market.market_slug}",
+                    ))
+                created += 2
+                if len(preview) < 10:
+                    preview.append({"slug": market.market_slug, "tipo": "ARBITRAGE_OVER", "sum_pct": round(total*100,2)})
+
+            elif total <= arb_under and not recently("ARBITRAGE_UNDER"):
+                for outcome, price in [("YES", yes), ("NO", no)]:
+                    db.add(Signal(
+                        market=market.question,
+                        slug=market.market_slug,
+                        outcome=outcome,
+                        tipo="ARBITRAGE_UNDER",
+                        change_5m=round((1.0 - total) * 100, 2),
+                        current_price=round(price * 100, 2),
+                        confidence=min(1.0, (1.0 - total) / 0.12),
+                        polymarket_url=f"https://polymarket.com/event/{market.market_slug}",
+                    ))
+                created += 2
+                if len(preview) < 10:
+                    preview.append({"slug": market.market_slug, "tipo": "ARBITRAGE_UNDER", "sum_pct": round(total*100,2)})
+
+            else:
+                # --- MOVIMENTO 5m (YES) ---
+                snap = (
+                    db.query(Snapshot)
+                    .filter(Snapshot.token_id == yes_t.token_id, Snapshot.timestamp <= window_5m)
+                    .order_by(Snapshot.timestamp.desc())
+                    .first()
                 )
-                if exists:
+                if not snap or snap.price is None:
                     continue
 
-                row = Signal(
-                    market=market.question or "",
-                    slug=market.market_slug or "",
-                    outcome=(token.outcome or "").upper(),
+                move = round((yes - float(snap.price)) * 100, 2)  # pontos %
+                if abs(move) < float(min_move_5m):
+                    continue
+
+                tipo = "SPIKE" if move > 0 else "DUMP"
+
+                if recently(tipo):
+                    continue
+
+                db.add(Signal(
+                    market=market.question,
+                    slug=market.market_slug,
+                    outcome="YES",
                     tipo=tipo,
-                    change_5m=float(round(change_5m, 2)),
-                    current_price=float(round(current_price * 100.0, 2)),
-                    confidence=float(round(confidence, 3)),
+                    change_5m=move,
+                    current_price=round(yes * 100, 2),
+                    confidence=min(1.0, abs(move) / 5.0),
                     polymarket_url=f"https://polymarket.com/event/{market.market_slug}",
-                )
-                db.add(row)
+                ))
                 created += 1
+                if len(preview) < 10:
+                    preview.append({"slug": market.market_slug, "tipo": tipo, "move_5m": move})
 
-                # pra devolver no response (sem depender de id já gerado)
-                saved_rows.append({
-                    "market": row.market,
-                    "slug": row.slug,
-                    "outcome": row.outcome,
-                    "tipo": row.tipo,
-                    "change_5m": row.change_5m,
-                    "current_price": row.current_price,
-                    "confidence": row.confidence,
-                    "polymarket_url": row.polymarket_url,
-                })
+        except Exception:
+            errors += 1
+            continue
 
-            except Exception:
-                errors += 1
-                continue
+    db.commit()
 
-        db.commit()
-
-        return {
-            "status": "ok",
-            "scanned_tokens": scanned,
-            "created_signals": created,
-            "errors": errors,
-            "signals_preview": saved_rows[:30],
-            "atualizado_em": now.isoformat(),
-        }
-
-    except Exception as e:
-        return {"status": "fail", "error": str(e)}
+    return {
+        "status": "ok",
+        "scanned_markets": scanned,
+        "created_signals": created,
+        "errors": errors,
+        "preview": preview,
+        "atualizado_em": now.isoformat(),
+    }
