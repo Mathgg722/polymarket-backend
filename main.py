@@ -2861,3 +2861,106 @@ def anomalies_mispricing(limit: int = 20, db: Session = Depends(get_db)):
     top = results[:min(int(limit), 100)]
 
     return {"total": len(top), "mispricing": top}
+# ==============================
+# TELEGRAM ALERTS (Signals)
+# ==============================
+import requests
+
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# memória simples pra não spammar (reseta se redeploy)
+_LAST_ALERT_SENT_AT = None
+
+
+def _telegram_send(text: str) -> dict:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"ok": False, "error": "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"}
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    r = requests.post(url, json=payload, timeout=10)
+    try:
+        return r.json()
+    except Exception:
+        return {"ok": False, "error": f"Telegram non-json response: {r.text[:200]}"}
+
+
+@app.get("/alerts/test")
+def alerts_test():
+    """Testa se o Telegram está configurado."""
+    resp = _telegram_send("✅ <b>PolySignal</b> conectado! (teste)")
+    return {"status": "ok", "telegram": resp}
+
+
+@app.get("/alerts/run")
+def alerts_run(
+    minutes: int = 10,
+    limit: int = 12,
+    db: Session = Depends(get_db),
+):
+    """
+    Envia no Telegram os TOP sinais (HIGH/EXTREME) dos últimos X minutos.
+    Chame isso manualmente ou via cron.
+    """
+    global _LAST_ALERT_SENT_AT
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=max(int(minutes), 1))
+
+    # dedupe simples: se já rodou e enviou há pouco, não envia de novo
+    if _LAST_ALERT_SENT_AT and (now - _LAST_ALERT_SENT_AT).total_seconds() < 60:
+        return {"status": "skip", "reason": "too_soon"}
+
+    # pega sinais recentes e fortes
+    rows = (
+        db.query(Signal)
+        .filter(
+            Signal.created_at >= cutoff,
+            (Signal.tipo.like("%HIGH%")) | (Signal.tipo.like("%EXTREME%")) | (Signal.tipo.like("ARBITRAGE_%"))
+        )
+        .order_by(Signal.created_at.desc())
+        .limit(500)
+        .all()
+    )
+
+    # ordena por força (abs change)
+    rows = sorted(rows, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:min(max(int(limit), 1), 30)]
+
+    if not rows:
+        return {"status": "ok", "sent": 0, "message": "no strong signals"}
+
+    # monta mensagem
+    lines = []
+    lines.append("🚨 <b>PolySignal</b> — sinais fortes agora")
+    lines.append(f"Janela: últimos {minutes} min | Top {len(rows)}")
+    lines.append("")
+
+    for r in rows:
+        change = float(r.change_5m or 0.0)
+        price = float(r.current_price or 0.0)
+        tipo = r.tipo or ""
+        market = (r.market or "").strip()
+        slug = r.slug or ""
+        url = r.polymarket_url or f"https://polymarket.com/event/{slug}"
+
+        emoji = "🟢" if "SPIKE" in tipo else ("🔴" if "DUMP" in tipo else "🟣")
+        sign = "+" if change >= 0 else ""
+        lines.append(f"{emoji} <b>{tipo}</b> | {sign}{change:.2f} pts | {price:.2f}%")
+        lines.append(f"<a href=\"{url}\">{market[:120]}</a>")
+        lines.append("")
+
+    text = "\n".join(lines).strip()
+
+    telegram_resp = _telegram_send(text)
+    ok = bool(telegram_resp.get("ok"))
+
+    if ok:
+        _LAST_ALERT_SENT_AT = now
+
+    return {"status": "ok" if ok else "fail", "sent": len(rows) if ok else 0, "telegram": telegram_resp}
