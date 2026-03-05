@@ -2952,3 +2952,49 @@ def debug_last_snapshot(db: Session = Depends(get_db)):
         "last_snapshot_timestamp": last_ts.isoformat() if last_ts else None,
         "now": datetime.utcnow().isoformat()
     }
+from sqlalchemy import desc
+
+@app.get("/cron/tick")
+def cron_tick(db: Session = Depends(get_db)):
+    """
+    Cron endpoint:
+    1) roda refresh_markets()
+    2) roda signals_scan(...)
+    3) retorna last_snapshot_timestamp
+    """
+    try:
+        # 1) refresh
+        try:
+            refresh_markets(db)
+        except Exception as e:
+            print(f"[cron] refresh error: {e}")
+
+        # 2) scan
+        scan_resp = None
+        try:
+            scan_resp = signals_scan(
+                limit_markets=300,
+                hist_limit=80,
+                min_move=0.4,
+                arb_over=1.02,
+                arb_under=0.98,
+                cooldown_minutes=8,
+                repeat_boost=1.0,
+                max_created=120,
+                db=db,
+            )
+        except Exception as e:
+            print(f"[cron] scan error: {e}")
+
+        # 3) last snapshot
+        last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
+
+        return {
+            "status": "ok",
+            "tick_now": datetime.utcnow().isoformat(),
+            "last_snapshot_timestamp": last.timestamp.isoformat() if last and last.timestamp else None,
+            "scan": scan_resp if scan_resp else {"status": "skip_or_error"},
+        }
+
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
