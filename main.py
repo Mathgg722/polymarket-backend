@@ -2901,12 +2901,14 @@ def alerts_test():
 @app.get("/alerts/run")
 def alerts_run(
     minutes: int = 10,
-    limit: int = 12,
+    limit: int = 10,
     dry_run: int = 0,
     db: Session = Depends(get_db),
 ):
     """
-    Envia no Telegram os TOP sinais (HIGH/EXTREME + ARBITRAGE) dos últimos X minutos.
+    Alerta inteligente:
+    - Se houver HIGH/EXTREME/ARBITRAGE -> manda só eles
+    - Senão -> manda top MED (até limit)
     Use dry_run=1 para NÃO enviar e apenas ver o texto.
     """
     global _LAST_ALERT_SENT_AT
@@ -2918,28 +2920,51 @@ def alerts_run(
     if _LAST_ALERT_SENT_AT and (now - _LAST_ALERT_SENT_AT).total_seconds() < 60:
         return {"status": "skip", "reason": "too_soon"}
 
-    # pega sinais recentes e fortes
-    rows = (
+    limit_n = min(max(int(limit), 1), 30)
+
+    # 1) tenta buscar fortes primeiro
+    strong = (
         db.query(Signal)
         .filter(
             Signal.created_at >= cutoff,
-            (Signal.tipo.like("%HIGH%")) | (Signal.tipo.like("%EXTREME%")) | (Signal.tipo.like("ARBITRAGE_%"))
+            (Signal.tipo.like("%HIGH%"))
+            | (Signal.tipo.like("%EXTREME%"))
+            | (Signal.tipo.like("ARBITRAGE_%"))
         )
         .order_by(Signal.created_at.desc())
         .limit(800)
         .all()
     )
+    strong = sorted(strong, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:limit_n]
 
-    # ordena por força (abs change)
-    rows = sorted(rows, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:min(max(int(limit), 1), 30)]
+    rows = strong
+    mode = "STRONG"
+
+    # 2) se não tiver fortes, pega MED
+    if not rows:
+        med = (
+            db.query(Signal)
+            .filter(
+                Signal.created_at >= cutoff,
+                (Signal.tipo.like("%MED%"))
+                | (Signal.tipo.like("ARBITRAGE_%"))
+            )
+            .order_by(Signal.created_at.desc())
+            .limit(800)
+            .all()
+        )
+        med = sorted(med, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:limit_n]
+        rows = med
+        mode = "MED_FALLBACK"
 
     if not rows:
-        return {"status": "ok", "sent": 0, "message": "no strong signals"}
+        return {"status": "ok", "sent": 0, "message": "no signals in window", "mode": mode}
 
     # monta mensagem
     lines = []
-    lines.append("🚨 <b>PolySignal</b> — sinais fortes agora")
-    lines.append(f"Janela: últimos {minutes} min | Top {len(rows)}")
+    title = "🚨 <b>PolySignal</b> — sinais fortes agora" if mode == "STRONG" else "🟡 <b>PolySignal</b> — top sinais (MED)"
+    lines.append(title)
+    lines.append(f"Janela: últimos {minutes} min | Top {len(rows)} | Mode: {mode}")
     lines.append("")
 
     for r in rows:
@@ -2966,9 +2991,9 @@ def alerts_run(
 
     text = "\n".join(lines).strip()
 
-    # DRY RUN: não envia, só mostra o texto
+    # DRY RUN
     if int(dry_run) == 1:
-        return {"status": "dry_run", "would_send": len(rows), "text": text}
+        return {"status": "dry_run", "would_send": len(rows), "mode": mode, "text": text}
 
     telegram_resp = _telegram_send(text)
     ok = bool(telegram_resp.get("ok"))
@@ -2976,4 +3001,4 @@ def alerts_run(
     if ok:
         _LAST_ALERT_SENT_AT = now
 
-    return {"status": "ok" if ok else "fail", "sent": len(rows) if ok else 0, "telegram": telegram_resp}
+    return {"status": "ok" if ok else "fail", "sent": len(rows) if ok else 0, "mode": mode, "telegram": telegram_resp}
