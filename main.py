@@ -2481,190 +2481,23 @@ def backtest_v3():
         return {'total_simulados': total, 'acertos': acertos, 'erros': erros, 'win_rate_pct': win_rate, 'tokens_ativos': len(tokens_ativos), 'amostra': amostra, 'atualizado_em': datetime.utcnow().isoformat()}
     finally:
         db.close() 
-@app.get("/intelligence/v3/{slug}")
-def intelligence_v3(slug: str, db: Session = Depends(get_db)):
-    """
-    Intelligence determinística (sem Anthropic):
-    - score baseado em: desvio do preço vs média recente + sentimento simples das notícias
-    """
-    try:
-        market = db.query(Market).filter_by(market_slug=slug).first()
-        if not market:
-            return {"error": "market_not_found", "slug": slug}
-
-        token_yes = db.query(Token).filter_by(market_id=market.id, outcome="YES").first()
-        token_no = db.query(Token).filter_by(market_id=market.id, outcome="NO").first()
-
-        yes_price = round((token_yes.price or 0) * 100, 1) if token_yes else 0.0
-        no_price = round((token_no.price or 0) * 100, 1) if token_no else round(100 - yes_price, 1)
-
-        # snapshots recentes do YES (se existir)
-        snaps = []
-        if token_yes:
-            snaps = (
-                db.query(Snapshot)
-                .filter_by(token_id=token_yes.token_id)
-                .order_by(Snapshot.timestamp.desc())
-                .limit(60)
-                .all()
-            )
-
-        hist = [s.price * 100 for s in snaps if s.price is not None]
-        hist_mean = round(sum(hist) / len(hist), 1) if len(hist) >= 10 else None
-        hist_min = round(min(hist), 1) if len(hist) >= 10 else None
-        hist_max = round(max(hist), 1) if len(hist) >= 10 else None
-        deviation = round(abs(yes_price - hist_mean), 1) if hist_mean is not None else None
-
-        # Notícias do cache (mesma fonte que você já usa no /intelligence atual)
-        articles = []
-
-        # Sentimento simples por palavras-chave
-        POS = ["confirmed", "wins", "approved", "deal", "ceasefire", "success", "announced", "elected", "signed", "released"]
-        NEG = ["killed", "dead", "attack", "war", "explosion", "sanctions", "crisis", "fails", "rejects", "collapse"]
-
-        pos_count = 0
-        neg_count = 0
-        for a in articles:
-            t = (a.get("title", "") or "").lower()
-            d = (a.get("description", "") or "").lower()
-            text = t + " " + d
-            if any(w in text for w in POS):
-                pos_count += 1
-            if any(w in text for w in NEG):
-                neg_count += 1
-
-        if pos_count > neg_count:
-            sentimento = "POSITIVO"
-        elif neg_count > pos_count:
-            sentimento = "NEGATIVO"
-        else:
-            sentimento = "NEUTRO"
-
-        # Score base: começa neutro
-        score = 50.0
-
-        # Ajuste por desvio do preço vs média (se o mercado “mudou muito”, aumenta score de “sinal”)
-        if deviation is not None:
-            # cada 5 pontos de desvio adiciona 10 pontos (cap)
-            score += min(25.0, (deviation / 5.0) * 10.0)
-
-        # Ajuste por sentimento das notícias
-        if sentimento == "POSITIVO":
-            score += 10.0
-        elif sentimento == "NEGATIVO":
-            score -= 10.0
-
-        # Clamp 0-100
-        score = max(0.0, min(100.0, score))
-        score = round(score, 1)
-
-        if score >= 65:
-            recomendacao = "APOSTE YES"
-            cor = "green"
-        elif score <= 35:
-            recomendacao = "APOSTE NO"
-            cor = "red"
-        else:
-            recomendacao = "EVITE"
-            cor = "yellow"
-
-        razao = []
-        if deviation is not None:
-            razao.append(f"Preço YES={yes_price}% vs média recente={hist_mean}% (desvio {deviation} pts)")
-        else:
-            razao.append("Histórico insuficiente para média/ desvio")
-
-        razao.append(f"Notícias: {pos_count} positivas, {neg_count} negativas → {sentimento}")
-
-        return {
-            "market": market.question,
-            "slug": slug,
-            "yes_price_mercado": yes_price,
-            "no_price_mercado": no_price,
-            "score_yes": score,
-            "recomendacao": recomendacao,
-            "sinal_cor": cor,
-            "explicacao": " | ".join(razao),
-            "news_count": len(articles),
-            "noticias": [
-                {
-                    "title": a.get("title"),
-                    "source": a.get("source"),
-                    "url": a.get("url"),
-                    "published_at": a.get("published_at"),
-                }
-                for a in articles[:5]
-            ],
-            "polymarket_url": f"https://polymarket.com/event/{slug}",
-            "atualizado_em": datetime.utcnow().isoformat(),
-        }
-    except Exception as e:
-        return {"error": "intelligence_v3_failed", "detail": str(e)}
-from models import Signal
-
-# --- SIGNALS V1 (ROBUSTO) ---
-from sqlalchemy import text
-from models import Signal
-
-@app.get("/signals/v1")
-def signals_v1(limit: int = 50, db: Session = Depends(get_db)):
-    """
-    Retorna sinais salvos na tabela signals.
-    Nunca derruba a API: se der erro, volta JSON com 'error'.
-    """
-    try:
-        # sanity check conexão
-        db.execute(text("SELECT 1"))
-
-        rows = (
-            db.query(Signal)
-            .order_by(Signal.created_at.desc())
-            .limit(min(int(limit), 200))
-            .all()
-        )
-
-        return {
-            "total": len(rows),
-            "signals": [
-                {
-                    "id": r.id,
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                    "market": r.market,
-                    "slug": r.slug,
-                    "outcome": r.outcome,
-                    "tipo": r.tipo,
-                    "change_5m": float(r.change_5m or 0.0),
-                    "current_price": float(r.current_price or 0.0),
-                    "confidence": float(r.confidence or 0.0),
-                    "polymarket_url": r.polymarket_url,
-                }
-                for r in rows
-            ],
-        }
-    except Exception as e:
-        return {"total": 0, "signals": [], "error": str(e)}
-    # --- SIGNALS SCAN (gera e salva sinais no banco) ---
-from fastapi import Query
-from sqlalchemy import text
-from models import Signal
-
-from sqlalchemy import text
-from models import Signal
 
 # ==============================
-# SIGNALS SCAN (LIMPO)
+# SIGNALS SCAN (TERMINAL COMPLETO)
 # ==============================
 from sqlalchemy import text
 from models import Signal
 
 @app.api_route("/signals/scan", methods=["GET", "POST"])
 def signals_scan(
-    limit_markets: int = 150,   # quantos mercados avaliar por scan
-    hist_limit: int = 40,       # quantos snapshots pegar por token
-    min_move: float = 0.6,      # movimento mínimo (pontos %) vs histórico
-    arb_over: float = 1.02,     # YES+NO >= 1.02 => OVER
-    arb_under: float = 0.98,    # YES+NO <= 0.98 => UNDER
-    cooldown_minutes: int = 10, # não repetir sinal igual muito rápido
+    limit_markets: int = 300,     # mais mercados = mais sinais
+    hist_limit: int = 60,         # mais histórico = melhor detecção
+    min_move: float = 0.4,        # movimento mínimo em pontos % (0.4 = bem sensível)
+    arb_over: float = 1.02,       # YES+NO >= 1.02 => OVER
+    arb_under: float = 0.98,      # YES+NO <= 0.98 => UNDER
+    cooldown_minutes: int = 8,    # evita spam
+    repeat_boost: float = 1.8,    # só repete sinal se movimento aumentou 1.8x
+    max_created: int = 120,       # limite por rodada (pra não lotar)
     db: Session = Depends(get_db),
 ):
     now = datetime.utcnow()
@@ -2681,11 +2514,11 @@ def signals_scan(
     errors = 0
     preview = []
 
-    # pega tokens ativos e limita (mais rápido)
+    # pega tokens ativos (evita 0/1) — bastante tokens pro modo "terminal completo"
     tokens = (
         db.query(Token)
         .filter(Token.price > 0.01, Token.price < 0.99)
-        .limit(4000)
+        .limit(8000)
         .all()
     )
 
@@ -2702,18 +2535,39 @@ def signals_scan(
 
     market_ids = list(markets_map.keys())[: int(limit_markets)]
 
-    def recently(slug: str, tipo: str) -> bool:
-        return (
-            db.query(Signal)
-            .filter(
-                Signal.slug == slug,
-                Signal.tipo == tipo,
-                Signal.created_at >= cutoff
+    def last_recent_signal(slug: str, tipo_prefix: str):
+        """
+        Pega último sinal recente do mesmo prefixo (SPIKE_/DUMP_/ARBITRAGE_)
+        para decidir se repete ou não.
+        """
+        try:
+            row = (
+                db.query(Signal)
+                .filter(
+                    Signal.slug == slug,
+                    Signal.created_at >= cutoff,
+                    Signal.tipo.like(f"{tipo_prefix}%")
+                )
+                .order_by(Signal.created_at.desc())
+                .first()
             )
-            .first()
-        ) is not None
+            return row
+        except Exception:
+            return None
+
+    def level_from_move(abs_move: float) -> str:
+        if abs_move >= 10:
+            return "EXTREME"
+        if abs_move >= 4:
+            return "HIGH"
+        if abs_move >= 2:
+            return "MED"
+        return "LOW"
 
     for market_id in market_ids:
+        if created >= int(max_created):
+            break
+
         scanned += 1
         try:
             outs = markets_map.get(market_id, {})
@@ -2739,46 +2593,58 @@ def signals_scan(
             # --------------------------
             # 1) ARBITRAGE (YES+NO != 1)
             # --------------------------
-            if total >= float(arb_over) and not recently(slug, "ARBITRAGE_OVER"):
+            if total >= float(arb_over):
+                # cooldown inteligente: só repete se erro aumentou muito
+                prev = last_recent_signal(slug, "ARBITRAGE_OVER")
+                err_pct = round((total - 1.0) * 100, 2)
+                if prev and float(prev.change_5m or 0.0) > 0:
+                    if err_pct < float(prev.change_5m) * float(repeat_boost):
+                        continue
+
                 for outcome, price in [("YES", yes), ("NO", no)]:
                     db.add(Signal(
                         market=market.question or "",
                         slug=slug,
                         outcome=outcome,
                         tipo="ARBITRAGE_OVER",
-                        change_5m=round((total - 1.0) * 100, 2),  # % acima de 100
+                        change_5m=err_pct,
                         current_price=round(price * 100, 2),
                         confidence=min(1.0, (total - 1.0) / 0.08),
                         polymarket_url=f"https://polymarket.com/event/{slug}",
                     ))
                     created += 1
+
                 if len(preview) < 10:
-                    preview.append({"slug": slug, "tipo": "ARBITRAGE_OVER", "sum_pct": round(total * 100, 2)})
+                    preview.append({"slug": slug, "tipo": "ARBITRAGE_OVER", "sum_pct": round(total * 100, 2), "err_pct": err_pct})
                 continue
 
-            if total <= float(arb_under) and not recently(slug, "ARBITRAGE_UNDER"):
+            if total <= float(arb_under):
+                prev = last_recent_signal(slug, "ARBITRAGE_UNDER")
+                err_pct = round((1.0 - total) * 100, 2)
+                if prev and float(prev.change_5m or 0.0) > 0:
+                    if err_pct < float(prev.change_5m) * float(repeat_boost):
+                        continue
+
                 for outcome, price in [("YES", yes), ("NO", no)]:
                     db.add(Signal(
                         market=market.question or "",
                         slug=slug,
                         outcome=outcome,
                         tipo="ARBITRAGE_UNDER",
-                        change_5m=round((1.0 - total) * 100, 2),  # % abaixo de 100
+                        change_5m=err_pct,
                         current_price=round(price * 100, 2),
                         confidence=min(1.0, (1.0 - total) / 0.08),
                         polymarket_url=f"https://polymarket.com/event/{slug}",
                     ))
                     created += 1
+
                 if len(preview) < 10:
-                    preview.append({"slug": slug, "tipo": "ARBITRAGE_UNDER", "sum_pct": round(total * 100, 2)})
+                    preview.append({"slug": slug, "tipo": "ARBITRAGE_UNDER", "sum_pct": round(total * 100, 2), "err_pct": err_pct})
                 continue
 
             # --------------------------
-            # 2) MOVIMENTO (sem tempo): compara com histórico recente
+            # 2) MOVIMENTO (sem tempo): compara com histórico recente (YES)
             # --------------------------
-            if recently(slug, "SPIKE") or recently(slug, "DUMP"):
-                continue
-
             snaps = (
                 db.query(Snapshot)
                 .filter(Snapshot.token_id == yes_t.token_id)
@@ -2795,10 +2661,20 @@ def signals_scan(
                 continue
 
             move = round((yes - old_price) * 100, 2)  # pontos %
-            if abs(move) < float(min_move):
+            abs_move = abs(move)
+
+            if abs_move < float(min_move):
                 continue
 
-            tipo = "SPIKE" if move > 0 else "DUMP"
+            base_tipo = "SPIKE" if move > 0 else "DUMP"
+            lvl = level_from_move(abs_move)
+            tipo = f"{base_tipo}_{lvl}"
+
+            # cooldown inteligente: só repete se move aumentou bastante
+            prev = last_recent_signal(slug, base_tipo)
+            if prev and float(prev.change_5m or 0.0) != 0:
+                if abs_move < abs(float(prev.change_5m)) * float(repeat_boost):
+                    continue
 
             db.add(Signal(
                 market=market.question or "",
@@ -2807,10 +2683,11 @@ def signals_scan(
                 tipo=tipo,
                 change_5m=move,
                 current_price=round(yes * 100, 2),
-                confidence=min(1.0, abs(move) / 3.0),
+                confidence=min(1.0, abs_move / 4.0),
                 polymarket_url=f"https://polymarket.com/event/{slug}",
             ))
             created += 1
+
             if len(preview) < 10:
                 preview.append({"slug": slug, "tipo": tipo, "move": move})
 
@@ -2834,5 +2711,7 @@ def signals_scan(
             "arb_over": arb_over,
             "arb_under": arb_under,
             "cooldown_minutes": cooldown_minutes,
+            "repeat_boost": repeat_boost,
+            "max_created": max_created,
         }
     }
