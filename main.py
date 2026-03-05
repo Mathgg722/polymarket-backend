@@ -2942,3 +2942,13 @@ def alerts_run(
         _LAST_ALERT_SENT_AT = now
 
     return {"status": "ok" if ok else "fail", "sent": len(rows) if ok else 0, "mode": mode, "telegram": telegram_resp}
+
+from sqlalchemy import func
+
+@app.get("/debug/last_snapshot")
+def debug_last_snapshot(db: Session = Depends(get_db)):
+    last_ts = db.query(func.max(Snapshot.timestamp)).scalar()
+    return {
+        "last_snapshot_timestamp": last_ts.isoformat() if last_ts else None,
+        "now": datetime.utcnow().isoformat()
+    }
