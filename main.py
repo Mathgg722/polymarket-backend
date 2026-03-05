@@ -2896,8 +2896,7 @@ def alerts_test():
     """Testa se o Telegram está configurado."""
     resp = _telegram_send("✅ <b>PolySignal</b> conectado! (teste)")
     return {"status": "ok", "telegram": resp}
-
-
+  
 @app.get("/alerts/run")
 def alerts_run(
     minutes: int = 10,
@@ -2960,11 +2959,21 @@ def alerts_run(
     if not rows:
         return {"status": "ok", "sent": 0, "message": "no signals in window", "mode": mode}
 
+    # --- resumo do alert ---
+    spike_n = sum(1 for r in rows if "SPIKE" in (r.tipo or ""))
+    dump_n = sum(1 for r in rows if "DUMP" in (r.tipo or ""))
+    arb_n = sum(1 for r in rows if (r.tipo or "").startswith("ARBITRAGE_"))
+    max_abs = 0.0
+    for r in rows:
+        max_abs = max(max_abs, abs(float(r.change_5m or 0.0)))
+    summary_line = f"Resumo: {spike_n} SPIKE | {dump_n} DUMP | {arb_n} ARB | Max: {max_abs:.2f} pts"
+
     # monta mensagem
     lines = []
     title = "🚨 <b>PolySignal</b> — sinais fortes agora" if mode == "STRONG" else "🟡 <b>PolySignal</b> — top sinais (MED)"
     lines.append(title)
     lines.append(f"Janela: últimos {minutes} min | Top {len(rows)} | Mode: {mode}")
+    lines.append(summary_line)
     lines.append("")
 
     for r in rows:
