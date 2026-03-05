@@ -2451,50 +2451,52 @@ def get_inefficiencies_v4():
 from sqlalchemy import and_, text
 from models import Signal
 
+from sqlalchemy import text
+from models import Signal
+
 @app.get("/signals/scan")
 def signals_scan(
     limit_markets: int = 300,
-    hist_limit: int = 80,
-    min_move: float = 0.4,          # em pontos percentuais (0.4 = 0.4%)
-    arb_over: float = 1.02,         # YES+NO >= 1.02 => OVER
-    arb_under: float = 0.98,        # YES+NO <= 0.98 => UNDER
-    cooldown_minutes: int = 8,      # evita duplicar o mesmo slug toda hora
-    repeat_boost: float = 1.0,      # se quer “forçar” mais criação (1.0 normal)
+    hist_limit: int = 80,            # (mantido só pra compatibilidade)
+    min_move: float = 0.4,           # em pontos percentuais (0.4 = 0.4%)
+    arb_over: float = 1.02,          # YES+NO >= 1.02 => OVER
+    arb_under: float = 0.98,         # YES+NO <= 0.98 => UNDER
+    cooldown_minutes: int = 8,       # evita duplicar o mesmo slug toda hora
+    repeat_boost: float = 1.0,       # se quer “forçar” mais criação (1.0 normal)
     max_created: int = 120,
     db: Session = Depends(get_db),
 ):
     """
-    Scanner robusto:
-    - calcula variação 5m usando snapshot dentro de janela (now-7m .. now-3m)
-    - evita falso EXTREME causado por snapshot muito antigo
-    - cria sinais (SPIKE/DUMP) + arbitragem (YES+NO)
+    Scanner robusto (sem bagunça):
+    - ARBITRAGE só se YES e NO forem válidos (>0.01) e total >= 0.50 (evita -100% lixo)
+    - MOVIMENTO usa snapshot 5m em janela (now-7m..now-3m)
+      - fallback: pega último <= now-3m, mas só se não for velho (>25min corta)
+    - cria sinais SPIKE/DUMP com níveis LOW/MED/HIGH/EXTREME
     """
+
     now = datetime.utcnow()
 
     try:
         db.execute(text("SELECT 1"))
 
         limit_markets = min(max(int(limit_markets), 10), 800)
-        hist_limit = min(max(int(hist_limit), 20), 300)
         min_move = float(min_move)
         max_created = min(max(int(max_created), 10), 400)
+        cooldown_cutoff = now - timedelta(minutes=max(int(cooldown_minutes), 0))
 
         # janelas “seguras”
         t5_start = now - timedelta(minutes=7)
         t5_end   = now - timedelta(minutes=3)
 
-        # opcional: janela 1m (pra classificar melhor)
+        # opcional: janela 1m (melhora confiança/label)
         t1_start = now - timedelta(seconds=90)
         t1_end   = now - timedelta(seconds=30)
 
-        cooldown_cutoff = now - timedelta(minutes=max(int(cooldown_minutes), 0))
-
         created = 0
-        scanned = 0
+        scanned_tokens = 0
         errors = 0
         preview = []
 
-        # pega mercados “recentes” (com tokens)
         markets = (
             db.query(Market)
             .join(Token)
@@ -2510,54 +2512,84 @@ def signals_scan(
             slug = m.market_slug or ""
             question = m.question or ""
 
-            # filtra markets “morto/resolvido” por preços (se tiver tokens)
-            # (deixa passar se não tiver info suficiente)
+            # coleta preços YES/NO do market (se existirem)
             yes = None
             no = None
             for tk in getattr(m, "tokens", []):
-                if (tk.outcome or "").upper() == "YES":
+                out = (tk.outcome or "").upper()
+                if out == "YES":
                     yes = float(tk.price or 0.0)
-                elif (tk.outcome or "").upper() == "NO":
+                elif out == "NO":
                     no = float(tk.price or 0.0)
 
-            # arbitragem simples (YES + NO fora do normal)
-            if yes is not None and no is not None and yes > 0 and no > 0:
-                total = yes + no
-                if total >= arb_over or total <= arb_under:
-                    # cooldown por slug+tipo
-                    if cooldown_minutes > 0:
-                        exists = (
-                            db.query(Signal.id)
-                            .filter(
-                                Signal.slug == slug,
-                                Signal.tipo.like("ARBITRAGE_%"),
-                                Signal.created_at >= cooldown_cutoff
-                            )
-                            .first()
-                        )
-                        if exists:
-                            pass
-                        else:
-                            tipo = "ARBITRAGE_OVER" if total >= arb_over else "ARBITRAGE_UNDER"
-                            s = Signal(
-                                market=question,
-                                slug=slug,
-                                outcome="YES",
-                                tipo=tipo,
-                                change_5m=round((total - 1.0) * 100, 2),  # “edge” em pts
-                                current_price=round(yes * 100, 2),
-                                confidence=1.0,
-                                polymarket_url=f"https://polymarket.com/event/{slug}",
-                            )
-                            db.add(s)
-                            created += 1
-                            if len(preview) < 10:
-                                preview.append({"slug": slug, "tipo": tipo, "move": round((total - 1.0) * 100, 2)})
+            # =========================================================
+            # 1) ARBITRAGE (YES+NO fora de 1) — SEM LIXO
+            # =========================================================
+            if created < max_created and yes is not None and no is not None:
+                # só se preços forem válidos (evita current_price=0 e under=-100%)
+                if yes > 0.01 and no > 0.01:
+                    total = yes + no
 
-            # agora sinais por token (YES e NO)
+                    # evita mercados quebrados: se total muito baixo, ignora
+                    if total >= 0.50:
+                        if total >= float(arb_over) or total <= float(arb_under):
+                            # cooldown por slug+tipo
+                            if cooldown_minutes > 0:
+                                exists = (
+                                    db.query(Signal.id)
+                                    .filter(
+                                        Signal.slug == slug,
+                                        Signal.tipo.like("ARBITRAGE_%"),
+                                        Signal.created_at >= cooldown_cutoff,
+                                    )
+                                    .first()
+                                )
+                                if not exists:
+                                    tipo = "ARBITRAGE_OVER" if total >= float(arb_over) else "ARBITRAGE_UNDER"
+                                    edge_pts = round((total - 1.0) * 100, 2)  # pode ser negativo (UNDER)
+
+                                    s = Signal(
+                                        market=question,
+                                        slug=slug,
+                                        outcome="YES",
+                                        tipo=tipo,
+                                        change_5m=edge_pts,
+                                        current_price=round(yes * 100, 2),
+                                        confidence=min(1.0, abs(edge_pts) / 3.0),
+                                        polymarket_url=f"https://polymarket.com/event/{slug}",
+                                    )
+                                    db.add(s)
+                                    created += 1
+
+                                    if len(preview) < 10:
+                                        preview.append({"slug": slug, "tipo": tipo, "move": edge_pts})
+                            else:
+                                # sem cooldown: sempre grava
+                                tipo = "ARBITRAGE_OVER" if total >= float(arb_over) else "ARBITRAGE_UNDER"
+                                edge_pts = round((total - 1.0) * 100, 2)
+                                db.add(Signal(
+                                    market=question,
+                                    slug=slug,
+                                    outcome="YES",
+                                    tipo=tipo,
+                                    change_5m=edge_pts,
+                                    current_price=round(yes * 100, 2),
+                                    confidence=min(1.0, abs(edge_pts) / 3.0),
+                                    polymarket_url=f"https://polymarket.com/event/{slug}",
+                                ))
+                                created += 1
+                                if len(preview) < 10:
+                                    preview.append({"slug": slug, "tipo": tipo, "move": edge_pts})
+
+            # =========================================================
+            # 2) MOVIMENTO (SPIKE/DUMP) — 5m “REAL”
+            # =========================================================
             for t in getattr(m, "tokens", []):
+                if created >= max_created:
+                    break
+
                 try:
-                    scanned += 1
+                    scanned_tokens += 1
 
                     token_id = t.token_id
                     outcome = (t.outcome or "").upper()
@@ -2568,11 +2600,11 @@ def signals_scan(
                     if current <= 0:
                         continue
 
-                    # ignora extremos (geralmente resolvido)
+                    # ignora extremos (resolvido)
                     if current >= 0.99 or current <= 0.01:
                         continue
 
-                    # snapshot “5m atrás” dentro da janela (evita pegar muito antigo!)
+                    # snapshot “5m atrás” dentro da janela (preferido)
                     snap_5m = (
                         db.query(Snapshot)
                         .filter(
@@ -2583,14 +2615,32 @@ def signals_scan(
                         .order_by(Snapshot.timestamp.desc())
                         .first()
                     )
+
+                    # fallback: pega último <= now-3m, mas só se não for velho demais
                     if not snap_5m:
+                        snap_5m = (
+                            db.query(Snapshot)
+                            .filter(
+                                Snapshot.token_id == token_id,
+                                Snapshot.timestamp <= t5_end,
+                            )
+                            .order_by(Snapshot.timestamp.desc())
+                            .first()
+                        )
+                        if not snap_5m:
+                            continue
+                        if snap_5m.timestamp < (now - timedelta(minutes=25)):
+                            continue
+
+                    old_5m = float(snap_5m.price or 0.0)
+                    if old_5m <= 0:
                         continue
 
-                    move_5m = (current - float(snap_5m.price or 0.0)) * 100.0  # em pontos %
+                    move_5m = (current - old_5m) * 100.0  # pontos %
                     if abs(move_5m) < (min_move * float(repeat_boost)):
                         continue
 
-                    # snapshot 1m (opcional) pra classificar melhor
+                    # snapshot 1m (opcional)
                     snap_1m = (
                         db.query(Snapshot)
                         .filter(
@@ -2605,19 +2655,20 @@ def signals_scan(
                     if snap_1m and snap_1m.price is not None:
                         move_1m = (current - float(snap_1m.price)) * 100.0
 
-                    # tipo + nível
                     abs5 = abs(move_5m)
+
+                    # nível
                     if abs5 >= 12:
-                        level = "EXTREME"
+                        lvl = "EXTREME"
                     elif abs5 >= 5:
-                        level = "HIGH"
+                        lvl = "HIGH"
                     elif abs5 >= 2:
-                        level = "MED"
+                        lvl = "MED"
                     else:
-                        level = "LOW"
+                        lvl = "LOW"
 
                     base = "SPIKE" if move_5m > 0 else "DUMP"
-                    tipo = f"{base}_{level}"
+                    tipo = f"{base}_{lvl}"
 
                     # cooldown por slug+tipo+outcome
                     if cooldown_minutes > 0:
@@ -2627,16 +2678,16 @@ def signals_scan(
                                 Signal.slug == slug,
                                 Signal.outcome == outcome,
                                 Signal.tipo == tipo,
-                                Signal.created_at >= cooldown_cutoff
+                                Signal.created_at >= cooldown_cutoff,
                             )
                             .first()
                         )
                         if exists:
                             continue
 
-                    conf = min(1.0, abs5 / 4.0)  # simples
+                    conf = min(1.0, abs5 / 4.0)
 
-                    s = Signal(
+                    db.add(Signal(
                         market=question,
                         slug=slug,
                         outcome=outcome,
@@ -2645,29 +2696,22 @@ def signals_scan(
                         current_price=round(current * 100, 2),
                         confidence=float(conf),
                         polymarket_url=f"https://polymarket.com/event/{slug}",
-                    )
-                    db.add(s)
+                    ))
                     created += 1
 
                     if len(preview) < 10:
                         preview.append({"slug": slug, "tipo": tipo, "move": round(move_5m, 2)})
 
-                    if created >= max_created:
-                        break
-
                 except Exception:
                     errors += 1
                     continue
-
-            if created >= max_created:
-                break
 
         db.commit()
 
         return {
             "status": "ok",
             "scanned_markets": len(markets),
-            "scanned_tokens": scanned,
+            "scanned_tokens": scanned_tokens,
             "created_signals": created,
             "errors": errors,
             "preview": preview,
@@ -2681,9 +2725,9 @@ def signals_scan(
                 "cooldown_minutes": cooldown_minutes,
                 "repeat_boost": repeat_boost,
                 "max_created": max_created,
-                "window_5m": "now-7m..now-3m",
+                "window_5m": "now-7m..now-3m (fallback <= now-3m; max age 25m)",
                 "window_1m": "now-90s..now-30s",
-            },
+            }
         }
 
     except Exception as e:
