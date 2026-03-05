@@ -2722,33 +2722,42 @@ from sqlalchemy import text
 from models import Signal
 
 @app.get("/signals/v1/top")
-def signals_top(limit: int = 30, db: Session = Depends(get_db)):
+def signals_v1_top(limit: int = 50, db: Session = Depends(get_db)):
     """
-    Retorna os sinais mais fortes (maior abs(change_5m)).
-    Útil pro 'terminal' mostrar só o que importa agora.
+    Top sinais sem spam:
+    - dedupe por slug (mantém o mais recente por mercado)
+    - ordena por abs(change_5m)
     """
     try:
         db.execute(text("SELECT 1"))
 
-        # puxa um lote recente e seleciona os mais fortes
+        limit_n = min(max(int(limit), 1), 200)
+
+        # puxa bastante coisa recente pra deduplicar bem
         rows = (
             db.query(Signal)
             .order_by(Signal.created_at.desc())
-            .limit(800)  # pega bastante pra ranquear por força
+            .limit(3000)
             .all()
         )
 
-        limit_n = min(max(int(limit), 1), 200)
+        # dedupe por mercado (slug): como já está desc, o primeiro é o mais recente
+        seen = set()
+        uniq = []
+        for r in rows:
+            if not r.slug:
+                continue
+            key = r.slug  # se quiser mais rígido: (r.slug, r.outcome)
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(r)
 
         # ordena por força do movimento
-        rows_sorted = sorted(
-            rows,
-            key=lambda r: abs(float(r.change_5m or 0.0)),
-            reverse=True
-        )[:limit_n]
+        uniq = sorted(uniq, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:limit_n]
 
         return {
-            "total": len(rows_sorted),
+            "total": len(uniq),
             "signals": [
                 {
                     "id": r.id,
@@ -2762,122 +2771,26 @@ def signals_top(limit: int = 30, db: Session = Depends(get_db)):
                     "confidence": float(r.confidence or 0.0),
                     "polymarket_url": r.polymarket_url,
                 }
-                for r in rows_sorted
+                for r in uniq
             ],
         }
 
     except Exception as e:
         return {"total": 0, "signals": [], "error": str(e)}
-    from sqlalchemy import func
-from models import Signal
 
-@app.get("/anomalies/realtime")
-def anomalies_realtime(limit: int = 30, db: Session = Depends(get_db)):
-    """
-    Anomalias 'agora' = sinais fortes (HIGH/EXTREME) ordenados por abs(change_5m)
-    """
-    rows = (
-        db.query(Signal)
-        .filter((Signal.tipo.like("%HIGH%")) | (Signal.tipo.like("%EXTREME%")))
-        .order_by(Signal.created_at.desc())
-        .limit(800)
-        .all()
-    )
-    # ordena por força
-    rows = sorted(rows, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:min(int(limit), 100)]
-
-    return {
-        "total": len(rows),
-        "anomalies": [
-            {
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "market": r.market,
-                "slug": r.slug,
-                "tipo": r.tipo,
-                "change": float(r.change_5m or 0.0),
-                "price": float(r.current_price or 0.0),
-                "confidence": float(r.confidence or 0.0),
-                "polymarket_url": r.polymarket_url,
-            }
-            for r in rows
-        ]
-    }
-@app.get("/anomalies/mispricing")
-def anomalies_mispricing(limit: int = 20, db: Session = Depends(get_db)):
-    """
-    Mispricing = preço atual muito distante da média do histórico recente.
-    Usa snapshots do YES por market.
-    """
-    tokens_yes = (
-        db.query(Token)
-        .filter(Token.outcome == "YES", Token.price > 0.05, Token.price < 0.95)
-        .limit(400)
-        .all()
-    )
-
-    results = []
-    for t in tokens_yes:
-        snaps = (
-            db.query(Snapshot)
-            .filter(Snapshot.token_id == t.token_id)
-            .order_by(Snapshot.timestamp.desc())
-            .limit(80)
-            .all()
-        )
-        if len(snaps) < 20:
-            continue
-
-        prices = [float(s.price or 0.0) * 100 for s in snaps if s.price is not None]
-        if len(prices) < 20:
-            continue
-
-        current = float(t.price) * 100
-        mean = sum(prices) / len(prices)
-        dev = abs(current - mean)
-
-        # score: desvio relativo ao "range" recente
-        rng = max(prices) - min(prices)
-        score = 0.0 if rng <= 0 else min(100.0, (dev / max(rng, 0.5)) * 100.0)
-
-        if dev < 4:  # filtro mínimo pra não virar ruído
-            continue
-
-        market = db.query(Market).filter(Market.id == t.market_id).first()
-        if not market:
-            continue
-
-        results.append({
-            "market": market.question,
-            "slug": market.market_slug,
-            "current_price": round(current, 2),
-            "mean_price": round(mean, 2),
-            "deviation": round(dev, 2),
-            "range": round(rng, 2),
-            "score": round(score, 1),
-            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
-        })
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-    top = results[:min(int(limit), 100)]
-
-    return {"total": len(top), "mispricing": top}
 # ==============================
-# TELEGRAM ALERTS (Signals) + DRY RUN
+# TELEGRAM HELPERS
 # ==============================
 import requests
 
-TELEGRAM_TOKEN = os.environ.get("8738723316:AAHqlYOCw2Z4XlQ5B3Ld4ZRJ55z2y5lncq0", "")
-TELEGRAM_CHAT_ID = os.environ.get("1236462706", "")
-
-# memória simples pra evitar spam (reseta se redeploy)
-_LAST_ALERT_SENT_AT = None
-
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 def _telegram_send(text: str) -> dict:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return {"ok": False, "error": "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID"}
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"ok": False, "error": "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"}
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
@@ -2888,8 +2801,7 @@ def _telegram_send(text: str) -> dict:
     try:
         return r.json()
     except Exception:
-        return {"ok": False, "error": f"Telegram non-json response: {r.text[:200]}"}
-
+        return {"ok": False, "error": f"Telegram non-json response: {r.text[:200]}"}    
 
 @app.get("/alerts/test")
 def alerts_test():
