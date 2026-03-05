@@ -125,7 +125,7 @@ def get_anomalies(db: Session = Depends(get_db)):
     """
     now = datetime.utcnow()
     window_1m  = now - timedelta(minutes=1)
-    window_5m  = now - timedelta(minutes=5)
+    window_5m  = now - timedelta(minutes=60)
     window_15m = now - timedelta(minutes=15)
     window_1h  = now - timedelta(hours=1)
 
@@ -2654,7 +2654,7 @@ from models import Signal
 @app.api_route("/signals/scan", methods=["GET", "POST"])
 def signals_scan(
     limit_tokens: int = 200,
-    min_move_5m: float = 0.6,
+    min_move_5m: float = 0.8,
     arb_over: float = 1.02,   # YES+NO >= 1.02 => OVER
     arb_under: float = 0.98,  # YES+NO <= 0.98 => UNDER
     db: Session = Depends(get_db),
