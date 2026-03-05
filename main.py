@@ -2715,3 +2715,39 @@ def signals_scan(
             "max_created": max_created,
         }
     }
+# ==============================
+# SIGNALS LIST (v1)
+# ==============================
+from sqlalchemy import text
+from models import Signal
+
+@app.get("/signals/v1")
+def signals_v1(limit: int = 200, db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+        rows = (
+            db.query(Signal)
+            .order_by(Signal.created_at.desc())
+            .limit(min(int(limit), 500))
+            .all()
+        )
+        return {
+            "total": len(rows),
+            "signals": [
+                {
+                    "id": r.id,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "market": r.market,
+                    "slug": r.slug,
+                    "outcome": r.outcome,
+                    "tipo": r.tipo,
+                    "change_5m": float(r.change_5m or 0.0),
+                    "current_price": float(r.current_price or 0.0),
+                    "confidence": float(r.confidence or 0.0),
+                    "polymarket_url": r.polymarket_url,
+                }
+                for r in rows
+            ],
+        }
+    except Exception as e:
+        return {"total": 0, "signals": [], "error": str(e)}
