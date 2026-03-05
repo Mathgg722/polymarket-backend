@@ -2651,56 +2651,79 @@ from models import Signal
 from sqlalchemy import text
 from models import Signal
 
+# ==============================
+# SIGNALS SCAN (LIMPO)
+# ==============================
+from sqlalchemy import text
+from models import Signal
+
 @app.api_route("/signals/scan", methods=["GET", "POST"])
 def signals_scan(
-    limit_tokens: int = 200,
-    min_move_5m: float = 0.8,
-    arb_over: float = 1.02,   # YES+NO >= 1.02 => OVER
-    arb_under: float = 0.98,  # YES+NO <= 0.98 => UNDER
+    limit_markets: int = 150,   # quantos mercados avaliar por scan
+    hist_limit: int = 40,       # quantos snapshots pegar por token
+    min_move: float = 0.6,      # movimento mínimo (pontos %) vs histórico
+    arb_over: float = 1.02,     # YES+NO >= 1.02 => OVER
+    arb_under: float = 0.98,    # YES+NO <= 0.98 => UNDER
+    cooldown_minutes: int = 10, # não repetir sinal igual muito rápido
     db: Session = Depends(get_db),
 ):
     now = datetime.utcnow()
-    window_5m = now - timedelta(minutes=5)
-    cutoff = now - timedelta(minutes=10)  # dedupe 10min
+    cutoff = now - timedelta(minutes=int(cooldown_minutes))
 
+    # sanity check DB
     try:
         db.execute(text("SELECT 1"))
     except Exception as e:
-        return {"status": "fail", "error": f"db_down: {e}"}
+        return {"status": "fail", "error": f"db_down: {str(e)}"}
 
     created = 0
     scanned = 0
     errors = 0
     preview = []
 
-    # pega tokens "ativos"
+    # pega tokens ativos e limita (mais rápido)
     tokens = (
         db.query(Token)
         .filter(Token.price > 0.01, Token.price < 0.99)
-        .limit(int(limit_tokens))
+        .limit(4000)
         .all()
     )
 
-    # agrupa por market_id para ter YES e NO juntos
+    # agrupa por market_id para achar YES e NO
     markets_map = {}
     for t in tokens:
-        key = t.market_id
-        if not key:
+        if not t.market_id:
             continue
-        markets_map.setdefault(key, {})
         outcome = (t.outcome or "").upper()
-        markets_map[key][outcome] = t
+        if outcome not in ["YES", "NO"]:
+            continue
+        markets_map.setdefault(t.market_id, {})
+        markets_map[t.market_id][outcome] = t
 
-    for market_id, outs in markets_map.items():
+    market_ids = list(markets_map.keys())[: int(limit_markets)]
+
+    def recently(slug: str, tipo: str) -> bool:
+        return (
+            db.query(Signal)
+            .filter(
+                Signal.slug == slug,
+                Signal.tipo == tipo,
+                Signal.created_at >= cutoff
+            )
+            .first()
+        ) is not None
+
+    for market_id in market_ids:
         scanned += 1
         try:
+            outs = markets_map.get(market_id, {})
             yes_t = outs.get("YES")
             no_t = outs.get("NO")
             if not yes_t or not no_t:
                 continue
 
             yes = float(yes_t.price or 0.0)
-            no = float(no_t.price or 0.0)
+            no  = float(no_t.price or 0.0)
             if yes <= 0 or no <= 0:
                 continue
 
@@ -2709,86 +2732,87 @@ def signals_scan(
             market = db.query(Market).filter(Market.id == market_id).first()
             if not market:
                 continue
+            slug = market.market_slug or ""
+            if not slug:
+                continue
 
-            # dedupe: não repetir o mesmo tipo em 10min
-            def recently(tipo: str) -> bool:
-                return (
-                    db.query(Signal)
-                    .filter(
-                        Signal.slug == market.market_slug,
-                        Signal.tipo == tipo,
-                        Signal.created_at >= cutoff
-                    )
-                    .first()
-                ) is not None
-
-            # --- ARBITRAGE (erro de soma) ---
-            if total >= arb_over and not recently("ARBITRAGE_OVER"):
-                # cria 2 sinais (YES e NO)
+            # --------------------------
+            # 1) ARBITRAGE (YES+NO != 1)
+            # --------------------------
+            if total >= float(arb_over) and not recently(slug, "ARBITRAGE_OVER"):
                 for outcome, price in [("YES", yes), ("NO", no)]:
                     db.add(Signal(
-                        market=market.question,
-                        slug=market.market_slug,
+                        market=market.question or "",
+                        slug=slug,
                         outcome=outcome,
                         tipo="ARBITRAGE_OVER",
-                        change_5m=round((total - 1.0) * 100, 2),
+                        change_5m=round((total - 1.0) * 100, 2),  # % acima de 100
                         current_price=round(price * 100, 2),
-                        confidence=min(1.0, (total - 1.0) / 0.12),
-                        polymarket_url=f"https://polymarket.com/event/{market.market_slug}",
+                        confidence=min(1.0, (total - 1.0) / 0.08),
+                        polymarket_url=f"https://polymarket.com/event/{slug}",
                     ))
-                created += 2
+                    created += 1
                 if len(preview) < 10:
-                    preview.append({"slug": market.market_slug, "tipo": "ARBITRAGE_OVER", "sum_pct": round(total*100,2)})
+                    preview.append({"slug": slug, "tipo": "ARBITRAGE_OVER", "sum_pct": round(total * 100, 2)})
+                continue
 
-            elif total <= arb_under and not recently("ARBITRAGE_UNDER"):
+            if total <= float(arb_under) and not recently(slug, "ARBITRAGE_UNDER"):
                 for outcome, price in [("YES", yes), ("NO", no)]:
                     db.add(Signal(
-                        market=market.question,
-                        slug=market.market_slug,
+                        market=market.question or "",
+                        slug=slug,
                         outcome=outcome,
                         tipo="ARBITRAGE_UNDER",
-                        change_5m=round((1.0 - total) * 100, 2),
+                        change_5m=round((1.0 - total) * 100, 2),  # % abaixo de 100
                         current_price=round(price * 100, 2),
-                        confidence=min(1.0, (1.0 - total) / 0.12),
-                        polymarket_url=f"https://polymarket.com/event/{market.market_slug}",
+                        confidence=min(1.0, (1.0 - total) / 0.08),
+                        polymarket_url=f"https://polymarket.com/event/{slug}",
                     ))
-                created += 2
+                    created += 1
                 if len(preview) < 10:
-                    preview.append({"slug": market.market_slug, "tipo": "ARBITRAGE_UNDER", "sum_pct": round(total*100,2)})
+                    preview.append({"slug": slug, "tipo": "ARBITRAGE_UNDER", "sum_pct": round(total * 100, 2)})
+                continue
 
-            else:
-                # --- MOVIMENTO 5m (YES) ---
-                snap = (
-                    db.query(Snapshot)
-                    .filter(Snapshot.token_id == yes_t.token_id, Snapshot.timestamp <= window_5m)
-                    .order_by(Snapshot.timestamp.desc())
-                    .first()
-                )
-                if not snap or snap.price is None:
-                    continue
+            # --------------------------
+            # 2) MOVIMENTO (sem tempo): compara com histórico recente
+            # --------------------------
+            if recently(slug, "SPIKE") or recently(slug, "DUMP"):
+                continue
 
-                move = round((yes - float(snap.price)) * 100, 2)  # pontos %
-                if abs(move) < float(min_move_5m):
-                    continue
+            snaps = (
+                db.query(Snapshot)
+                .filter(Snapshot.token_id == yes_t.token_id)
+                .order_by(Snapshot.timestamp.desc())
+                .limit(int(hist_limit))
+                .all()
+            )
 
-                tipo = "SPIKE" if move > 0 else "DUMP"
+            if len(snaps) < 10:
+                continue
 
-                if recently(tipo):
-                    continue
+            old_price = float(snaps[-1].price or 0.0)
+            if old_price <= 0:
+                continue
 
-                db.add(Signal(
-                    market=market.question,
-                    slug=market.market_slug,
-                    outcome="YES",
-                    tipo=tipo,
-                    change_5m=move,
-                    current_price=round(yes * 100, 2),
-                    confidence=min(1.0, abs(move) / 5.0),
-                    polymarket_url=f"https://polymarket.com/event/{market.market_slug}",
-                ))
-                created += 1
-                if len(preview) < 10:
-                    preview.append({"slug": market.market_slug, "tipo": tipo, "move_5m": move})
+            move = round((yes - old_price) * 100, 2)  # pontos %
+            if abs(move) < float(min_move):
+                continue
+
+            tipo = "SPIKE" if move > 0 else "DUMP"
+
+            db.add(Signal(
+                market=market.question or "",
+                slug=slug,
+                outcome="YES",
+                tipo=tipo,
+                change_5m=move,
+                current_price=round(yes * 100, 2),
+                confidence=min(1.0, abs(move) / 3.0),
+                polymarket_url=f"https://polymarket.com/event/{slug}",
+            ))
+            created += 1
+            if len(preview) < 10:
+                preview.append({"slug": slug, "tipo": tipo, "move": move})
 
         except Exception:
             errors += 1
@@ -2803,4 +2827,12 @@ def signals_scan(
         "errors": errors,
         "preview": preview,
         "atualizado_em": now.isoformat(),
+        "params": {
+            "limit_markets": limit_markets,
+            "hist_limit": hist_limit,
+            "min_move": min_move,
+            "arb_over": arb_over,
+            "arb_under": arb_under,
+            "cooldown_minutes": cooldown_minutes,
+        }
     }
