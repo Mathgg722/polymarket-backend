@@ -1,7 +1,7 @@
 import os
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, UTC
 
 API_BASE = os.environ.get("API_BASE", "https://polymarket-backend-production-f363.up.railway.app").rstrip("/")
 
@@ -32,7 +32,7 @@ def main():
     print("SLEEP_SECONDS:", SLEEP_SECONDS)
 
     while True:
-        start = datetime.utcnow().isoformat()
+        start = datetime.now(UTC)
 
         # 1) Rodar scan
         scan_res = hit(SCAN_URL)
