@@ -2716,23 +2716,39 @@ def signals_scan(
         }
     }
 # ==============================
-# SIGNALS LIST (v1)
+# SIGNALS TOP (v1/top)
 # ==============================
 from sqlalchemy import text
 from models import Signal
 
-@app.get("/signals/v1")
-def signals_v1(limit: int = 200, db: Session = Depends(get_db)):
+@app.get("/signals/v1/top")
+def signals_top(limit: int = 30, db: Session = Depends(get_db)):
+    """
+    Retorna os sinais mais fortes (maior abs(change_5m)).
+    Útil pro 'terminal' mostrar só o que importa agora.
+    """
     try:
         db.execute(text("SELECT 1"))
+
+        # puxa um lote recente e seleciona os mais fortes
         rows = (
             db.query(Signal)
             .order_by(Signal.created_at.desc())
-            .limit(min(int(limit), 500))
+            .limit(800)  # pega bastante pra ranquear por força
             .all()
         )
+
+        limit_n = min(max(int(limit), 1), 200)
+
+        # ordena por força do movimento
+        rows_sorted = sorted(
+            rows,
+            key=lambda r: abs(float(r.change_5m or 0.0)),
+            reverse=True
+        )[:limit_n]
+
         return {
-            "total": len(rows),
+            "total": len(rows_sorted),
             "signals": [
                 {
                     "id": r.id,
@@ -2746,8 +2762,9 @@ def signals_v1(limit: int = 200, db: Session = Depends(get_db)):
                     "confidence": float(r.confidence or 0.0),
                     "polymarket_url": r.polymarket_url,
                 }
-                for r in rows
+                for r in rows_sorted
             ],
         }
+
     except Exception as e:
         return {"total": 0, "signals": [], "error": str(e)}
