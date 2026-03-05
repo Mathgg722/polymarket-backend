@@ -2654,9 +2654,9 @@ from models import Signal
 @app.api_route("/signals/scan", methods=["GET", "POST"])
 def signals_scan(
     limit_tokens: int = 200,
-    min_move_5m: float = 1.5,
-    arb_over: float = 1.05,   # YES+NO >= 1.05 => OVER
-    arb_under: float = 0.95,  # YES+NO <= 0.95 => UNDER
+    min_move_5m: float = 0.6,
+    arb_over: float = 1.02,   # YES+NO >= 1.02 => OVER
+    arb_under: float = 0.98,  # YES+NO <= 0.98 => UNDER
     db: Session = Depends(get_db),
 ):
     now = datetime.utcnow()
