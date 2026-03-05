@@ -1,160 +1,50 @@
+import os
 import time
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from database import SessionLocal, engine
-from models import Base, Market, Token, Snapshot, Signal
+API_BASE = os.environ.get("API_BASE", "https://polymarket-backend-production-f363.up.railway.app").rstrip("/")
 
-Base.metadata.create_all(bind=engine)
+SCAN_URL = f"{API_BASE}/signals/scan?cooldown_minutes=5&repeat_boost=1.3&min_move=0.4&limit_markets=300"
+ALERT_URL = f"{API_BASE}/alerts/run?minutes=20&limit=10"
 
-POLYMARKET_API = "https://clob.polymarket.com/markets"
+# Se você quiser desligar alertas sem apagar código:
+ENABLE_ALERTS = os.environ.get("ENABLE_ALERTS", "1")  # "1" ou "0"
+SLEEP_SECONDS = int(os.environ.get("WORKER_SLEEP_SECONDS", "120"))  # 120 = 2 min
 
-
-def fetch_markets():
+def hit(url: str) -> dict:
     try:
-        r = requests.get(POLYMARKET_API, timeout=10)
-        return r.json()
+        r = requests.get(url, timeout=30)
+        try:
+            data = r.json()
+        except Exception:
+            data = {"non_json": r.text[:200]}
+        return {"ok": r.status_code == 200, "status": r.status_code, "data": data}
     except Exception as e:
-        print("Erro ao buscar mercados:", e)
-        return []
+        return {"ok": False, "error": str(e)}
 
+def main():
+    print("✅ PolySignal Worker started")
+    print("API_BASE:", API_BASE)
+    print("SCAN_URL:", SCAN_URL)
+    print("ALERT_URL:", ALERT_URL)
+    print("ENABLE_ALERTS:", ENABLE_ALERTS)
+    print("SLEEP_SECONDS:", SLEEP_SECONDS)
 
-def detect_signal(db, token_id, current_price, market):
-    try:
-        five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
-
-        prev = (
-            db.query(Snapshot)
-            .filter(Snapshot.token_id == token_id)
-            .order_by(Snapshot.timestamp.desc())
-            .limit(50)
-            .all()
-        )
-
-        prev_5m = None
-        for s in prev:
-            if s.timestamp <= five_minutes_ago:
-                prev_5m = s
-                break
-
-        if not prev_5m:
-            return
-
-        prev_price = prev_5m.price * 100
-        current_price = current_price * 100
-
-        if prev_price == 0:
-            return
-
-        change = ((current_price - prev_price) / prev_price) * 100
-        change = round(change, 1)
-
-        signal_type = None
-
-        if abs(change) >= 20:
-            signal_type = "EXTREME"
-        elif change >= 8:
-            signal_type = "SPIKE"
-        elif change <= -8:
-            signal_type = "DUMP"
-
-        if not signal_type:
-            return
-
-        confidence = min(1.0, abs(change) / 20)
-
-        signal = Signal(
-            market=market.question,
-            slug=market.market_slug,
-            outcome="YES",
-            tipo=signal_type,
-            change_5m=change,
-            current_price=current_price,
-            confidence=confidence,
-            polymarket_url=f"https://polymarket.com/event/{market.market_slug}",
-        )
-
-        db.add(signal)
-
-    except Exception as e:
-        print("Erro detectando sinal:", e)
-
-
-def run_worker():
     while True:
+        start = datetime.utcnow().isoformat()
 
-        print("🔄 Atualizando mercados...")
+        # 1) Rodar scan
+        scan_res = hit(SCAN_URL)
+        print(f"\n[{start}] SCAN:", scan_res.get("status"), scan_res.get("data"))
 
-        db = SessionLocal()
-        markets = fetch_markets()
+        # 2) Rodar alerta (se habilitado)
+        if ENABLE_ALERTS == "1":
+            alert_res = hit(ALERT_URL)
+            print(f"[{start}] ALERT:", alert_res.get("status"), alert_res.get("data"))
 
-        print("📊 Mercados recebidos:", len(markets))
-
-        saved = 0
-
-        for m in markets:
-
-            try:
-                slug = m.get("slug")
-                question = m.get("question")
-
-                existing = db.query(Market).filter_by(market_slug=slug).first()
-
-                if not existing:
-                    existing = Market(
-                        market_slug=slug,
-                        question=question,
-                        end_date=m.get("endDate"),
-                    )
-                    db.add(existing)
-                    db.flush()
-
-                tokens = m.get("tokens", [])
-
-                for t in tokens:
-
-                    token_id = t.get("token_id")
-                    outcome = t.get("outcome")
-                    price = float(t.get("price") or 0)
-
-                    token_obj = (
-                        db.query(Token)
-                        .filter_by(token_id=token_id)
-                        .first()
-                    )
-
-                    if not token_obj:
-                        token_obj = Token(
-                            token_id=token_id,
-                            outcome=outcome,
-                            price=price,
-                            market_id=existing.id,
-                        )
-                        db.add(token_obj)
-                    else:
-                        token_obj.price = price
-
-                    snapshot = Snapshot(
-                        token_id=token_id,
-                        price=price,
-                    )
-
-                    db.add(snapshot)
-
-                    detect_signal(db, token_id, price, existing)
-
-                    saved += 1
-
-            except Exception as e:
-                print("Erro no mercado:", e)
-
-        db.commit()
-        db.close()
-
-        print("💾 Snapshots salvos:", saved)
-
-        time.sleep(60)
-
+        # 3) Dorme
+        time.sleep(SLEEP_SECONDS)
 
 if __name__ == "__main__":
-    run_worker()
+    main()
