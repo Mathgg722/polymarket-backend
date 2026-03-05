@@ -2896,7 +2896,7 @@ def alerts_test():
     """Testa se o Telegram está configurado."""
     resp = _telegram_send("✅ <b>PolySignal</b> conectado! (teste)")
     return {"status": "ok", "telegram": resp}
-  
+
 @app.get("/alerts/run")
 def alerts_run(
     minutes: int = 10,
