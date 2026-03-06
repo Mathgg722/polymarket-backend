@@ -2999,3 +2999,115 @@ def cron_tick(db: Session = Depends(get_db)):
 
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+    
+# ============================
+# DEBUG CLOB TRADES (pra achar o erro real)
+# ============================
+from fastapi import Query
+
+@app.get("/debug/clob_trades")
+def debug_clob_trades(limit: int = Query(50, ge=1, le=200)):
+    """
+    Mostra status_code e um pedaço do body do CLOB.
+    Serve pra diagnosticar 403/429/timeout.
+    """
+    url = f"{POLYMARKET_CLOB}/trades?limit={int(limit)}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=12)
+        txt = resp.text or ""
+        return {
+            "ok": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "url": url,
+            "body_head": txt[:400],
+        }
+    except Exception as e:
+        return {"ok": False, "url": url, "error": str(e)}
+
+
+# ============================
+# LEADERS LIVE (robusto + log)
+# ============================
+@app.get("/leaders/live")
+def get_live_trades():
+    """Apostas recentes na blockchain (CLOB)."""
+    url = f"{POLYMARKET_CLOB}/trades?limit=100"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=12)
+
+        # Se não for 200, devolve diagnóstico em vez de "unavailable" vazio
+        if resp.status_code != 200:
+            return {
+                "status": "unavailable",
+                "error": "clob_non_200",
+                "status_code": resp.status_code,
+                "body_head": (resp.text or "")[:400],
+                "url": url,
+                "links": {
+                    "atividade": "https://polymarket.com/activity",
+                    "whales": "https://polymarketwhales.info",
+                },
+            }
+
+        data = resp.json()
+        trades_raw = data if isinstance(data, list) else data.get("data", [])
+        trades = []
+        wallets_seen = {}
+
+        for tx in trades_raw:
+            valor = float(tx.get("size") or tx.get("usdcSize") or 0)
+            wallet = tx.get("maker") or tx.get("owner") or ""
+            if not wallet:
+                continue
+
+            wallets_seen[wallet] = wallets_seen.get(wallet, 0) + 1
+            trades.append({
+                "wallet": wallet[:8] + "..." + wallet[-4:],
+                "wallet_full": wallet,
+                "valor_usd": round(valor, 2),
+                "outcome": tx.get("outcome") or tx.get("side"),
+                "preco": tx.get("price"),
+                "timestamp": tx.get("timestamp") or tx.get("matchedAt"),
+                "polymarket_url": f"https://polymarket.com/profile/{wallet}",
+            })
+
+        top_wallets = sorted(wallets_seen.items(), key=lambda x: x[1], reverse=True)[:10]
+        return {
+            "status": "ok",
+            "total_apostas": len(trades),
+            "apostas_recentes": sorted(trades, key=lambda x: x["valor_usd"], reverse=True)[:20],
+            "top_carteiras": [
+                {"wallet": w[:8] + "..." + w[-4:], "wallet_full": w, "num_apostas": n,
+                 "polymarket_url": f"https://polymarket.com/profile/{w}"}
+                for w, n in top_wallets
+            ]
+        }
+
+    except Exception as e:
+        return {
+            "status": "unavailable",
+            "error": "exception",
+            "detail": str(e),
+            "url": url,
+            "links": {
+                "atividade": "https://polymarket.com/activity",
+                "whales": "https://polymarketwhales.info",
+            }
+        }
+    
+from fastapi import Query
+
+@app.get("/debug/clob_trades")
+def debug_clob_trades(limit: int = Query(5, ge=1, le=100)):
+    try:
+        url = f"{POLYMARKET_CLOB}/trades?limit={limit}"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        return {
+            "url": url,
+            "status_code": resp.status_code,
+            "body_head": (resp.text or "")[:800],
+            "json": resp.json() if resp.headers.get("content-type","").startswith("application/json") else None,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    
