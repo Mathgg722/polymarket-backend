@@ -1,18 +1,31 @@
-﻿import os
+﻿# ============================================================
+# PolySignal — Backend Principal
+# FastAPI + PostgreSQL + Railway
+# ============================================================
+
 import os
+import json
+import time
+import hmac
+import hashlib
+import base64
 import requests
-from fastapi import FastAPI, Depends
-from sqlalchemy.orm import Session
-from sqlalchemy import text, func
-from database import SessionLocal, engine
-from models import Base, Market, Token, Snapshot,Trade,Signal
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
+from fastapi import FastAPI, Depends, Query
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text, func, desc
+from sqlalchemy.orm import Session
+
+from database import SessionLocal, engine
+from models import Base, Market, Token, Snapshot, Trade, Signal
+
+# ── Cria tabelas ─────────────────────────────────────────────
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI()
+app = FastAPI(title="PolySignal API", version="3.0")
 
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,6 +34,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Env vars ─────────────────────────────────────────────────
+NEWSAPI_KEY        = os.environ.get("NEWSAPI_KEY", "")
+ANTHROPIC_KEY      = os.environ.get("ANTHROPIC_KEY", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "") or os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+POLY_API_KEY       = os.environ.get("POLY_API_KEY", "")
+POLY_PASSPHRASE    = os.environ.get("POLY_PASSPHRASE", "")
+POLY_SECRET        = os.environ.get("POLY_SECRET", "")
+POLY_ADDRESS       = os.environ.get("POLY_ADDRESS", "") or os.environ.get("POLY_ADDRESSSS", "")
+
+GAMMA_API    = "https://gamma-api.polymarket.com"
+DATA_API     = "https://data-api.polymarket.com"
+CLOB_API     = "https://clob.polymarket.com"
+HEADERS      = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Referer": "https://polymarket.com",
+}
+
+# ── Estado global ─────────────────────────────────────────────
+_LAST_ALERT_SENT_AT = None
+
+
+# ─────────────────────────────────────────────────────────────
+# DB SESSION
+# ─────────────────────────────────────────────────────────────
 
 def get_db():
     db = SessionLocal()
@@ -30,37 +69,51 @@ def get_db():
         db.close()
 
 
+# ─────────────────────────────────────────────────────────────
+# ROOT
+# ─────────────────────────────────────────────────────────────
+
 @app.get("/")
 def home():
-    return {"status": "ok", "version": "2.0"}
+    return {"status": "ok", "version": "3.0", "service": "PolySignal"}
 
+
+# ─────────────────────────────────────────────────────────────
+# STATUS
+# ─────────────────────────────────────────────────────────────
 
 @app.get("/status")
 def status(db: Session = Depends(get_db)):
-    total = db.query(Market).count()
-    total_tokens = db.query(Token).count()
-    total_snapshots = db.query(Snapshot).count()
-    total_with_tokens = db.query(Market).join(Token).distinct().count()
+    last_snap = db.query(func.max(Snapshot.timestamp)).scalar()
+    age_minutes = None
+    if last_snap:
+        age_minutes = round((datetime.utcnow() - last_snap).total_seconds() / 60, 1)
+
     return {
-        "total_markets": total,
-        "markets_with_tokens": total_with_tokens,
-        "total_tokens": total_tokens,
-        "total_snapshots": total_snapshots,
-        "last_check": datetime.utcnow().isoformat()
+        "total_markets": db.query(Market).count(),
+        "markets_with_tokens": db.query(Market).join(Token).distinct().count(),
+        "total_tokens": db.query(Token).count(),
+        "total_snapshots": db.query(Snapshot).count(),
+        "total_signals": db.query(Signal).count(),
+        "last_snapshot": last_snap.isoformat() if last_snap else None,
+        "snapshot_age_minutes": age_minutes,
+        "worker_healthy": age_minutes is not None and age_minutes < 10,
+        "now": datetime.utcnow().isoformat(),
     }
 
 
+# ─────────────────────────────────────────────────────────────
+# MARKETS
+# ─────────────────────────────────────────────────────────────
+
 @app.get("/markets")
 def get_active_markets(db: Session = Depends(get_db)):
-    # Converte end_date (roda s├│ uma vez)
+    # Garante coluna timestamp correta
     try:
         db.execute(text("""
-            ALTER TABLE markets
-            ALTER COLUMN end_date TYPE TIMESTAMP
-            USING CASE
-                WHEN end_date IS NULL OR end_date = '' THEN NULL
-                ELSE end_date::TIMESTAMP
-            END
+            ALTER TABLE markets ALTER COLUMN end_date TYPE TIMESTAMP
+            USING CASE WHEN end_date IS NULL OR end_date = '' THEN NULL
+            ELSE end_date::TIMESTAMP END
         """))
         db.commit()
     except Exception:
@@ -68,26 +121,22 @@ def get_active_markets(db: Session = Depends(get_db)):
 
     now = datetime.utcnow()
     markets = (
-        db.query(Market)
-        .join(Token)
-        .filter(
-            (Market.end_date == None) |
-            (Market.end_date > now)
-        )
-        .distinct()
-        .all()
+        db.query(Market).join(Token)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().all()
     )
 
     result = []
     for m in markets:
-        yes_price = None
-        no_price = None
+        yes_price = no_price = None
         for t in m.tokens:
-            if t.outcome and t.outcome.upper() == "YES":
+            o = (t.outcome or "").upper()
+            if o == "YES":
                 yes_price = round(t.price * 100, 1)
-            elif t.outcome and t.outcome.upper() == "NO":
+            elif o == "NO":
                 no_price = round(t.price * 100, 1)
-
+        if yes_price == 0 and no_price == 0:
+            continue
         result.append({
             "id": m.id,
             "question": m.question,
@@ -95,160 +144,24 @@ def get_active_markets(db: Session = Depends(get_db)):
             "end_date": str(m.end_date) if m.end_date else None,
             "yes_price": yes_price,
             "no_price": no_price,
+            "polymarket_url": f"https://polymarket.com/event/{m.market_slug}",
         })
-
     return result
-
-
-@app.get("/history/{token_id}")
-def get_history(token_id: str, limit: int = 100, db: Session = Depends(get_db)):
-    """Historico de precos de um token especifico."""
-    snapshots = (
-        db.query(Snapshot)
-        .filter(Snapshot.token_id == token_id)
-        .order_by(Snapshot.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
-    return [
-        {"price": round(s.price * 100, 1), "timestamp": str(s.timestamp)}
-        for s in snapshots
-    ]
-
-
-@app.get("/anomalies")
-def get_anomalies(db: Session = Depends(get_db)):
-    """
-    Deteccao avancada de anomalias com classificacao por tipo,
-    score de confianca, multiplas janelas temporais e filtro
-    de mercados ja resolvidos.
-    """
-    now = datetime.utcnow()
-    window_1m  = now - timedelta(minutes=1)
-    window_5m  = now - timedelta(minutes=60)
-    window_15m = now - timedelta(minutes=15)
-    window_1h  = now - timedelta(hours=1)
-
-    anomalies = []
-    tokens = db.query(Token).all()
-
-    for token in tokens:
-        current_price = token.price
-
-        # Ignora mercados ja resolvidos (>95% ou <5%)
-        if current_price >= 0.95 or current_price <= 0.05:
-            continue
-
-        if current_price == 0:
-            continue
-
-        def get_snap(window):
-            return (
-                db.query(Snapshot)
-                .filter(
-                    Snapshot.token_id == token.token_id,
-                    Snapshot.timestamp <= window
-                )
-                .order_by(Snapshot.timestamp.desc())
-                .first()
-            )
-
-        snap_1m  = get_snap(window_1m)
-        snap_5m  = get_snap(window_5m)
-        snap_15m = get_snap(window_15m)
-        snap_1h  = get_snap(window_1h)
-
-        if not snap_5m:
-            continue
-
-        change_1m  = round((current_price - snap_1m.price) * 100, 2) if snap_1m else None
-        change_5m  = round((current_price - snap_5m.price) * 100, 2)
-        change_15m = round((current_price - snap_15m.price) * 100, 2) if snap_15m else None
-        change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
-
-        if abs(change_5m) < 5.0:
-            continue
-
-        # Classifica tipo de anomalia
-        if abs(change_5m) >= 20:
-            tipo = "EXTREME"
-            alert_level = "EXTREME"
-        elif change_5m > 0 and (change_1h or 0) > 0:
-            tipo = "SPIKE"
-            alert_level = "HIGH"
-        elif change_5m < 0 and (change_1h or 0) < 0:
-            tipo = "DUMP"
-            alert_level = "HIGH"
-        elif change_5m > 0 and (change_1h or 0) < 0:
-            tipo = "REVERSAL_UP"
-            alert_level = "HIGH"
-        elif change_5m < 0 and (change_1h or 0) > 0:
-            tipo = "REVERSAL_DOWN"
-            alert_level = "HIGH"
-        else:
-            tipo = "MOVE"
-            alert_level = "MEDIUM"
-
-        # Score de confianca (0-100)
-        score = 0
-        score += min(abs(change_5m) * 2, 40)
-        score += min(abs(change_1h or 0), 20)
-        if change_1m and abs(change_1m) > 2:
-            score += 20
-        if change_15m and abs(change_15m) > abs(change_5m):
-            score += 20
-        confianca_score = round(min(score, 100), 0)
-
-        # Oportunidade
-        if change_5m > 0 and current_price < 0.8:
-            oportunidade = "POSSIVEL_YES"
-        elif change_5m < 0 and current_price > 0.2:
-            oportunidade = "POSSIVEL_NO"
-        else:
-            oportunidade = "AGUARDAR"
-
-        market = db.query(Market).filter(Market.id == token.market_id).first()
-        if not market:
-            continue
-
-        anomalies.append({
-            "market": market.question,
-            "slug": market.market_slug,
-            "outcome": token.outcome,
-            "tipo": tipo,
-            "alert_level": alert_level,
-            "oportunidade": oportunidade,
-            "confianca_score": confianca_score,
-            "current_price": round(current_price * 100, 1),
-            "price_5m_ago": round(snap_5m.price * 100, 1),
-            "change_1m": change_1m,
-            "change_5m": change_5m,
-            "change_15m": change_15m,
-            "change_1h": change_1h,
-            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
-            "detected_at": now.isoformat(),
-        })
-
-    anomalies.sort(key=lambda x: x["confianca_score"], reverse=True)
-    return anomalies[:20]
 
 
 @app.get("/market/{slug}")
 def get_market_detail(slug: str, db: Session = Depends(get_db)):
-    """Detalhe de um mercado com historico completo."""
     market = db.query(Market).filter(Market.market_slug == slug).first()
     if not market:
-        return {"error": "Mercado nao encontrado"}
+        return {"error": "Mercado não encontrado"}
 
     tokens_detail = []
     for token in market.tokens:
-        # Ultimos 50 snapshots
         snapshots = (
             db.query(Snapshot)
             .filter(Snapshot.token_id == token.token_id)
             .order_by(Snapshot.timestamp.desc())
-            .limit(50)
-            .all()
+            .limit(100).all()
         )
         tokens_detail.append({
             "outcome": token.outcome,
@@ -264,510 +177,398 @@ def get_market_detail(slug: str, db: Session = Depends(get_db)):
         "question": market.question,
         "slug": market.market_slug,
         "end_date": str(market.end_date) if market.end_date else None,
-        "tokens": tokens_detail
+        "tokens": tokens_detail,
+        "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
     }
 
 
+@app.get("/history/{token_id}")
+def get_history(token_id: str, limit: int = 100, db: Session = Depends(get_db)):
+    snapshots = (
+        db.query(Snapshot)
+        .filter(Snapshot.token_id == token_id)
+        .order_by(Snapshot.timestamp.desc())
+        .limit(limit).all()
+    )
+    return [{"price": round(s.price * 100, 1), "timestamp": str(s.timestamp)} for s in snapshots]
+
+
+# ─────────────────────────────────────────────────────────────
+# MOVERS & ANOMALIES
+# ─────────────────────────────────────────────────────────────
+
 @app.get("/movers")
 def get_movers(db: Session = Depends(get_db)):
-    """
-    Top mercados com maior movimentacao na ultima hora.
-    """
     now = datetime.utcnow()
     window_1h = now - timedelta(hours=1)
-
     movers = []
-    tokens = db.query(Token).all()
 
-    for token in tokens:
+    for token in db.query(Token).all():
         snap_old = (
             db.query(Snapshot)
-            .filter(
-                Snapshot.token_id == token.token_id,
-                Snapshot.timestamp <= window_1h
-            )
-            .order_by(Snapshot.timestamp.desc())
-            .first()
+            .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= window_1h)
+            .order_by(Snapshot.timestamp.desc()).first()
         )
-
         if not snap_old:
             continue
-
         change = round((token.price - snap_old.price) * 100, 2)
-
-        if abs(change) >= 2.0:
-            market = db.query(Market).filter(Market.id == token.market_id).first()
-            movers.append({
-                "market": market.question if market else "Unknown",
-                "slug": market.market_slug if market else None,
-                "outcome": token.outcome,
-                "current_price": round(token.price * 100, 1),
-                "change_1h": change,
-                "direction": "UP" if change > 0 else "DOWN",
-            })
+        if abs(change) < 2.0:
+            continue
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        movers.append({
+            "market": market.question if market else "Unknown",
+            "slug": market.market_slug if market else None,
+            "outcome": token.outcome,
+            "current_price": round(token.price * 100, 1),
+            "change_1h": change,
+            "direction": "UP" if change > 0 else "DOWN",
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}" if market else None,
+        })
 
     movers.sort(key=lambda x: abs(x["change_1h"]), reverse=True)
     return movers[:20]
 
 
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# SISTEMA DE TRADES
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+@app.get("/anomalies")
+def get_anomalies(db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    w5m  = now - timedelta(minutes=5)
+    w15m = now - timedelta(minutes=15)
+    w1h  = now - timedelta(hours=1)
+    anomalies = []
 
-from models import Trade
+    for token in db.query(Token).all():
+        cp = token.price
+        if cp >= 0.95 or cp <= 0.05 or cp == 0:
+            continue
 
-@app.post("/trades")
-def open_trade(
-    market_slug: str,
-    outcome: str,
-    amount: float,
-    notes: str = "",
-    db: Session = Depends(get_db)
-):
-    """Registra uma nova aposta."""
-    market = db.query(Market).filter(Market.market_slug == market_slug).first()
-    if not market:
-        return {"error": "Mercado nao encontrado"}
+        def get_snap(w):
+            return (
+                db.query(Snapshot)
+                .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= w)
+                .order_by(Snapshot.timestamp.desc()).first()
+            )
 
-    # Busca preco atual do outcome
-    token = db.query(Token).filter(
-        Token.market_id == market.id,
-        Token.outcome == outcome.upper()
-    ).first()
+        s5m = get_snap(w5m)
+        s15m = get_snap(w15m)
+        s1h = get_snap(w1h)
+        if not s5m:
+            continue
 
-    if not token:
-        return {"error": f"Token {outcome} nao encontrado"}
+        c5m  = round((cp - s5m.price) * 100, 2)
+        c15m = round((cp - s15m.price) * 100, 2) if s15m else None
+        c1h  = round((cp - s1h.price) * 100, 2) if s1h else None
 
-    entry_price = round(token.price * 100, 2)
-    shares = round(amount / entry_price * 100, 4) if entry_price > 0 else 0
+        if abs(c5m) < 3.0:
+            continue
 
-    trade = Trade(
-        market_slug=market_slug,
-        question=market.question,
-        outcome=outcome.upper(),
-        amount=amount,
-        entry_price=entry_price,
-        shares=shares,
-        notes=notes,
-        status="open"
-    )
-    db.add(trade)
-    db.commit()
-    db.refresh(trade)
-
-    return {
-        "message": "Aposta registrada com sucesso!",
-        "trade_id": trade.id,
-        "market": market.question,
-        "outcome": outcome.upper(),
-        "amount": f"${amount}",
-        "entry_price": f"{entry_price}%",
-        "shares": shares,
-        "created_at": str(trade.created_at)
-    }
-
-
-@app.get("/trades")
-def list_trades(db: Session = Depends(get_db)):
-    """Lista todas as apostas com PnL atual."""
-    trades = db.query(Trade).order_by(Trade.created_at.desc()).all()
-    result = []
-
-    for t in trades:
-        # Preco atual
-        market = db.query(Market).filter(Market.market_slug == t.market_slug).first()
-        current_price = t.entry_price
-        if market:
-            token = db.query(Token).filter(
-                Token.market_id == market.id,
-                Token.outcome == t.outcome
-            ).first()
-            if token:
-                current_price = round(token.price * 100, 2)
-
-        # PnL atual
-        if t.status == "open":
-            pnl = round((current_price - t.entry_price) / 100 * t.shares, 2)
-            pnl_pct = round((current_price - t.entry_price), 1)
+        if abs(c5m) >= 20:
+            tipo, level = "EXTREME", "EXTREME"
+        elif c5m > 0 and (c1h or 0) > 0:
+            tipo, level = "SPIKE", "HIGH"
+        elif c5m < 0 and (c1h or 0) < 0:
+            tipo, level = "DUMP", "HIGH"
+        elif c5m > 0 and (c1h or 0) < 0:
+            tipo, level = "REVERSAL_UP", "MEDIUM"
+        elif c5m < 0 and (c1h or 0) > 0:
+            tipo, level = "REVERSAL_DOWN", "MEDIUM"
         else:
-            pnl = t.pnl
-            pnl_pct = round((t.exit_price - t.entry_price), 1) if t.exit_price else 0
+            tipo, level = "MOVE", "LOW"
 
-        result.append({
-            "id": t.id,
-            "market": t.question,
-            "outcome": t.outcome,
-            "amount": t.amount,
-            "entry_price": t.entry_price,
-            "current_price": current_price,
-            "shares": t.shares,
-            "pnl_usd": pnl,
-            "pnl_pct": pnl_pct,
-            "status": t.status,
-            "notes": t.notes,
-            "created_at": str(t.created_at)
+        score = min(abs(c5m) * 2 + abs(c1h or 0) + (20 if c15m and abs(c15m) > abs(c5m) else 0), 100)
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        anomalies.append({
+            "market": market.question,
+            "slug": market.market_slug,
+            "outcome": token.outcome,
+            "tipo": tipo,
+            "alert_level": level,
+            "confianca_score": round(score, 0),
+            "current_price": round(cp * 100, 1),
+            "change_5m": c5m,
+            "change_15m": c15m,
+            "change_1h": c1h,
+            "oportunidade": "POSSIVEL_YES" if c5m > 0 and cp < 0.8 else "POSSIVEL_NO" if c5m < 0 and cp > 0.2 else "AGUARDAR",
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
+            "detected_at": now.isoformat(),
         })
 
-    return result
+    anomalies.sort(key=lambda x: x["confianca_score"], reverse=True)
+    return anomalies[:20]
 
 
-@app.post("/trades/{trade_id}/close")
-def close_trade(trade_id: int, db: Session = Depends(get_db)):
-    """Fecha uma aposta pelo preco atual."""
-    trade = db.query(Trade).filter(Trade.id == trade_id).first()
-    if not trade:
-        return {"error": "Trade nao encontrado"}
-
-    market = db.query(Market).filter(Market.market_slug == trade.market_slug).first()
-    token = db.query(Token).filter(
-        Token.market_id == market.id,
-        Token.outcome == trade.outcome
-    ).first()
-
-    exit_price = round(token.price * 100, 2) if token else trade.entry_price
-    pnl = round((exit_price - trade.entry_price) / 100 * trade.shares, 2)
-
-    trade.exit_price = exit_price
-    trade.pnl = pnl
-    trade.status = "won" if pnl > 0 else "lost"
-    trade.closed_at = datetime.utcnow()
-    db.commit()
-
-    return {
-        "message": "Aposta fechada!",
-        "outcome": trade.outcome,
-        "entry_price": trade.entry_price,
-        "exit_price": exit_price,
-        "pnl_usd": pnl,
-        "status": trade.status
-    }
-
-
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# CONFIGURA├ç├òES GLOBAIS
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-
-NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY", "")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
-POLYMARKET_CLOB = "https://clob.polymarket.com"
-GAMMA_API = "https://gamma-api.polymarket.com"
-DATA_API = "https://data-api.polymarket.com"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://polymarket.com",
-}
-
-
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# /news ÔÇö NOT├ìCIAS REAIS
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-
-@app.get("/news")
-def get_news(query: str = "prediction markets politics economy"):
-    """Busca not├¡cias reais via NewsAPI + Google News RSS."""
-    articles = []
-
-    # Fonte 1: NewsAPI
-    try:
-        params = {
-            "q": query,
-            "language": "en",
-            "sortBy": "publishedAt",
-            "pageSize": 30,
-            "apiKey": NEWSAPI_KEY,
-        }
-        resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
-        if resp.status_code == 200:
-            for a in resp.json().get("articles", []):
-                if not a.get("title") or "[Removed]" in a.get("title", ""):
-                    continue
-                articles.append({
-                    "title": a.get("title"),
-                    "description": a.get("description") or "",
-                    "source": a.get("source", {}).get("name", ""),
-                    "url": a.get("url"),
-                    "published_at": a.get("publishedAt"),
-                    "fonte": "NewsAPI"
-                })
-    except Exception as e:
-        print(f"Erro NewsAPI: {e}")
-
-    # Fonte 2: Google News RSS
-    try:
-        import xml.etree.ElementTree as ET
-        params = {"q": "polymarket OR prediction market OR geopolitics", "hl": "en", "gl": "US", "ceid": "US:en"}
-        resp = requests.get("https://news.google.com/rss/search", params=params, timeout=8)
-        if resp.status_code == 200:
-            root = ET.fromstring(resp.content)
-            for item in root.findall(".//item")[:20]:
-                title = item.findtext("title", "")
-                articles.append({
-                    "title": title,
-                    "description": item.findtext("description", "")[:200],
-                    "source": "Google News",
-                    "url": item.findtext("link", ""),
-                    "published_at": item.findtext("pubDate", ""),
-                    "fonte": "Google News"
-                })
-    except Exception as e:
-        print(f"Erro Google News RSS: {e}")
-
-    return {
-        "total": len(articles),
-        "articles": articles[:40]
-    }
-
-
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# /cleanup ÔÇö LIMPEZA DE MERCADOS ANTIGOS
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# ─────────────────────────────────────────────────────────────
+# CLEANUP
+# ─────────────────────────────────────────────────────────────
 
 @app.post("/cleanup")
 def cleanup_old_markets(db: Session = Depends(get_db)):
-    """Remove mercados antigos com preco zero."""
-    years_old = ["2020", "2021", "2019", "2018", "2017"]
-
-    markets_all = db.query(Market).all()
+    old_years = ["2020", "2021", "2019", "2018", "2017"]
     removed = 0
-
-    for m in markets_all:
+    for m in db.query(Market).all():
         slug = m.market_slug or ""
         question = m.question or ""
-        is_old = any(y in slug or y in question for y in years_old)
-
-        # Verifica se todos tokens tem preco zero
+        is_old = any(y in slug or y in question for y in old_years)
         all_zero = all(t.price == 0 for t in m.tokens) if m.tokens else True
-
         if is_old and all_zero:
             for token in m.tokens:
                 db.query(Snapshot).filter(Snapshot.token_id == token.token_id).delete()
                 db.delete(token)
             db.delete(m)
             removed += 1
+    db.commit()
+    return {"message": "Limpeza concluída!", "removidos": removed, "total_restante": db.query(Market).count()}
+
+
+# ─────────────────────────────────────────────────────────────
+# REFRESH
+# ─────────────────────────────────────────────────────────────
+
+@app.post("/refresh")
+def refresh_markets(db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    try:
+        resp = requests.get(
+            f"{GAMMA_API}/markets?limit=200&active=true&order=volume24hr&ascending=false",
+            timeout=15
+        )
+        markets_raw = resp.json()
+        if isinstance(markets_raw, dict):
+            markets_raw = markets_raw.get("markets", [])
+    except Exception as e:
+        return {"error": f"Erro ao buscar mercados: {e}"}
+
+    novos = atualizados = 0
+    for m in markets_raw:
+        try:
+            slug = m.get("slug")
+            question = m.get("question")
+            if not slug:
+                continue
+
+            end_date = None
+            ed = m.get("endDate")
+            if ed:
+                try:
+                    end_date = datetime.fromisoformat(ed.replace("Z", "+00:00")).replace(tzinfo=None)
+                except Exception:
+                    try:
+                        end_date = datetime.strptime(ed[:10], "%Y-%m-%d")
+                    except Exception:
+                        pass
+
+            tokens_data = []
+            op = m.get("outcomePrices")
+            if op:
+                try:
+                    prices = json.loads(op) if isinstance(op, str) else op
+                    clob_ids = m.get("clobTokenIds", "[]")
+                    ids = json.loads(clob_ids) if isinstance(clob_ids, str) else clob_ids
+                    if len(prices) >= 2:
+                        tokens_data = [
+                            {"tokenId": ids[0] if ids else f"{slug}_YES", "outcome": "YES", "price": float(prices[0])},
+                            {"tokenId": ids[1] if len(ids) > 1 else f"{slug}_NO", "outcome": "NO", "price": float(prices[1])},
+                        ]
+                except Exception:
+                    pass
+
+            if not tokens_data:
+                for t in m.get("tokens", []):
+                    tid = t.get("tokenId") or t.get("token_id")
+                    if tid:
+                        tokens_data.append({
+                            "tokenId": tid,
+                            "outcome": (t.get("outcome") or "").upper(),
+                            "price": float(t.get("price") or 0),
+                        })
+
+            if not tokens_data:
+                continue
+
+            market_obj = db.query(Market).filter(Market.market_slug == slug).first()
+            if not market_obj:
+                market_obj = Market(market_slug=slug, question=question, end_date=end_date)
+                db.add(market_obj)
+                db.flush()
+                novos += 1
+            else:
+                market_obj.end_date = end_date
+                atualizados += 1
+
+            for t in tokens_data:
+                tid = t["tokenId"]
+                price = float(t.get("price") or 0)
+                outcome = t.get("outcome", "")
+                token_obj = db.query(Token).filter(Token.token_id == tid).first()
+                if not token_obj:
+                    token_obj = Token(token_id=tid, outcome=outcome, price=price, market_id=market_obj.id)
+                    db.add(token_obj)
+                else:
+                    token_obj.price = price
+                db.add(Snapshot(token_id=tid, price=price, timestamp=now))
+
+        except Exception as e:
+            print(f"[refresh] erro: {e}")
+            continue
 
     db.commit()
-    total = db.query(Market).count()
     return {
-        "message": "Limpeza conclu├¡da!",
-        "removidos": removed,
-        "total_restante": total
+        "message": "Atualização concluída!",
+        "novos_mercados": novos,
+        "mercados_atualizados": atualizados,
+        "total_mercados": db.query(Market).count(),
+        "atualizado_em": now.isoformat(),
     }
 
 
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# /signals ÔÇö SINAIS DE OPORTUNIDADE
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# ─────────────────────────────────────────────────────────────
+# TRADES
+# ─────────────────────────────────────────────────────────────
 
-@app.get("/signals")
-def get_signals(db: Session = Depends(get_db)):
-    """Sinais baseados em varia├º├Áes de pre├ºo recentes."""
-    now = datetime.utcnow()
-    window_5m = now - timedelta(minutes=5)
-    window_1h = now - timedelta(hours=1)
+@app.post("/trades")
+def open_trade(market_slug: str, outcome: str, amount: float, notes: str = "", db: Session = Depends(get_db)):
+    market = db.query(Market).filter(Market.market_slug == market_slug).first()
+    if not market:
+        return {"error": "Mercado não encontrado"}
+    token = db.query(Token).filter(Token.market_id == market.id, Token.outcome == outcome.upper()).first()
+    if not token:
+        return {"error": f"Token {outcome} não encontrado"}
+    entry_price = round(token.price * 100, 2)
+    shares = round(amount / entry_price * 100, 4) if entry_price > 0 else 0
+    trade = Trade(market_slug=market_slug, question=market.question, outcome=outcome.upper(),
+                  amount=amount, entry_price=entry_price, shares=shares, notes=notes, status="open")
+    db.add(trade)
+    db.commit()
+    db.refresh(trade)
+    return {"message": "Aposta registrada!", "trade_id": trade.id, "entry_price": f"{entry_price}%",
+            "shares": shares, "created_at": str(trade.created_at)}
 
-    signals = []
-    tokens = db.query(Token).all()
 
-    for token in tokens:
-        current_price = token.price
-        if current_price == 0:
-            continue
-
-        snap_5m = (
-            db.query(Snapshot)
-            .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= window_5m)
-            .order_by(Snapshot.timestamp.desc())
-            .first()
-        )
-        snap_1h = (
-            db.query(Snapshot)
-            .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= window_1h)
-            .order_by(Snapshot.timestamp.desc())
-            .first()
-        )
-
-        if not snap_5m:
-            continue
-
-        change_5m = round((current_price - snap_5m.price) * 100, 2)
-        if abs(change_5m) < 3.0:
-            continue
-
-        market = db.query(Market).filter(Market.id == token.market_id).first()
-        if not market:
-            continue
-
-        edge = abs(change_5m)
-        confidence = min(edge / 20, 1.0)
-        kelly = round(edge / 100 * 0.25 * 100, 2)
-        change_1h = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
-
-        signals.append({
-            "market": market.question,
-            "slug": market.market_slug,
-            "outcome": token.outcome,
-            "signal_type": "YES" if change_5m > 0 else "NO",
-            "market_prob": round(snap_5m.price * 100, 1),
-            "estimated_prob": round(current_price * 100, 1),
-            "edge": edge,
-            "confidence": round(confidence, 2),
-            "kelly_position_pct": kelly,
-            "change_1h": change_1h,
-            "detected_at": now.isoformat(),
+@app.get("/trades")
+def list_trades(db: Session = Depends(get_db)):
+    trades = db.query(Trade).order_by(Trade.created_at.desc()).all()
+    result = []
+    for t in trades:
+        current_price = t.entry_price
+        market = db.query(Market).filter(Market.market_slug == t.market_slug).first()
+        if market:
+            token = db.query(Token).filter(Token.market_id == market.id, Token.outcome == t.outcome).first()
+            if token:
+                current_price = round(token.price * 100, 2)
+        pnl = round((current_price - t.entry_price) / 100 * t.shares, 2) if t.status == "open" else (t.pnl or 0)
+        result.append({
+            "id": t.id, "market": t.question, "outcome": t.outcome,
+            "amount": t.amount, "entry_price": t.entry_price, "current_price": current_price,
+            "shares": t.shares, "pnl_usd": pnl, "pnl_pct": round(current_price - t.entry_price, 1),
+            "status": t.status, "notes": t.notes, "created_at": str(t.created_at),
         })
-
-    signals.sort(key=lambda x: abs(x["edge"]), reverse=True)
-    return signals[:30]
+    return result
 
 
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# /leaders ÔÇö TOP TRADERS
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+@app.post("/trades/{trade_id}/close")
+def close_trade(trade_id: int, db: Session = Depends(get_db)):
+    trade = db.query(Trade).filter(Trade.id == trade_id).first()
+    if not trade:
+        return {"error": "Trade não encontrado"}
+    market = db.query(Market).filter(Market.market_slug == trade.market_slug).first()
+    token = db.query(Token).filter(Token.market_id == market.id, Token.outcome == trade.outcome).first() if market else None
+    exit_price = round(token.price * 100, 2) if token else trade.entry_price
+    pnl = round((exit_price - trade.entry_price) / 100 * trade.shares, 2)
+    trade.exit_price = exit_price
+    trade.pnl = pnl
+    trade.status = "won" if pnl > 0 else "lost"
+    trade.closed_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Aposta fechada!", "exit_price": exit_price, "pnl_usd": pnl, "status": trade.status}
 
-@app.get("/leaders")
-def get_leaders():
-    for window in ["all", "1mo", "1w", "1d"]:
-        try:
-            url = f"{DATA_API}/leaderboard?window={window}&limit=20"
-            resp = requests.get(url, headers=HEADERS, timeout=8)
-            if resp.status_code == 200:
-                items = resp.json()
-                items = items if isinstance(items, list) else items.get("data", [])
-                if items:
-                    leaders = []
-                    for i, t in enumerate(items[:20]):
-                        address = t.get("proxyWallet") or t.get("address") or ""
-                        won = t.get("positionsWon") or 0
-                        lost = t.get("positionsLost") or 0
-                        leaders.append({
-                            "rank": i + 1,
-                            "username": t.get("name") or t.get("pseudonym") or address[:10] + "...",
-                            "address": address,
-                            "profit_usd": t.get("profit") or t.get("pnl") or 0,
-                            "volume_usd": t.get("volume") or 0,
-                            "win_rate": round(won / max(won + lost, 1) * 100, 1),
-                            "ver_apostas": f"https://polymarket.com/profile/{address}",
-                        })
-                    return {"status": "ok", "leaders": leaders}
-        except:
-            continue
+
+@app.get("/performance")
+def get_performance(db: Session = Depends(get_db)):
+    trades = db.query(Trade).order_by(Trade.created_at.asc()).all()
+    if not trades:
+        return {"capital_inicial": 100, "capital_atual": 100, "roi_pct": 0, "trades": []}
+
+    pnl_fechados = sum(t.pnl or 0 for t in trades if t.status in ["won", "lost"])
+    pnl_abertos = 0
+    for t in trades:
+        if t.status == "open":
+            market = db.query(Market).filter(Market.market_slug == t.market_slug).first()
+            if market:
+                token = db.query(Token).filter(Token.market_id == market.id, Token.outcome == t.outcome).first()
+                if token:
+                    pnl_abertos += round((token.price * 100 - t.entry_price) / 100 * t.shares, 2)
+
+    pnl_total = round(pnl_fechados + pnl_abertos, 2)
+    capital_atual = round(100 + pnl_total, 2)
+    roi = round(pnl_total, 1)
+    fechados = [t for t in trades if t.status in ["won", "lost"]]
+    ganhos = [t for t in fechados if t.status == "won"]
+    taxa_acerto = round(len(ganhos) / max(len(fechados), 1) * 100, 1)
 
     return {
-        "status": "unavailable",
-        "links": {
-            "leaderboard": "https://polymarket.com/leaderboard",
-            "whales": "https://polymarketwhales.info",
-            "atividade": "https://polymarket.com/activity",
-        }
+        "status_geral": "🟢 POSITIVO" if roi > 0 else "🔴 NEGATIVO",
+        "capital_inicial": 100,
+        "capital_atual": capital_atual,
+        "pnl_total_usd": pnl_total,
+        "roi_pct": roi,
+        "total_apostas": len(trades),
+        "apostas_abertas": len([t for t in trades if t.status == "open"]),
+        "taxa_acerto_pct": taxa_acerto,
+        "atualizado_em": datetime.utcnow().isoformat(),
     }
 
 
-@app.get("/leaders/live")
-def get_live_trades():
-    """Apostas recentes na blockchain."""
-    try:
-        url = f"{POLYMARKET_CLOB}/trades?limit=100"
-        resp = requests.get(url, headers=HEADERS, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            trades_raw = data if isinstance(data, list) else data.get("data", [])
-            trades = []
-            wallets_seen = {}
+# ─────────────────────────────────────────────────────────────
+# NEWS
+# ─────────────────────────────────────────────────────────────
 
-            for tx in trades_raw:
-                valor = float(tx.get("size") or tx.get("usdcSize") or 0)
-                wallet = tx.get("maker") or tx.get("owner") or ""
-                if not wallet:
-                    continue
-                wallets_seen[wallet] = wallets_seen.get(wallet, 0) + 1
-                trades.append({
-                    "wallet": wallet[:8] + "..." + wallet[-4:],
-                    "wallet_full": wallet,
-                    "valor_usd": round(valor, 2),
-                    "outcome": tx.get("outcome") or tx.get("side"),
-                    "preco": tx.get("price"),
-                    "timestamp": tx.get("timestamp") or tx.get("matchedAt"),
-                    "polymarket_url": f"https://polymarket.com/profile/{wallet}",
-                })
-
-            top_wallets = sorted(wallets_seen.items(), key=lambda x: x[1], reverse=True)[:10]
-            return {
-                "status": "ok",
-                "total_apostas": len(trades),
-                "apostas_recentes": sorted(trades, key=lambda x: x["valor_usd"], reverse=True)[:20],
-                "top_carteiras": [
-                    {"wallet": w[:8] + "..." + w[-4:], "wallet_full": w, "num_apostas": n,
-                     "polymarket_url": f"https://polymarket.com/profile/{w}"}
-                    for w, n in top_wallets
-                ]
-            }
-    except Exception as e:
-        print(f"Erro live trades: {e}")
-
-    return {
-        "status": "unavailable",
-        "links": {
-            "atividade": "https://polymarket.com/activity",
-            "whales": "https://polymarketwhales.info",
-        }
-    }
-
-
-@app.get("/leaders/wallet/{address}")
-def get_wallet_detail(address: str):
-    try:
-        url = f"{DATA_API}/positions?user={address}&sizeThreshold=10&limit=50"
-        resp = requests.get(url, headers=HEADERS, timeout=8)
-        if resp.status_code == 200:
-            items = resp.json()
-            items = items if isinstance(items, list) else items.get("data", [])
-            if items:
-                positions = []
-                total = 0
-                for p in items:
-                    valor = float(p.get("currentValue") or p.get("size") or 0)
-                    total += valor
-                    positions.append({
-                        "mercado": p.get("title") or p.get("market") or p.get("question"),
-                        "outcome": p.get("outcome"),
-                        "valor_usd": round(valor, 2),
-                        "preco_medio": p.get("avgPrice") or p.get("curPrice"),
-                        "pnl": p.get("cashPnl") or p.get("pnl"),
-                    })
-                return {
-                    "status": "ok",
-                    "wallet": address[:8] + "..." + address[-4:],
-                    "total_posicoes": len(positions),
-                    "total_exposto_usd": round(total, 2),
-                    "posicoes": positions,
-                    "polymarket_url": f"https://polymarket.com/profile/{address}",
-                }
-    except Exception as e:
-        print(f"Erro wallet: {e}")
-
-    return {
-        "status": "unavailable",
-        "polymarket_url": f"https://polymarket.com/profile/{address}",
-        "polygonscan_url": f"https://polygonscan.com/address/{address}",
-    }
-
-
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# /intelligence ÔÇö SISTEMA DE INTELIG├èNCIA COM IA REAL
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-
-def fetch_news_for_query(query: str, max_results: int = 8):
-    """Busca not├¡cias para uma query espec├¡fica."""
+@app.get("/news")
+def get_news(query: str = "prediction markets politics economy"):
     articles = []
     try:
-        params = {
-            "q": query,
-            "language": "en",
-            "sortBy": "publishedAt",
-            "pageSize": max_results,
-            "apiKey": NEWSAPI_KEY,
-        }
+        params = {"q": query, "language": "en", "sortBy": "publishedAt", "pageSize": 20, "apiKey": NEWSAPI_KEY}
+        resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
+        if resp.status_code == 200:
+            for a in resp.json().get("articles", []):
+                if not a.get("title") or "[Removed]" in a.get("title", ""):
+                    continue
+                articles.append({
+                    "title": a.get("title"), "description": (a.get("description") or "")[:200],
+                    "source": a.get("source", {}).get("name", ""), "url": a.get("url"),
+                    "published_at": a.get("publishedAt"), "fonte": "NewsAPI",
+                })
+    except Exception as e:
+        print(f"[news] NewsAPI erro: {e}")
+
+    try:
+        params = {"q": "polymarket OR prediction market OR geopolitics", "hl": "en", "gl": "US", "ceid": "US:en"}
+        resp = requests.get("https://news.google.com/rss/search", params=params, timeout=8)
+        if resp.status_code == 200:
+            root = ET.fromstring(resp.content)
+            for item in root.findall(".//item")[:15]:
+                articles.append({
+                    "title": item.findtext("title", ""), "description": item.findtext("description", "")[:200],
+                    "source": "Google News", "url": item.findtext("link", ""),
+                    "published_at": item.findtext("pubDate", ""), "fonte": "Google News",
+                })
+    except Exception as e:
+        print(f"[news] Google News erro: {e}")
+
+    return {"total": len(articles), "articles": articles[:40]}
+
+
+# ─────────────────────────────────────────────────────────────
+# INTELLIGENCE (com Claude real)
+# ─────────────────────────────────────────────────────────────
+
+def _fetch_news(query: str, max_results: int = 8) -> list:
+    articles = []
+    try:
+        params = {"q": query, "language": "en", "sortBy": "publishedAt", "pageSize": max_results, "apiKey": NEWSAPI_KEY}
         resp = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
         if resp.status_code == 200:
             for a in resp.json().get("articles", []):
@@ -781,11 +582,9 @@ def fetch_news_for_query(query: str, max_results: int = 8):
                     "published_at": a.get("publishedAt", ""),
                 })
     except Exception as e:
-        print(f"Erro news query: {e}")
+        print(f"[news] erro: {e}")
 
-    # Google News RSS como complemento
     try:
-        import xml.etree.ElementTree as ET
         params = {"q": query, "hl": "en", "gl": "US", "ceid": "US:en"}
         resp = requests.get("https://news.google.com/rss/search", params=params, timeout=6)
         if resp.status_code == 200:
@@ -794,59 +593,35 @@ def fetch_news_for_query(query: str, max_results: int = 8):
                 articles.append({
                     "title": item.findtext("title", ""),
                     "description": item.findtext("description", "")[:200],
-                    "source": "Google News",
-                    "url": item.findtext("link", ""),
+                    "source": "Google News", "url": item.findtext("link", ""),
                     "published_at": item.findtext("pubDate", ""),
                 })
-    except:
+    except Exception:
         pass
-
     return articles[:12]
 
 
-def analyze_with_claude(question: str, articles: list) -> dict:
-    """Usa Claude Haiku para analisar not├¡cias e dar score."""
-    import json
-
+def _analyze_with_claude(question: str, articles: list) -> dict:
     if not articles:
-        return {
-            "score_yes": 50,
-            "recomendacao": "EVITE",
-            "confianca": 0.2,
-            "resumo": "Sem not├¡cias suficientes para an├ílise confi├ível.",
-            "sentimento": "NEUTRO",
-            "fontes_relevantes": 0,
-        }
+        return {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.2,
+                "resumo": "Sem notícias suficientes.", "sentimento": "NEUTRO", "fontes_relevantes": 0}
 
-    news_text = "\n".join([
-        f"[{a['source']}] {a['title']} ÔÇö {a['description'][:150]}"
-        for a in articles[:8]
-    ])
-
-    prompt = f"""Voc├¬ ├® um analista expert em prediction markets e geopol├¡tica.
+    news_text = "\n".join([f"[{a['source']}] {a['title']} — {a['description'][:150]}" for a in articles[:8]])
+    prompt = f"""Você é analista expert em prediction markets e geopolítica.
 
 PERGUNTA DO MERCADO: {question}
 
-NOT├ìCIAS RECENTES:
+NOTÍCIAS RECENTES:
 {news_text}
 
-Analise as not├¡cias e responda SOMENTE com JSON v├ílido, sem texto antes ou depois:
-
-{{"score_yes": <0-100 probabilidade do YES acontecer>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <explica├º├úo curta em portugu├¬s max 100 chars>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">, "fontes_relevantes": <n├║mero de not├¡cias relevantes>}}"""
+Analise e responda SOMENTE com JSON válido:
+{{"score_yes": <0-100>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <max 100 chars português>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">, "fontes_relevantes": <número>}}"""
 
     try:
         resp = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 300,
-                "messages": [{"role": "user", "content": prompt}]
-            },
+            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 300, "messages": [{"role": "user", "content": prompt}]},
             timeout=15
         )
         if resp.status_code == 200:
@@ -854,19 +629,18 @@ Analise as not├¡cias e responda SOMENTE com JSON v├ílido, sem texto antes 
             text = text.replace("```json", "").replace("```", "").strip()
             return json.loads(text)
     except Exception as e:
-        print(f"Erro Claude API: {e}")
+        print(f"[claude] erro: {e}")
 
     # Fallback por palavras-chave
     all_text = " ".join([a["title"] + " " + a["description"] for a in articles]).lower()
-    pos = sum(1 for w in ["confirmed","approved","wins","rises","signed","passes"] if w in all_text)
-    neg = sum(1 for w in ["fails","rejected","loses","denied","cancelled","drops"] if w in all_text)
-    score = 50 + (pos - neg) * 8
-    score = max(10, min(90, score))
+    pos = sum(1 for w in ["confirmed", "approved", "wins", "rises", "signed"] if w in all_text)
+    neg = sum(1 for w in ["fails", "rejected", "loses", "denied", "cancelled"] if w in all_text)
+    score = max(10, min(90, 50 + (pos - neg) * 8))
     return {
         "score_yes": score,
         "recomendacao": "APOSTE YES" if pos > neg else "APOSTE NO" if neg > pos else "EVITE",
         "confianca": min(len(articles) / 10, 0.7),
-        "resumo": f"{len(articles)} not├¡cias analisadas. {pos} positivas, {neg} negativas.",
+        "resumo": f"{len(articles)} notícias. {pos} positivas, {neg} negativas.",
         "sentimento": "POSITIVO" if pos > neg else "NEGATIVO" if neg > pos else "NEUTRO",
         "fontes_relevantes": len(articles),
     }
@@ -874,51 +648,40 @@ Analise as not├¡cias e responda SOMENTE com JSON v├ílido, sem texto antes 
 
 @app.get("/intelligence/{slug}")
 def get_intelligence(slug: str, db: Session = Depends(get_db)):
-    """Score de intelig├¬ncia completo para um mercado."""
     market = db.query(Market).filter(Market.market_slug == slug).first()
     if not market:
-        return {"error": "Mercado n├úo encontrado"}
+        return {"error": "Mercado não encontrado"}
 
-    yes_price = None
-    no_price = None
+    yes_price = no_price = None
     for token in market.tokens:
-        if token.outcome and token.outcome.upper() == "YES":
+        o = (token.outcome or "").upper()
+        if o == "YES":
             yes_price = round(token.price * 100, 1)
-        elif token.outcome and token.outcome.upper() == "NO":
+        elif o == "NO":
             no_price = round(token.price * 100, 1)
 
-    # Keywords da pergunta
-    keywords = market.question.replace("?","").replace("Will ","").replace("will ","")[:80]
-    articles = fetch_news_for_query(keywords)
-    analysis = analyze_with_claude(market.question, articles)
+    keywords = market.question.replace("?", "").replace("Will ", "")[:80]
+    articles = _fetch_news(keywords)
+    analysis = _analyze_with_claude(market.question, articles)
 
     score_yes = analysis.get("score_yes", 50)
     edge = round(score_yes - (yes_price or 50), 1)
     rec = analysis.get("recomendacao", "EVITE")
     confianca = analysis.get("confianca", 0.5)
 
-    # Sinal visual
     if rec == "APOSTE YES" and abs(edge) >= 5 and confianca >= 0.5:
-        sinal = "­ƒƒó APOSTE YES"
-        sinal_cor = "green"
+        sinal, sinal_cor = "🟢 APOSTE YES", "green"
     elif rec == "APOSTE NO" and abs(edge) >= 5 and confianca >= 0.5:
-        sinal = "­ƒö┤ APOSTE NO"
-        sinal_cor = "red"
+        sinal, sinal_cor = "🔴 APOSTE NO", "red"
     else:
-        sinal = "­ƒƒí EVITE"
-        sinal_cor = "yellow"
+        sinal, sinal_cor = "🟡 EVITE", "yellow"
 
     return {
-        "market": market.question,
-        "slug": slug,
-        "yes_price_mercado": yes_price,
-        "no_price_mercado": no_price,
-        "score_yes_ia": score_yes,
-        "edge": edge,
-        "sinal": sinal,
-        "sinal_cor": sinal_cor,
-        "recomendacao": rec,
-        "confianca": confianca,
+        "market": market.question, "slug": slug,
+        "yes_price_mercado": yes_price, "no_price_mercado": no_price,
+        "score_yes_ia": score_yes, "edge": edge,
+        "sinal": sinal, "sinal_cor": sinal_cor,
+        "recomendacao": rec, "confianca": confianca,
         "resumo": analysis.get("resumo"),
         "sentimento": analysis.get("sentimento"),
         "fontes_relevantes": analysis.get("fontes_relevantes", 0),
@@ -930,2136 +693,86 @@ def get_intelligence(slug: str, db: Session = Depends(get_db)):
 
 @app.get("/intelligence")
 def get_all_intelligence(db: Session = Depends(get_db)):
-    """Score de intelig├¬ncia para os top 15 mercados mais relevantes."""
     now = datetime.utcnow()
     markets = (
-        db.query(Market)
-        .join(Token)
+        db.query(Market).join(Token)
         .filter((Market.end_date == None) | (Market.end_date > now))
-        .distinct()
-        .limit(15)
-        .all()
+        .distinct().limit(10).all()
     )
-
     results = []
     for m in markets:
-        yes_price = None
-        for token in m.tokens:
-            if token.outcome and token.outcome.upper() == "YES":
-                yes_price = round(token.price * 100, 1)
-
-        if not yes_price or yes_price == 0:
+        yes_price = next((round(t.price * 100, 1) for t in m.tokens if (t.outcome or "").upper() == "YES"), None)
+        if not yes_price:
             continue
-
-        keywords = m.question.replace("?","").replace("Will ","")[:60]
-        articles = fetch_news_for_query(keywords, max_results=5)
-        analysis = analyze_with_claude(m.question, articles)
-
+        keywords = m.question.replace("?", "").replace("Will ", "")[:60]
+        articles = _fetch_news(keywords, max_results=5)
+        analysis = _analyze_with_claude(m.question, articles)
         score_yes = analysis.get("score_yes", 50)
         edge = round(score_yes - yes_price, 1)
         rec = analysis.get("recomendacao", "EVITE")
         confianca = analysis.get("confianca", 0.5)
-
-        if rec == "APOSTE YES" and abs(edge) >= 5 and confianca >= 0.5:
-            sinal_cor = "green"
-        elif rec == "APOSTE NO" and abs(edge) >= 5 and confianca >= 0.5:
-            sinal_cor = "red"
-        else:
-            sinal_cor = "yellow"
-
+        sinal_cor = "green" if rec == "APOSTE YES" and abs(edge) >= 5 else "red" if rec == "APOSTE NO" and abs(edge) >= 5 else "yellow"
         results.append({
-            "market": m.question,
-            "slug": m.market_slug,
-            "yes_price": yes_price,
-            "score_yes_ia": score_yes,
-            "edge": edge,
-            "sinal_cor": sinal_cor,
-            "recomendacao": rec,
-            "confianca": confianca,
-            "resumo": analysis.get("resumo"),
-            "fontes": analysis.get("fontes_relevantes", 0),
+            "market": m.question, "slug": m.market_slug, "yes_price": yes_price,
+            "score_yes_ia": score_yes, "edge": edge, "sinal_cor": sinal_cor,
+            "recomendacao": rec, "confianca": confianca,
+            "resumo": analysis.get("resumo"), "fontes": analysis.get("fontes_relevantes", 0),
         })
 
     results.sort(key=lambda x: abs(x["edge"]), reverse=True)
-    return {
-        "total": len(results),
-        "atualizados_em": now.isoformat(),
-        "mercados": results
-    }
+    return {"total": len(results), "mercados": results, "atualizados_em": now.isoformat()}
 
 
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# /best ÔÇö MELHORES APOSTAS DO MOMENTO
-# Filtro rigoroso para o teste de $100
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+# ─────────────────────────────────────────────────────────────
+# LEADERS
+# ─────────────────────────────────────────────────────────────
 
-@app.get("/best")
-def get_best_opportunities(db: Session = Depends(get_db)):
-    """
-    Retorna apenas as MELHORES anomalias para apostar.
-    Crit├®rios rigorosos:
-    - Score >= 50
-    - Pre├ºo entre 20% e 80% (tem edge real)
-    - Varia├º├úo consistente em 15min E 1h
-    - Confirma com not├¡cias via IA
-    Ideal para estrat├®gia de $10 por aposta.
-    """
-    now = datetime.utcnow()
-    window_5m  = now - timedelta(minutes=5)
-    window_15m = now - timedelta(minutes=15)
-    window_1h  = now - timedelta(hours=1)
-
-    candidates = []
-    tokens = db.query(Token).all()
-
-    for token in tokens:
-        current_price = token.price
-
-        # FILTRO 1: Mercado entre 20% e 80% ÔÇö tem edge real
-        if current_price < 0.20 or current_price > 0.80:
-            continue
-
-        if current_price == 0:
-            continue
-
-        def get_snap(window):
-            return (
-                db.query(Snapshot)
-                .filter(
-                    Snapshot.token_id == token.token_id,
-                    Snapshot.timestamp <= window
-                )
-                .order_by(Snapshot.timestamp.desc())
-                .first()
-            )
-
-        snap_5m  = get_snap(window_5m)
-        snap_15m = get_snap(window_15m)
-        snap_1h  = get_snap(window_1h)
-
-        if not snap_5m or not snap_15m:
-            continue
-
-        change_5m  = round((current_price - snap_5m.price) * 100, 2)
-        change_15m = round((current_price - snap_15m.price) * 100, 2)
-        change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
-
-        # FILTRO 2: Varia├º├úo >= 5% em 5min
-        if abs(change_5m) < 5.0:
-            continue
-
-        # FILTRO 3: Tend├¬ncia consistente ÔÇö 15min na mesma dire├º├úo
-        if change_5m > 0 and change_15m < 0:
-            continue
-        if change_5m < 0 and change_15m > 0:
-            continue
-
-        # FILTRO 4: 1h tamb├®m na mesma dire├º├úo (se dispon├¡vel)
-        if change_1h is not None:
-            if change_5m > 0 and change_1h < -5:
-                continue
-            if change_5m < 0 and change_1h > 5:
-                continue
-
-        # Calcula score
-        score = 0
-        score += min(abs(change_5m) * 2, 40)
-        score += min(abs(change_15m) * 1.5, 25)
-        score += min(abs(change_1h or 0), 20)
-        # Bonus por estar em zona de valor (40-60%)
-        if 0.40 <= current_price <= 0.60:
-            score += 15
-        confianca_score = round(min(score, 100), 0)
-
-        # FILTRO 5: Score m├¡nimo 40
-        if confianca_score < 40:
-            continue
-
-        market = db.query(Market).filter(Market.id == token.market_id).first()
-        if not market:
-            continue
-
-        # FILTRO 6: Confirma com not├¡cias via IA
-        keywords = market.question.replace("?","").replace("Will ","")[:60]
-        articles = fetch_news_for_query(keywords, max_results=5)
-        analysis = analyze_with_claude(market.question, articles)
-
-        ai_score = analysis.get("score_yes", 50)
-        rec = analysis.get("recomendacao", "EVITE")
-        confianca_ia = analysis.get("confianca", 0)
-
-        # FILTRO 7: IA deve confirmar a dire├º├úo
-        if change_5m > 0 and rec == "APOSTE NO":
-            continue
-        if change_5m < 0 and rec == "APOSTE YES":
-            continue
-
-        # Score final combinado (mercado + IA)
-        score_final = round((confianca_score * 0.6) + (confianca_ia * 100 * 0.4), 1)
-
-        # Dire├º├úo recomendada
-        direcao = "YES" if change_5m > 0 else "NO"
-        preco_entrada = round(current_price * 100, 1)
-
-        # Potencial de lucro se resolver a favor
-        potencial_lucro = round((100 - preco_entrada) / preco_entrada * 10, 2) if direcao == "YES" else round(preco_entrada / (100 - preco_entrada) * 10, 2)
-
-        candidates.append({
-            "market": market.question,
-            "slug": market.market_slug,
-            "outcome": token.outcome,
-            "direcao": direcao,
-            "preco_entrada": preco_entrada,
-            "potencial_lucro_10usd": potencial_lucro,
-            "score_mercado": confianca_score,
-            "score_ia": round(confianca_ia * 100, 0),
-            "score_final": score_final,
-            "change_5m": change_5m,
-            "change_15m": change_15m,
-            "change_1h": change_1h,
-            "recomendacao_ia": rec,
-            "resumo_ia": analysis.get("resumo"),
-            "fontes": len(articles),
-            "noticias": [a["title"] for a in articles[:3]],
-            "sinal": "­ƒƒó APOSTE" if score_final >= 60 else "­ƒƒí CONSIDERE",
-            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
-            "detectado_em": now.isoformat(),
-        })
-
-    # Ordena pelo score final
-    candidates.sort(key=lambda x: x["score_final"], reverse=True)
-
-    total = len(candidates)
-    top = candidates[:5]  # M├íximo 5 apostas por vez
-
-    return {
-        "total_oportunidades": total,
-        "top_apostas": top,
-        "capital_necessario": len(top) * 10,
-        "resumo": f"{total} oportunidades encontradas. Top {len(top)} recomendadas para $10 cada.",
-        "atualizado_em": now.isoformat(),
-    }
-
-
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# /performance ÔÇö DASHBOARD $100 EM 30 DIAS
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-
-@app.get("/performance")
-def get_performance(db: Session = Depends(get_db)):
-    """
-    Dashboard completo de performance das apostas.
-    Mostra ROI, taxa de acerto, e se o PolySignal est├í ajudando.
-    """
-    trades = db.query(Trade).order_by(Trade.created_at.asc()).all()
-
-    if not trades:
-        return {
-            "mensagem": "Nenhuma aposta registrada ainda.",
-            "capital_inicial": 100,
-            "capital_atual": 100,
-            "roi_pct": 0,
-            "trades": []
-        }
-
-    total_apostado = sum(t.amount for t in trades)
-    total_aberto = sum(t.amount for t in trades if t.status == "open")
-
-    # PnL de trades fechados
-    pnl_fechados = sum(t.pnl or 0 for t in trades if t.status in ["won", "lost"])
-
-    # PnL de trades abertos (calculado ao vivo)
-    pnl_abertos = 0
-    for t in trades:
-        if t.status == "open":
-            market = db.query(Market).filter(Market.market_slug == t.market_slug).first()
-            if market:
-                token = db.query(Token).filter(
-                    Token.market_id == market.id,
-                    Token.outcome == t.outcome
-                ).first()
-                if token:
-                    current = round(token.price * 100, 2)
-                    pnl_abertos += round((current - t.entry_price) / 100 * t.shares, 2)
-
-    pnl_total = round(pnl_fechados + pnl_abertos, 2)
-    capital_atual = round(100 + pnl_total, 2)
-    roi = round(pnl_total / 100 * 100, 1)
-
-    # Taxa de acerto
-    fechados = [t for t in trades if t.status in ["won", "lost"]]
-    ganhos = [t for t in fechados if t.status == "won"]
-    taxa_acerto = round(len(ganhos) / max(len(fechados), 1) * 100, 1)
-
-    # Maior ganho e maior perda
-    pnls = [t.pnl for t in fechados if t.pnl is not None]
-    maior_ganho = max(pnls) if pnls else 0
-    maior_perda = min(pnls) if pnls else 0
-
-    # Status geral
-    if roi > 10:
-        status = "­ƒƒó EXCELENTE ÔÇö Sistema funcionando!"
-    elif roi > 0:
-        status = "­ƒƒí POSITIVO ÔÇö Sistema ajudando"
-    elif roi > -10:
-        status = "­ƒƒá NEGATIVO ÔÇö Ajustar estrat├®gia"
-    else:
-        status = "­ƒö┤ ATEN├ç├âO ÔÇö Revisar sistema"
-
-    # Lista de trades
-    trades_lista = []
-    for t in trades:
-        market = db.query(Market).filter(Market.market_slug == t.market_slug).first()
-        current_price = t.entry_price
-        if market and t.status == "open":
-            token = db.query(Token).filter(
-                Token.market_id == market.id,
-                Token.outcome == t.outcome
-            ).first()
-            if token:
-                current_price = round(token.price * 100, 2)
-
-        pnl = t.pnl if t.status != "open" else round((current_price - t.entry_price) / 100 * t.shares, 2)
-
-        trades_lista.append({
-            "id": t.id,
-            "market": t.question,
-            "outcome": t.outcome,
-            "amount": t.amount,
-            "entry_price": t.entry_price,
-            "current_price": current_price,
-            "pnl_usd": round(pnl or 0, 2),
-            "pnl_pct": round((current_price - t.entry_price), 1),
-            "status": t.status,
-            "created_at": str(t.created_at),
-        })
-
-    return {
-        "status_geral": status,
-        "capital_inicial": 100,
-        "capital_atual": capital_atual,
-        "pnl_total_usd": pnl_total,
-        "roi_pct": roi,
-        "total_apostas": len(trades),
-        "apostas_abertas": len([t for t in trades if t.status == "open"]),
-        "apostas_fechadas": len(fechados),
-        "taxa_acerto_pct": taxa_acerto,
-        "maior_ganho_usd": maior_ganho,
-        "maior_perda_usd": maior_perda,
-        "total_apostado_usd": total_apostado,
-        "trades": trades_lista,
-        "atualizado_em": datetime.utcnow().isoformat(),
-    }
-
-
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-# SISTEMA MULTI-FONTE DE INTELIG├èNCIA
-# Reddit + Google Trends + Whales + NewsAPI
-# ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
-
-def fetch_reddit(query: str) -> list:
-    """Busca posts relevantes no Reddit."""
-    results = []
-    subreddits = ["worldnews", "geopolitics", "politics", "economics", "sports"]
-    try:
-        for sub in subreddits[:3]:
-            url = f"https://www.reddit.com/r/{sub}/search.json"
-            params = {"q": query, "sort": "new", "limit": 5, "t": "day"}
-            headers = {"User-Agent": "PolySignal/1.0"}
-            resp = requests.get(url, params=params, headers=headers, timeout=6)
-            if resp.status_code == 200:
-                posts = resp.json().get("data", {}).get("children", [])
-                for p in posts:
-                    data = p.get("data", {})
-                    results.append({
-                        "title": data.get("title", ""),
-                        "score": data.get("score", 0),
-                        "comments": data.get("num_comments", 0),
-                        "url": f"https://reddit.com{data.get('permalink','')}",
-                        "fonte": f"Reddit r/{sub}"
-                    })
-    except Exception as e:
-        print(f"Reddit erro: {e}")
-    return results[:8]
-
-
-def fetch_google_trends(query: str) -> dict:
-    """Verifica se o assunto est├í em alta no Google."""
-    try:
-        url = "https://trends.google.com/trends/api/dailytrends"
-        params = {"hl": "en-US", "tz": "-180", "geo": "US", "ns": "15"}
-        resp = requests.get(url, params=params, timeout=6)
-        if resp.status_code == 200:
-            # Remove o prefixo de seguran├ºa do Google
-            text = resp.text[6:]
-            import json
-            data = json.loads(text)
-            trends = data.get("default", {}).get("trendingSearchesDays", [])
-            query_lower = query.lower()
-            for day in trends:
-                for item in day.get("trendingSearches", []):
-                    title = item.get("title", {}).get("query", "").lower()
-                    if any(word in title for word in query_lower.split()[:3]):
-                        traffic = item.get("formattedTraffic", "")
-                        return {"trending": True, "traffic": traffic, "termo": title}
-    except Exception as e:
-        print(f"Google Trends erro: {e}")
-    return {"trending": False, "traffic": "0", "termo": ""}
-
-
-def fetch_whale_activity(slug: str) -> dict:
-    """Detecta apostas grandes no mercado via CLOB."""
-    try:
-        url = f"https://clob.polymarket.com/trades?limit=50"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            trades = data if isinstance(data, list) else data.get("data", [])
-            big_trades = []
-            total_volume = 0
-            for t in trades:
-                valor = float(t.get("size") or t.get("usdcSize") or 0)
-                total_volume += valor
-                if valor >= 500:  # Aposta >= $500 ├® baleia
-                    big_trades.append({
-                        "valor": round(valor, 2),
-                        "outcome": t.get("outcome") or t.get("side"),
-                        "wallet": (t.get("maker") or "")[:8] + "...",
-                    })
-            big_trades.sort(key=lambda x: x["valor"], reverse=True)
-            return {
-                "total_volume_recente": round(total_volume, 2),
-                "num_baleias": len(big_trades),
-                "maior_aposta": big_trades[0] if big_trades else None,
-                "baleias": big_trades[:3],
-            }
-    except Exception as e:
-        print(f"Whale erro: {e}")
-    return {"total_volume_recente": 0, "num_baleias": 0, "maior_aposta": None, "baleias": []}
-
-
-def multi_source_analysis(question: str, slug: str, articles: list) -> dict:
-    """
-    Analisa uma oportunidade cruzando TODAS as fontes:
-    NewsAPI + Google News + Reddit + Google Trends + Whales + IA
-    """
-    keywords = question.replace("?","").replace("Will ","").replace("will ","")[:60]
-
-    # Busca em todas as fontes em paralelo
-    reddit_posts = fetch_reddit(keywords)
-    trends = fetch_google_trends(keywords)
-    whales = fetch_whale_activity(slug)
-
-    # Score por fonte
-    score_news = min(len(articles) * 8, 30)          # M├íx 30pts
-    score_reddit = min(len(reddit_posts) * 5, 20)     # M├íx 20pts
-    score_trends = 20 if trends.get("trending") else 0 # 20pts se trending
-    score_whales = min(whales.get("num_baleias", 0) * 10, 30)  # M├íx 30pts
-
-    score_total = score_news + score_reddit + score_trends + score_whales
-
-    # An├ílise IA com contexto completo
-    reddit_text = "\n".join([f"- [Reddit {p['fonte']}] {p['title']} ({p['score']} upvotes)" for p in reddit_posts[:4]])
-    news_text = "\n".join([f"- [{a['source']}] {a['title']}" for a in articles[:5]])
-    whale_text = f"Apostas grandes detectadas: {whales.get('num_baleias', 0)} baleias, maior: ${whales.get('maior_aposta', {}).get('valor', 0) if whales.get('maior_aposta') else 0}"
-
-    prompt = f"""Analise esta oportunidade de prediction market:
-
-MERCADO: {question}
-
-NOT├ìCIAS:
-{news_text or 'Nenhuma not├¡cia encontrada'}
-
-REDDIT:
-{reddit_text or 'Nenhum post encontrado'}
-
-ATIVIDADE DE BALEIAS: {whale_text}
-GOOGLE TRENDS: {'EM ALTA: ' + trends.get('termo','') if trends.get('trending') else 'N├úo trending'}
-
-Responda APENAS com JSON:
-{{"score_yes": <0-100>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <max 80 chars em portugu├¬s>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">}}"""
-
-    try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 200,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=15
-        )
-        if resp.status_code == 200:
-            import json
-            text = resp.json().get("content", [{}])[0].get("text", "{}")
-            text = text.replace("```json","").replace("```","").strip()
-            ai = json.loads(text)
-        else:
-            ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indispon├¡vel", "sentimento": "NEUTRO"}
-    except:
-        ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indispon├¡vel", "sentimento": "NEUTRO"}
-
-    # Score final combinado
-    score_final = round((score_total * 0.5) + (ai.get("confianca", 0) * 100 * 0.5), 1)
-
-    return {
-        "score_final": score_final,
-        "score_noticias": score_news,
-        "score_reddit": score_reddit,
-        "score_trends": score_trends,
-        "score_whales": score_whales,
-        "ai": ai,
-        "reddit_posts": reddit_posts[:3],
-        "trending": trends,
-        "whales": whales,
-        "num_fontes": sum([
-            1 if articles else 0,
-            1 if reddit_posts else 0,
-            1 if trends.get("trending") else 0,
-            1 if whales.get("num_baleias", 0) > 0 else 0,
-        ])
-    }
-
-
-@app.get("/best/v2")
-def get_best_v2(db: Session = Depends(get_db)):
-    """
-    Vers├úo 2 do filtro de melhores apostas.
-    Cruza NewsAPI + Google News + Reddit + Google Trends + Whales + IA.
-    S├│ retorna oportunidades confirmadas por m├║ltiplas fontes.
-    """
-    now = datetime.utcnow()
-    window_5m  = now - timedelta(minutes=5)
-    window_15m = now - timedelta(minutes=15)
-    window_1h  = now - timedelta(hours=1)
-
-    candidates = []
-    tokens = db.query(Token).all()
-
-    for token in tokens:
-        current_price = token.price
-
-        # Pre├ºo entre 15% e 85%
-        if current_price < 0.15 or current_price > 0.85:
-            continue
-        if current_price == 0:
-            continue
-
-        def get_snap(window):
-            return (
-                db.query(Snapshot)
-                .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= window)
-                .order_by(Snapshot.timestamp.desc())
-                .first()
-            )
-
-        snap_5m  = get_snap(window_5m)
-        snap_15m = get_snap(window_15m)
-        snap_1h  = get_snap(window_1h)
-
-        if not snap_5m:
-            continue
-
-        change_5m  = round((current_price - snap_5m.price) * 100, 2)
-        change_15m = round((current_price - snap_15m.price) * 100, 2) if snap_15m else None
-        change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
-
-        # Varia├º├úo m├¡nima 4%
-        if abs(change_5m) < 4.0:
-            continue
-
-        market = db.query(Market).filter(Market.id == token.market_id).first()
-        if not market:
-            continue
-
-        # Busca not├¡cias
-        keywords = market.question.replace("?","").replace("Will ","")[:60]
-        articles = fetch_news_for_query(keywords, max_results=6)
-
-        # An├ílise multi-fonte
-        analysis = multi_source_analysis(market.question, market.market_slug, articles)
-
-        score_final = analysis["score_final"]
-        ai = analysis["ai"]
-        rec = ai.get("recomendacao", "EVITE")
-
-        # S├│ oportunidades com score >= 35 e IA n├úo diz EVITE
-        if score_final < 35 or rec == "EVITE":
-            continue
-
-        direcao = "YES" if change_5m > 0 else "NO"
-        preco = round(current_price * 100, 1)
-        potencial = round((100 - preco) / preco * 10, 2) if direcao == "YES" else round(preco / (100 - preco) * 10, 2)
-
-        # Sinal final
-        if score_final >= 65:
-            sinal = "­ƒƒó APOSTE"
-        elif score_final >= 45:
-            sinal = "­ƒƒí CONSIDERE"
-        else:
-            sinal = "ÔÜ¬ FRACO"
-
-        candidates.append({
-            "market": market.question,
-            "slug": market.market_slug,
-            "direcao": direcao,
-            "preco_entrada": preco,
-            "potencial_lucro_10usd": potencial,
-            "sinal": sinal,
-            "score_final": score_final,
-            "scores": {
-                "noticias": analysis["score_noticias"],
-                "reddit": analysis["score_reddit"],
-                "trends": analysis["score_trends"],
-                "baleias": analysis["score_whales"],
-            },
-            "num_fontes_confirmando": analysis["num_fontes"],
-            "change_5m": change_5m,
-            "change_1h": change_1h,
-            "resumo_ia": ai.get("resumo"),
-            "baleias": analysis["whales"].get("baleias", []),
-            "trending": analysis["trending"].get("trending", False),
-            "noticias_titulos": [a["title"] for a in articles[:3]],
-            "reddit_posts": [p["title"] for p in analysis["reddit_posts"][:2]],
-            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
-            "detectado_em": now.isoformat(),
-        })
-
-    candidates.sort(key=lambda x: x["score_final"], reverse=True)
-    top = candidates[:5]
-
-    return {
-        "total_oportunidades": len(candidates),
-        "top_apostas": top,
-        "capital_necessario": len(top) * 10,
-        "resumo": f"{len(candidates)} oportunidades. Top {len(top)} confirmadas por m├║ltiplas fontes.",
-        "atualizado_em": now.isoformat(),
-    }
-# SISTEMA MULTI-FONTE DE INTELIGÃŠNCIA
-# Reddit + Google Trends + Whales + NewsAPI
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-def fetch_reddit(query: str) -> list:
-    """Busca posts relevantes no Reddit."""
-    results = []
-    subreddits = ["worldnews", "geopolitics", "politics", "economics", "sports"]
-    try:
-        for sub in subreddits[:3]:
-            url = f"https://www.reddit.com/r/{sub}/search.json"
-            params = {"q": query, "sort": "new", "limit": 5, "t": "day"}
-            headers = {"User-Agent": "PolySignal/1.0"}
-            resp = requests.get(url, params=params, headers=headers, timeout=6)
-            if resp.status_code == 200:
-                posts = resp.json().get("data", {}).get("children", [])
-                for p in posts:
-                    data = p.get("data", {})
-                    results.append({
-                        "title": data.get("title", ""),
-                        "score": data.get("score", 0),
-                        "comments": data.get("num_comments", 0),
-                        "url": f"https://reddit.com{data.get('permalink','')}",
-                        "fonte": f"Reddit r/{sub}"
-                    })
-    except Exception as e:
-        print(f"Reddit erro: {e}")
-    return results[:8]
-
-
-def fetch_google_trends(query: str) -> dict:
-    """Verifica se o assunto estÃ¡ em alta no Google."""
-    try:
-        url = "https://trends.google.com/trends/api/dailytrends"
-        params = {"hl": "en-US", "tz": "-180", "geo": "US", "ns": "15"}
-        resp = requests.get(url, params=params, timeout=6)
-        if resp.status_code == 200:
-            # Remove o prefixo de seguranÃ§a do Google
-            text = resp.text[6:]
-            import json
-            data = json.loads(text)
-            trends = data.get("default", {}).get("trendingSearchesDays", [])
-            query_lower = query.lower()
-            for day in trends:
-                for item in day.get("trendingSearches", []):
-                    title = item.get("title", {}).get("query", "").lower()
-                    if any(word in title for word in query_lower.split()[:3]):
-                        traffic = item.get("formattedTraffic", "")
-                        return {"trending": True, "traffic": traffic, "termo": title}
-    except Exception as e:
-        print(f"Google Trends erro: {e}")
-    return {"trending": False, "traffic": "0", "termo": ""}
-
-
-def fetch_whale_activity(slug: str) -> dict:
-    """Detecta apostas grandes no mercado via CLOB."""
-    try:
-        url = f"https://clob.polymarket.com/trades?limit=50"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            trades = data if isinstance(data, list) else data.get("data", [])
-            big_trades = []
-            total_volume = 0
-            for t in trades:
-                valor = float(t.get("size") or t.get("usdcSize") or 0)
-                total_volume += valor
-                if valor >= 500:  # Aposta >= $500 Ã© baleia
-                    big_trades.append({
-                        "valor": round(valor, 2),
-                        "outcome": t.get("outcome") or t.get("side"),
-                        "wallet": (t.get("maker") or "")[:8] + "...",
-                    })
-            big_trades.sort(key=lambda x: x["valor"], reverse=True)
-            return {
-                "total_volume_recente": round(total_volume, 2),
-                "num_baleias": len(big_trades),
-                "maior_aposta": big_trades[0] if big_trades else None,
-                "baleias": big_trades[:3],
-            }
-    except Exception as e:
-        print(f"Whale erro: {e}")
-    return {"total_volume_recente": 0, "num_baleias": 0, "maior_aposta": None, "baleias": []}
-
-
-def multi_source_analysis(question: str, slug: str, articles: list) -> dict:
-    """
-    Analisa uma oportunidade cruzando TODAS as fontes:
-    NewsAPI + Google News + Reddit + Google Trends + Whales + IA
-    """
-    keywords = question.replace("?","").replace("Will ","").replace("will ","")[:60]
-
-    # Busca em todas as fontes em paralelo
-    reddit_posts = fetch_reddit(keywords)
-    trends = fetch_google_trends(keywords)
-    whales = fetch_whale_activity(slug)
-
-    # Score por fonte
-    score_news = min(len(articles) * 8, 30)          # MÃ¡x 30pts
-    score_reddit = min(len(reddit_posts) * 5, 20)     # MÃ¡x 20pts
-    score_trends = 20 if trends.get("trending") else 0 # 20pts se trending
-    score_whales = min(whales.get("num_baleias", 0) * 10, 30)  # MÃ¡x 30pts
-
-    score_total = score_news + score_reddit + score_trends + score_whales
-
-    # AnÃ¡lise IA com contexto completo
-    reddit_text = "\n".join([f"- [Reddit {p['fonte']}] {p['title']} ({p['score']} upvotes)" for p in reddit_posts[:4]])
-    news_text = "\n".join([f"- [{a['source']}] {a['title']}" for a in articles[:5]])
-    whale_text = f"Apostas grandes detectadas: {whales.get('num_baleias', 0)} baleias, maior: ${whales.get('maior_aposta', {}).get('valor', 0) if whales.get('maior_aposta') else 0}"
-
-    prompt = f"""Analise esta oportunidade de prediction market:
-
-MERCADO: {question}
-
-NOTÃCIAS:
-{news_text or 'Nenhuma notÃ­cia encontrada'}
-
-REDDIT:
-{reddit_text or 'Nenhum post encontrado'}
-
-ATIVIDADE DE BALEIAS: {whale_text}
-GOOGLE TRENDS: {'EM ALTA: ' + trends.get('termo','') if trends.get('trending') else 'NÃ£o trending'}
-
-Responda APENAS com JSON:
-{{"score_yes": <0-100>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <max 80 chars em portuguÃªs>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">}}"""
-
-    try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 200,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=15
-        )
-        if resp.status_code == 200:
-            import json
-            text = resp.json().get("content", [{}])[0].get("text", "{}")
-            text = text.replace("```json","").replace("```","").strip()
-            ai = json.loads(text)
-        else:
-            ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indisponÃ­vel", "sentimento": "NEUTRO"}
-    except:
-        ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indisponÃ­vel", "sentimento": "NEUTRO"}
-
-    # Score final combinado
-    score_final = round((score_total * 0.5) + (ai.get("confianca", 0) * 100 * 0.5), 1)
-
-    return {
-        "score_final": score_final,
-        "score_noticias": score_news,
-        "score_reddit": score_reddit,
-        "score_trends": score_trends,
-        "score_whales": score_whales,
-        "ai": ai,
-        "reddit_posts": reddit_posts[:3],
-        "trending": trends,
-        "whales": whales,
-        "num_fontes": sum([
-            1 if articles else 0,
-            1 if reddit_posts else 0,
-            1 if trends.get("trending") else 0,
-            1 if whales.get("num_baleias", 0) > 0 else 0,
-        ])
-    }
-
-
-@app.get("/best/v2")
-def get_best_v2(db: Session = Depends(get_db)):
-    """
-    VersÃ£o 2 do filtro de melhores apostas.
-    Cruza NewsAPI + Google News + Reddit + Google Trends + Whales + IA.
-    SÃ³ retorna oportunidades confirmadas por mÃºltiplas fontes.
-    """
-    now = datetime.utcnow()
-    window_5m  = now - timedelta(minutes=5)
-    window_15m = now - timedelta(minutes=15)
-    window_1h  = now - timedelta(hours=1)
-
-    candidates = []
-    tokens = db.query(Token).all()
-
-    for token in tokens:
-        current_price = token.price
-
-        # PreÃ§o entre 15% e 85%
-        if current_price < 0.15 or current_price > 0.85:
-            continue
-        if current_price == 0:
-            continue
-
-        def get_snap(window):
-            return (
-                db.query(Snapshot)
-                .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= window)
-                .order_by(Snapshot.timestamp.desc())
-                .first()
-            )
-
-        snap_5m  = get_snap(window_5m)
-        snap_15m = get_snap(window_15m)
-        snap_1h  = get_snap(window_1h)
-
-        if not snap_5m:
-            continue
-
-        change_5m  = round((current_price - snap_5m.price) * 100, 2)
-        change_15m = round((current_price - snap_15m.price) * 100, 2) if snap_15m else None
-        change_1h  = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
-
-        # VariaÃ§Ã£o mÃ­nima 4%
-        if abs(change_5m) < 4.0:
-            continue
-
-        market = db.query(Market).filter(Market.id == token.market_id).first()
-        if not market:
-            continue
-
-        # Busca notÃ­cias
-        keywords = market.question.replace("?","").replace("Will ","")[:60]
-        articles = fetch_news_for_query(keywords, max_results=6)
-
-        # AnÃ¡lise multi-fonte
-        analysis = multi_source_analysis(market.question, market.market_slug, articles)
-
-        score_final = analysis["score_final"]
-        ai = analysis["ai"]
-        rec = ai.get("recomendacao", "EVITE")
-
-        # SÃ³ oportunidades com score >= 35 e IA nÃ£o diz EVITE
-        if score_final < 35 or rec == "EVITE":
-            continue
-
-        direcao = "YES" if change_5m > 0 else "NO"
-        preco = round(current_price * 100, 1)
-        potencial = round((100 - preco) / preco * 10, 2) if direcao == "YES" else round(preco / (100 - preco) * 10, 2)
-
-        # Sinal final
-        if score_final >= 65:
-            sinal = "ðŸŸ¢ APOSTE"
-        elif score_final >= 45:
-            sinal = "ðŸŸ¡ CONSIDERE"
-        else:
-            sinal = "âšª FRACO"
-
-        candidates.append({
-            "market": market.question,
-            "slug": market.market_slug,
-            "direcao": direcao,
-            "preco_entrada": preco,
-            "potencial_lucro_10usd": potencial,
-            "sinal": sinal,
-            "score_final": score_final,
-            "scores": {
-                "noticias": analysis["score_noticias"],
-                "reddit": analysis["score_reddit"],
-                "trends": analysis["score_trends"],
-                "baleias": analysis["score_whales"],
-            },
-            "num_fontes_confirmando": analysis["num_fontes"],
-            "change_5m": change_5m,
-            "change_1h": change_1h,
-            "resumo_ia": ai.get("resumo"),
-            "baleias": analysis["whales"].get("baleias", []),
-            "trending": analysis["trending"].get("trending", False),
-            "noticias_titulos": [a["title"] for a in articles[:3]],
-            "reddit_posts": [p["title"] for p in analysis["reddit_posts"][:2]],
-            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
-            "detectado_em": now.isoformat(),
-        })
-
-    candidates.sort(key=lambda x: x["score_final"], reverse=True)
-    top = candidates[:5]
-
-    return {
-        "total_oportunidades": len(candidates),
-        "top_apostas": top,
-        "capital_necessario": len(top) * 10,
-        "resumo": f"{len(candidates)} oportunidades. Top {len(top)} confirmadas por mÃºltiplas fontes.",
-        "atualizado_em": now.isoformat(),
-    }
-
-
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# /refresh â€” ATUALIZA MERCADOS MANUALMENTE
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.post("/refresh")
-def refresh_markets(db: Session = Depends(get_db)):
-    """
-    ForÃ§a atualizaÃ§Ã£o completa dos mercados:
-    - Busca mercados novos da API do Polymarket
-    - Fecha mercados expirados
-    - Adiciona mercados novos
-    - Atualiza preÃ§os
-    """
-    import json as json_lib
-
-    BASE_URL = "https://gamma-api.polymarket.com/markets"
-    now = datetime.utcnow()
-
-    # Busca mercados ativos da API
-    try:
-        resp = requests.get(
-            f"{BASE_URL}?limit=200&active=true&order=volume24hr&ascending=false",
-            timeout=15
-        )
-        markets_raw = resp.json()
-        if isinstance(markets_raw, dict):
-            markets_raw = markets_raw.get("markets", [])
-    except Exception as e:
-        return {"error": f"Erro ao buscar mercados: {e}"}
-
-    novos = 0
-    atualizados = 0
-    fechados = 0
-
-    for m in markets_raw:
+@app.get("/leaders")
+def get_leaders():
+    for window in ["all", "1mo", "1w", "1d"]:
         try:
-            slug = m.get("slug")
-            question = m.get("question")
-            if not slug:
-                continue
-
-            # Parse end_date
-            end_date = None
-            ed = m.get("endDate")
-            if ed:
-                try:
-                    end_date = datetime.fromisoformat(ed.replace("Z", "+00:00")).replace(tzinfo=None)
-                except:
-                    try:
-                        end_date = datetime.strptime(ed[:10], "%Y-%m-%d")
-                    except:
-                        pass
-
-            # Extrai preÃ§os
-            yes_price = None
-            no_price = None
-            tokens_data = []
-
-            # Tenta outcomePrices
-            op = m.get("outcomePrices")
-            if op:
-                try:
-                    prices = json_lib.loads(op) if isinstance(op, str) else op
-                    if len(prices) >= 2:
-                        yes_price = float(prices[0])
-                        no_price = float(prices[1])
-                        clob_ids = m.get("clobTokenIds", "[]")
-                        ids = json_lib.loads(clob_ids) if isinstance(clob_ids, str) else clob_ids
-                        tokens_data = [
-                            {"tokenId": ids[0] if ids else f"{slug}_YES", "outcome": "YES", "price": yes_price},
-                            {"tokenId": ids[1] if len(ids) > 1 else f"{slug}_NO", "outcome": "NO", "price": no_price},
-                        ]
-                except:
-                    pass
-
-            # Tenta tokens direto
-            if not tokens_data:
-                for t in m.get("tokens", []):
-                    outcome = (t.get("outcome") or "").upper()
-                    price = float(t.get("price") or 0)
-                    token_id = t.get("tokenId") or t.get("token_id")
-                    if token_id:
-                        tokens_data.append({"tokenId": token_id, "outcome": outcome, "price": price})
-
-            if not tokens_data:
-                continue
-
-            # Upsert mercado
-            market_obj = db.query(Market).filter(Market.market_slug == slug).first()
-            if not market_obj:
-                market_obj = Market(market_slug=slug, question=question, end_date=end_date)
-                db.add(market_obj)
-                db.flush()
-                novos += 1
-            else:
-                market_obj.end_date = end_date
-                atualizados += 1
-
-            # Upsert tokens e snapshot
-            for t in tokens_data:
-                token_id = t["tokenId"]
-                price = float(t.get("price") or 0)
-                outcome = t.get("outcome", "")
-
-                token_obj = db.query(Token).filter(Token.token_id == token_id).first()
-                if not token_obj:
-                    token_obj = Token(
-                        token_id=token_id,
-                        outcome=outcome,
-                        price=price,
-                        market_id=market_obj.id
-                    )
-                    db.add(token_obj)
-                else:
-                    token_obj.price = price
-
-                db.add(Snapshot(token_id=token_id, price=price))
-
-        except Exception as e:
-            print(f"Erro refresh mercado: {e}")
-            continue
-
-    # Fecha mercados expirados
-    expired = db.query(Market).filter(
-        Market.end_date != None,
-        Market.end_date < now
-    ).all()
-    for m in expired:
-        # Verifica se todos tokens estÃ£o em 0% ou 100%
-        all_resolved = all(
-            t.price <= 0.01 or t.price >= 0.99
-            for t in m.tokens
-        ) if m.tokens else False
-        if all_resolved:
-            fechados += 1
-
-    db.commit()
-
-    total = db.query(Market).count()
-    return {
-        "message": "AtualizaÃ§Ã£o concluÃ­da!",
-        "novos_mercados": novos,
-        "mercados_atualizados": atualizados,
-        "mercados_expirados_detectados": fechados,
-        "total_mercados": total,
-        "atualizado_em": now.isoformat(),
-    }
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# MARKET INEFFICIENCY ENGINE
-# Motor quantitativo â€” diferencial do PolySignal
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-@app.get("/metrics/{slug}")
-def get_market_metrics(slug: str, db: Session = Depends(get_db)):
-    """
-    4 mÃ©tricas quantitativas por mercado:
-    - volatility_score: movimento atual vs mÃ©dia histÃ³rica
-    - mispricing_score: desvio do preÃ§o justo histÃ³rico
-    - reversal_probability: % de vezes que reverteu apÃ³s movimento similar
-    - confidence_score: convicÃ§Ã£o 0-100 baseada em dados reais
-    """
-    now = datetime.utcnow()
-
-    market = db.query(Market).filter(Market.market_slug == slug).first()
-    if not market:
-        return {"error": "Mercado nÃ£o encontrado"}
-
-    metrics_por_token = []
-
-    for token in market.tokens:
-        current_price = token.price
-        if current_price == 0:
-            continue
-
-        # â”€â”€ Coleta histÃ³rico completo do token â”€â”€
-        snapshots = (
-            db.query(Snapshot)
-            .filter(Snapshot.token_id == token.token_id)
-            .order_by(Snapshot.timestamp.desc())
-            .limit(2000)
-            .all()
-        )
-
-        if len(snapshots) < 10:
-            continue
-
-        prices = [s.price for s in snapshots]
-        times  = [s.timestamp for s in snapshots]
-
-        # â”€â”€ 1. VOLATILITY SCORE â”€â”€
-        # Compara movimento recente vs mÃ©dia histÃ³rica
-        recent_prices = prices[:12]   # ~1h
-        all_changes = [abs(prices[i] - prices[i+1]) for i in range(len(prices)-1)]
-        recent_changes = [abs(recent_prices[i] - recent_prices[i+1]) for i in range(len(recent_prices)-1)]
-
-        avg_historical = sum(all_changes) / max(len(all_changes), 1)
-        avg_recent     = sum(recent_changes) / max(len(recent_changes), 1)
-
-        volatility_ratio = round(avg_recent / max(avg_historical, 0.0001), 2)
-        volatility_score = min(round(volatility_ratio * 25, 1), 100)
-
-        if volatility_ratio > 3:
-            volatility_label = "EXTREMA"
-        elif volatility_ratio > 2:
-            volatility_label = "ALTA"
-        elif volatility_ratio > 1.2:
-            volatility_label = "ELEVADA"
-        else:
-            volatility_label = "NORMAL"
-
-        # â”€â”€ 2. MISPRICING SCORE â”€â”€
-        # Compara preÃ§o atual com mÃ©dia histÃ³rica ponderada
-        if len(prices) >= 50:
-            hist_mean = sum(prices[12:62]) / 50   # mÃ©dia 1h-5h atrÃ¡s
-            deviation = abs(current_price - hist_mean)
-            mispricing_score = min(round(deviation * 300, 1), 100)
-            price_direction = "ACIMA" if current_price > hist_mean else "ABAIXO"
-            hist_mean_pct = round(hist_mean * 100, 1)
-        else:
-            mispricing_score = 0
-            price_direction = "NEUTRO"
-            hist_mean_pct = round(current_price * 100, 1)
-
-        # â”€â”€ 3. REVERSAL PROBABILITY â”€â”€
-        # % de vezes que apÃ³s subida/queda similar, o preÃ§o reverteu
-        reversals = 0
-        total_similar = 0
-        window = 6  # ~30 min
-
-        for i in range(window, len(prices) - window):
-            move = prices[i-window] - prices[i]  # movimento antes
-            future = prices[i] - prices[i+window]  # movimento depois
-
-            if abs(move) > 0.03:  # movimento > 3%
-                total_similar += 1
-                if (move > 0 and future < -0.01) or (move < 0 and future > 0.01):
-                    reversals += 1
-
-        reversal_probability = round(reversals / max(total_similar, 1) * 100, 1)
-
-        # â”€â”€ 4. CONFIDENCE SCORE â”€â”€
-        # ConvicÃ§Ã£o baseada em volume de evidÃªncias
-        evidence_points = 0
-        evidence_points += min(len(snapshots) / 100, 20)      # histÃ³rico longo
-        evidence_points += min(volatility_score * 0.3, 25)    # volatilidade
-        evidence_points += min(mispricing_score * 0.3, 25)    # distorÃ§Ã£o
-        evidence_points += min(total_similar / 5, 15)         # padrÃµes similares
-        if reversal_probability > 60:
-            evidence_points += 15                              # alta prob reversÃ£o
-
-        confidence_score = min(round(evidence_points, 1), 100)
-
-        # â”€â”€ Edge detectado â”€â”€
-        edge = None
-        edge_direction = None
-
-        if mispricing_score >= 20 and confidence_score >= 40:
-            if price_direction == "ACIMA":
-                edge = "POSSIVEL_QUEDA"
-                edge_direction = "NO"
-            else:
-                edge = "POSSIVEL_SUBIDA"
-                edge_direction = "YES"
-
-        if volatility_ratio > 2 and reversal_probability > 55:
-            edge = "REVERSAO_PROVAVEL"
-            recent_change = prices[0] - prices[min(12, len(prices)-1)]
-            edge_direction = "NO" if recent_change > 0 else "YES"
-
-        metrics_por_token.append({
-            "outcome": token.outcome,
-            "current_price_pct": round(current_price * 100, 1),
-            "volatility": {
-                "score": volatility_score,
-                "label": volatility_label,
-                "ratio_vs_historico": volatility_ratio,
-            },
-            "mispricing": {
-                "score": mispricing_score,
-                "preco_historico_medio_pct": hist_mean_pct,
-                "desvio_direcao": price_direction,
-            },
-            "reversal": {
-                "probability_pct": reversal_probability,
-                "padroes_similares_encontrados": total_similar,
-            },
-            "confidence_score": confidence_score,
-            "edge": edge,
-            "edge_direction": edge_direction,
-            "snapshots_analisados": len(snapshots),
-        })
-
-    if not metrics_por_token:
-        return {"error": "Dados insuficientes para anÃ¡lise"}
-
-    # Score geral do mercado
-    max_confidence = max(m["confidence_score"] for m in metrics_por_token)
-    has_edge = any(m["edge"] for m in metrics_por_token)
-
-    return {
-        "market": market.question,
-        "slug": slug,
-        "has_edge": has_edge,
-        "max_confidence": max_confidence,
-        "tokens": metrics_por_token,
-        "polymarket_url": f"https://polymarket.com/event/{slug}",
-        "analisado_em": now.isoformat(),
-    }
-
-
-@app.get("/inefficiencies")
-def get_inefficiencies(db: Session = Depends(get_db)):
-    """
-    TOP mercados com maior distorÃ§Ã£o estatÃ­stica agora.
-    SÃ³ mostra onde existe edge real baseado em histÃ³rico.
-    Este Ã© o diferencial do PolySignal.
-    """
-    now = datetime.utcnow()
-    window_5m  = now - timedelta(minutes=5)
-    window_1h  = now - timedelta(hours=1)
-
-    results = []
-    tokens = db.query(Token).all()
-
-    for token in tokens:
-        current_price = token.price
-        if current_price < 0.10 or current_price > 0.90:
-            continue
-        if current_price == 0:
-            continue
-
-        snapshots = (
-            db.query(Snapshot)
-            .filter(Snapshot.token_id == token.token_id)
-            .order_by(Snapshot.timestamp.desc())
-            .limit(500)
-            .all()
-        )
-
-        if len(snapshots) < 20:
-            continue
-
-        prices = [s.price for s in snapshots]
-
-        # Movimento recente
-        snap_5m = next((s for s in snapshots if s.timestamp <= window_5m), None)
-        snap_1h = next((s for s in snapshots if s.timestamp <= window_1h), None)
-
-        change_5m = round((current_price - snap_5m.price) * 100, 2) if snap_5m else 0
-        change_1h = round((current_price - snap_1h.price) * 100, 2) if snap_1h else None
-
-        if abs(change_5m) < 3:
-            continue
-
-        # Volatilidade histÃ³rica
-        all_changes = [abs(prices[i] - prices[i+1]) for i in range(min(len(prices)-1, 200))]
-        avg_hist = sum(all_changes) / max(len(all_changes), 1)
-        volatility_ratio = abs(change_5m / 100) / max(avg_hist, 0.0001)
-
-        # Mispricing
-        hist_mean = sum(prices[12:62]) / min(50, len(prices[12:62])) if len(prices) > 12 else current_price
-        mispricing = abs(current_price - hist_mean)
-        mispricing_score = min(round(mispricing * 300, 1), 100)
-
-        # ReversÃ£o histÃ³rica
-        reversals = 0
-        total_similar = 0
-        for i in range(6, min(len(prices) - 6, 200)):
-            move = prices[i-6] - prices[i]
-            future = prices[i] - prices[i+6]
-            if abs(move) > 0.03:
-                total_similar += 1
-                if (move > 0 and future < -0.01) or (move < 0 and future > 0.01):
-                    reversals += 1
-
-        reversal_prob = round(reversals / max(total_similar, 1) * 100, 1)
-
-        # Score de ineficiÃªncia
-        ineff_score = round(
-            (volatility_ratio * 20) +
-            (mispricing_score * 0.4) +
-            (reversal_prob * 0.4),
-            1
-        )
-        ineff_score = min(ineff_score, 100)
-
-        if ineff_score < 25:
-            continue
-
-        market = db.query(Market).filter(Market.id == token.market_id).first()
-        if not market:
-            continue
-
-        # Edge direction
-        if change_5m > 0 and reversal_prob > 55:
-            edge = "REVERSAO_QUEDA"
-            apostar = "NO"
-        elif change_5m < 0 and reversal_prob > 55:
-            edge = "REVERSAO_SUBIDA"
-            apostar = "YES"
-        elif abs(change_5m) > 8:
-            edge = "MOVIMENTO_EXTREMO"
-            apostar = "NO" if change_5m > 0 else "YES"
-        else:
-            edge = "DISTORCAO"
-            apostar = "YES" if current_price < hist_mean else "NO"
-
-        # ConvicÃ§Ã£o
-        if ineff_score >= 70:
-            conviction = "ðŸ”´ ALTA"
-        elif ineff_score >= 50:
-            conviction = "ðŸŸ  MÃ‰DIA"
-        elif ineff_score >= 35:
-            conviction = "ðŸŸ¡ MODERADA"
-        else:
-            conviction = "ðŸ”µ BAIXA"
-
-        results.append({
-            "market": market.question,
-            "slug": market.market_slug,
-            "outcome": token.outcome,
-            "current_price_pct": round(current_price * 100, 1),
-            "change_5m": change_5m,
-            "change_1h": change_1h,
-            "ineficiencia_score": ineff_score,
-            "conviction": conviction,
-            "edge_tipo": edge,
-            "apostar": apostar,
-            "metricas": {
-                "volatilidade_vs_historico": round(volatility_ratio, 2),
-                "mispricing_score": mispricing_score,
-                "reversal_probability_pct": reversal_prob,
-                "padroes_similares": total_similar,
-            },
-            "snapshots_analisados": len(snapshots),
-            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
-            "detectado_em": now.isoformat(),
-        })
-
-    results.sort(key=lambda x: x["ineficiencia_score"], reverse=True)
-    top = results[:10]
-
-    return {
-        "total_ineficiencias": len(results),
-        "top_10": top,
-        "resumo": f"{len(results)} distorÃ§Ãµes detectadas. Top 10 com maior edge.",
-        "metodologia": "Volatility Ratio + Mispricing Score + Reversal Probability",
-        "atualizado_em": now.isoformat(),
-    }
-
-
-@app.get('/inefficiencies/v2')
-def get_inefficiencies_v2():
-    db = SessionLocal()
-    try:
-        mercados = db.query(Market).filter(Market.tokens.any()).all()
-        resultados = []
-        for m in mercados:
-            for t in m.tokens:
-                snaps = db.query(Snapshot).filter_by(token_id=t.token_id).order_by(Snapshot.timestamp.desc()).limit(200).all()
-                if len(snaps) < 10:
-                    continue
-                preco_atual = t.price * 100
-                if preco_atual < 5 or preco_atual > 95:
-                    continue
-                precos = [s.price * 100 for s in snaps]
-                media = sum(precos) / len(precos)
-                desvio = abs(preco_atual - media)
-                volatilidade = max(precos) - min(precos)
-                if desvio < 1.5:
-                    continue
-                score = round(min(100, (desvio / max(volatilidade, 1)) * 100), 1)
-                resultados.append({'market': m.question, 'slug': m.market_slug, 'outcome': t.outcome, 'preco_atual': round(preco_atual, 1), 'media_historica': round(media, 1), 'desvio': round(desvio, 1), 'score': score, 'snapshots': len(snaps), 'polymarket_url': f'https://polymarket.com/event/{m.market_slug}'})
-        resultados.sort(key=lambda x: x['score'], reverse=True)
-        return {'total': len(resultados), 'top_10': resultados[:10], 'metodologia': 'Desvio do preco historico medio', 'atualizado_em': datetime.utcnow().isoformat()}
-    finally:
-        db.close()
-
-@app.get('/backtest')
-def backtest():
-    db = SessionLocal()
-    try:
-        mercados = db.query(Market).filter(Market.tokens.any()).all()
-        acertos = 0
-        erros = 0
-        amostra = []
-        for m in mercados:
-            for t in m.tokens:
-                snaps = db.query(Snapshot).filter_by(token_id=t.token_id).order_by(Snapshot.timestamp.asc()).all()
-                if len(snaps) < 50:
-                    continue
-                for i in range(10, len(snaps) - 10):
-                    preco_entrada = snaps[i].price * 100
-                    if preco_entrada < 10 or preco_entrada > 90:
-                        continue
-                    precos_ant = [s.price * 100 for s in snaps[max(0,i-10):i]]
-                    media_ant = sum(precos_ant) / len(precos_ant)
-                    variacao = preco_entrada - media_ant
-                    if abs(variacao) < 5:
-                        continue
-                    preco_futuro = snaps[min(i+10, len(snaps)-1)].price * 100
-                    acertou = (variacao > 0 and preco_futuro > preco_entrada) or (variacao < 0 and preco_futuro < preco_entrada)
-                    if acertou: acertos += 1
-                    else: erros += 1
-                    if len(amostra) < 20:
-                        amostra.append({'market': m.question, 'outcome': t.outcome, 'entrada': round(preco_entrada,1), 'saida': round(preco_futuro,1), 'resultado': 'ACERTO' if acertou else 'ERRO'})
-        total = acertos + erros
-        win_rate = round((acertos / total * 100), 1) if total > 0 else 0
-        return {'total_simulados': total, 'acertos': acertos, 'erros': erros, 'win_rate_pct': win_rate, 'amostra': amostra, 'atualizado_em': datetime.utcnow().isoformat()}
-    finally:
-        db.close()
-
-@app.get('/inefficiencies/v3')
-def get_inefficiencies_v3():
-    db = SessionLocal()
-    try:
-        tokens = db.query(Token).limit(200).all()
-        resultados = []
-        for t in tokens:
-            preco_atual = t.price * 100
-            if preco_atual < 5 or preco_atual > 95:
-                continue
-            snaps = db.query(Snapshot).filter_by(token_id=t.token_id).order_by(Snapshot.timestamp.desc()).limit(50).all()
-            if len(snaps) < 10:
-                continue
-            precos = [s.price * 100 for s in snaps]
-            media = sum(precos) / len(precos)
-            desvio = abs(preco_atual - media)
-            if desvio < 2:
-                continue
-            volatilidade = max(precos) - min(precos)
-            score = round(min(100, (desvio / max(volatilidade, 0.1)) * 100), 1)
-            mercado = db.query(Market).filter_by(id=t.market_id).first()
-            if not mercado:
-                continue
-            resultados.append({'market': mercado.question, 'slug': mercado.market_slug, 'outcome': t.outcome, 'preco_atual': round(preco_atual,1), 'media_historica': round(media,1), 'desvio': round(desvio,1), 'score': score, 'polymarket_url': f'https://polymarket.com/event/{mercado.market_slug}'})
-        resultados.sort(key=lambda x: x['score'], reverse=True)
-        return {'total': len(resultados), 'top_10': resultados[:10], 'atualizado_em': datetime.utcnow().isoformat()}
-    finally:
-        db.close()
-
-@app.get('/backtest/v2')
-def backtest_v2():
-    db = SessionLocal()
-    try:
-        tokens = db.query(Token).limit(50).all()
-        acertos = 0
-        erros = 0
-        amostra = []
-        for t in tokens:
-            snaps = db.query(Snapshot).filter_by(token_id=t.token_id).order_by(Snapshot.timestamp.asc()).limit(100).all()
-            if len(snaps) < 20:
-                continue
-            for i in range(5, len(snaps) - 5):
-                preco_entrada = snaps[i].price * 100
-                if preco_entrada < 10 or preco_entrada > 90:
-                    continue
-                precos_ant = [s.price * 100 for s in snaps[max(0,i-5):i]]
-                media_ant = sum(precos_ant) / len(precos_ant)
-                variacao = preco_entrada - media_ant
-                if abs(variacao) < 3:
-                    continue
-                preco_futuro = snaps[min(i+5, len(snaps)-1)].price * 100
-                acertou = (variacao > 0 and preco_futuro > preco_entrada) or (variacao < 0 and preco_futuro < preco_entrada)
-                if acertou: acertos += 1
-                else: erros += 1
-                if len(amostra) < 15:
-                    mercado = db.query(Market).filter_by(id=t.market_id).first()
-                    amostra.append({'market': mercado.question if mercado else '?', 'outcome': t.outcome, 'entrada': round(preco_entrada,1), 'saida': round(preco_futuro,1), 'resultado': 'ACERTO' if acertou else 'ERRO'})
-        total = acertos + erros
-        win_rate = round((acertos / total * 100), 1) if total > 0 else 0
-        return {'total_simulados': total, 'acertos': acertos, 'erros': erros, 'win_rate_pct': win_rate, 'amostra': amostra, 'atualizado_em': datetime.utcnow().isoformat()}
-    finally:
-        db.close()
-
-@app.get('/debug/tokens')
-def debug_tokens():
-    db = SessionLocal()
-    try:
-        total_tokens = db.query(Token).count()
-        tokens_sample = db.query(Token).limit(20).all()
-        total_snaps = db.query(Snapshot).count()
-        return {
-            'total_tokens': total_tokens,
-            'total_snapshots': total_snaps,
-            'amostra_tokens': [{'id': t.token_id, 'outcome': t.outcome, 'price': t.price, 'price_pct': round(t.price * 100, 1)} for t in tokens_sample]
-        }
-    finally:
-        db.close()
-
-@app.get('/inefficiencies/v4')
-def get_inefficiencies_v4():
-    db = SessionLocal()
-    try:
-        tokens_ativos = db.query(Token).filter(Token.price > 0.05, Token.price < 0.95).all()
-        resultados = []
-        for t in tokens_ativos:
-            snaps = db.query(Snapshot).filter_by(token_id=t.token_id).order_by(Snapshot.timestamp.desc()).limit(50).all()
-            if len(snaps) < 10:
-                continue
-            preco_atual = t.price * 100
-            precos = [s.price * 100 for s in snaps]
-            media = sum(precos) / len(precos)
-            desvio = abs(preco_atual - media)
-            if desvio < 2:
-                continue
-            volatilidade = max(precos) - min(precos)
-            score = round(min(100, (desvio / max(volatilidade, 0.1)) * 100), 1)
-            mercado = db.query(Market).filter_by(id=t.market_id).first()
-            if not mercado:
-                continue
-            resultados.append({'market': mercado.question, 'slug': mercado.market_slug, 'outcome': t.outcome, 'preco_atual': round(preco_atual,1), 'media_historica': round(media,1), 'desvio': round(desvio,1), 'score': score, 'polymarket_url': f'https://polymarket.com/event/{mercado.market_slug}'})
-        resultados.sort(key=lambda x: x['score'], reverse=True)
-        return {'total': len(resultados), 'tokens_ativos_encontrados': len(tokens_ativos), 'top_10': resultados[:10], 'atualizado_em': datetime.utcnow().isoformat()}
-    finally:
-        db.close()
-
-from sqlalchemy import and_, text
-from models import Signal
-
-from sqlalchemy import text
-from models import Signal
-
-from sqlalchemy import and_
-from models import Signal
-
-# ============================================================
-# SIGNALS: /signals/scan + /signals/v1/top + TELEGRAM + CRON
-# (BLOCO COMPLETO - COLAR INTEIRO)
-# ============================================================
-
-from datetime import datetime, timedelta
-import os
-import requests
-
-from fastapi import Depends
-from sqlalchemy import text, func, desc
-from sqlalchemy.orm import Session
-
-from models import Signal, Market, Token, Snapshot
-
-
-# ----------------------------
-# TELEGRAM STATE (evita spam)
-# ----------------------------
-_LAST_ALERT_SENT_AT = None
-
-
-# ----------------------------
-# HELPERS
-# ----------------------------
-def _level_from_move(abs_move: float) -> str:
-    # abs_move em pontos percentuais (ex: 6.5 = 6.5 pts)
-    if abs_move >= 12:
-        return "EXTREME"
-    if abs_move >= 6:
-        return "HIGH"
-    if abs_move >= 2:
-        return "MED"
-    return "LOW"
-
-
-def _last_recent_signal(db: Session, slug: str, tipo_prefix: str, cooldown_minutes: int):
-    """
-    Pega o último sinal desse slug/tipo (ex: 'SPIKE' pega SPIKE_LOW/MED/HIGH/EXTREME)
-    dentro da janela de cooldown.
-    """
-    if cooldown_minutes <= 0:
-        return None
-    since = datetime.utcnow() - timedelta(minutes=cooldown_minutes)
-    return (
-        db.query(Signal)
-        .filter(
-            Signal.slug == slug,
-            Signal.created_at >= since,
-            Signal.tipo.like(f"{tipo_prefix}%"),
-        )
-        .order_by(Signal.created_at.desc())
-        .first()
-    )
-
-
-def _get_ref_snapshot_price(
-    db: Session,
-    token_id: str,
-    now: datetime,
-    target_minutes: int = 5,
-    max_age_minutes: int = 25,
-):
-    """
-    Quer algo próximo de (now - 5m), mas sem travar:
-    - tenta <= now-5m
-    - se não achar, tenta <= now-10m
-    - se não achar, tenta <= now-15m
-    - e exige que o snapshot não seja velho demais (>= now - max_age_minutes)
-    Retorna (price_float, ref_label) ou (None, label).
-    """
-    candidates = [target_minutes, 10, 15]
-    min_ts_allowed = now - timedelta(minutes=max_age_minutes)
-
-    for mins in candidates:
-        t = now - timedelta(minutes=mins)
-        snap = (
-            db.query(Snapshot)
-            .filter(
-                Snapshot.token_id == token_id,
-                Snapshot.timestamp <= t,
-                Snapshot.timestamp >= min_ts_allowed,
-            )
-            .order_by(Snapshot.timestamp.desc())
-            .first()
-        )
-        if snap and snap.price is not None:
-            return float(snap.price), f"closest <= now-{mins}m (fallback; max age {max_age_minutes}m)"
-
-    return None, f"missing (wanted now-{target_minutes}m; fallback 10/15; max age {max_age_minutes}m)"
-
-
-# ----------------------------
-# /signals/scan  (GET e POST)
-# ----------------------------
-@app.get("/signals/scan")
-@app.post("/signals/scan")
-def signals_scan(
-    limit_markets: int = 300,
-    min_move: float = 0.4,          # pontos percentuais (0.4 = 0.4 pts)
-    arb_over: float = 1.02,         # YES+NO >= 1.02 => OVER
-    arb_under: float = 0.98,        # YES+NO <= 0.98 => UNDER
-    cooldown_minutes: int = 8,      # evita duplicar slug toda hora
-    repeat_boost: float = 1.0,      # só repete se move/erro "piorou" muito
-    max_created: int = 120,         # trava pra não lotar tabela
-    db: Session = Depends(get_db),
-):
-    """
-    Faz o scan no banco (markets/tokens/snapshots) e salva sinais na tabela signals.
-    - ARBITRAGE: YES+NO != 1 (OVER/UNDER)
-    - MOVIMENTO: compara YES atual vs snapshot ~5 minutos atrás (com fallback 10/15)
-    """
-    now = datetime.utcnow()
-
-    created = 0
-    errors = 0
-    scanned_markets = 0
-    scanned_tokens = 0
-    preview = []
-
-    markets = (
-        db.query(Market)
-        .join(Token, Token.market_id == Market.id)
-        .group_by(Market.id)
-        .order_by(Market.id.desc())
-        .limit(int(limit_markets))
-        .all()
-    )
-
-    for market in markets:
-        if created >= int(max_created):
-            break
-
-        scanned_markets += 1
-
-        try:
-            yes_t = None
-            no_t = None
-            for t in (market.tokens or []):
-                o = (t.outcome or "").upper()
-                if o == "YES":
-                    yes_t = t
-                elif o == "NO":
-                    no_t = t
-
-            if not yes_t or not no_t:
-                continue
-
-            yes = float(yes_t.price or 0.0)
-            no = float(no_t.price or 0.0)
-
-            # lixo
-            if yes <= 0.00000001 and no <= 0.00000001:
-                continue
-            # resolvido / travado
-            if yes >= 0.999 or yes <= 0.001:
-                continue
-
-            scanned_tokens += 2
-
-            slug = market.market_slug or ""
-            if not slug:
-                continue
-
-            total = yes + no
-
-            # --------------------------
-            # 1) ARBITRAGE (YES+NO != 1)
-            # --------------------------
-            # NÃO faz arbitrage se alguma perna é 0 real (evita spam em market quebrado)
-            if yes > 0.0 and no > 0.0:
-                if total >= float(arb_over):
-                    prev = _last_recent_signal(db, slug, "ARBITRAGE_OVER", cooldown_minutes)
-                    err_pts = round((total - 1.0) * 100, 2)  # pontos %
-                    if prev and float(prev.change_5m or 0.0) != 0:
-                        if abs(err_pts) < abs(float(prev.change_5m)) * float(repeat_boost):
-                            continue
-
-                    for outcome, price in [("YES", yes), ("NO", no)]:
-                        db.add(Signal(
-                            market=market.question or "",
-                            slug=slug,
-                            outcome=outcome,
-                            tipo="ARBITRAGE_OVER",
-                            change_5m=err_pts,
-                            current_price=round(price * 100, 2),
-                            confidence=min(1.0, (total - 1.0) / 0.08),
-                            polymarket_url=f"https://polymarket.com/event/{slug}",
-                        ))
-                        created += 1
-                        if created >= int(max_created):
-                            break
-
-                    if len(preview) < 10:
-                        preview.append({"slug": slug, "tipo": "ARBITRAGE_OVER", "err_pts": err_pts, "sum_pct": round(total * 100, 2)})
-                    continue
-
-                if total <= float(arb_under):
-                    prev = _last_recent_signal(db, slug, "ARBITRAGE_UNDER", cooldown_minutes)
-                    err_pts = round((1.0 - total) * 100, 2)
-                    if prev and float(prev.change_5m or 0.0) != 0:
-                        if abs(err_pts) < abs(float(prev.change_5m)) * float(repeat_boost):
-                            continue
-
-                    for outcome, price in [("YES", yes), ("NO", no)]:
-                        db.add(Signal(
-                            market=market.question or "",
-                            slug=slug,
-                            outcome=outcome,
-                            tipo="ARBITRAGE_UNDER",
-                            change_5m=-abs(err_pts),  # under = negativo
-                            current_price=round(price * 100, 2),
-                            confidence=min(1.0, (1.0 - total) / 0.08),
-                            polymarket_url=f"https://polymarket.com/event/{slug}",
-                        ))
-                        created += 1
-                        if created >= int(max_created):
-                            break
-
-                    if len(preview) < 10:
-                        preview.append({"slug": slug, "tipo": "ARBITRAGE_UNDER", "err_pts": -abs(err_pts), "sum_pct": round(total * 100, 2)})
-                    continue
-
-            # --------------------------
-            # 2) MOVIMENTO: YES agora vs ~5m atrás
-            # --------------------------
-            old_price, ref_label = _get_ref_snapshot_price(db, yes_t.token_id, now, target_minutes=5, max_age_minutes=25)
-            if old_price is None or old_price <= 0:
-                continue
-
-            move = round((yes - old_price) * 100, 2)
-            abs_move = abs(move)
-            if abs_move < float(min_move):
-                continue
-
-            base_tipo = "SPIKE" if move > 0 else "DUMP"
-            lvl = _level_from_move(abs_move)
-            tipo = f"{base_tipo}_{lvl}"
-
-            prev = _last_recent_signal(db, slug, base_tipo, cooldown_minutes)
-            if prev and float(prev.change_5m or 0.0) != 0:
-                if abs_move < abs(float(prev.change_5m)) * float(repeat_boost):
-                    continue
-
-            db.add(Signal(
-                market=market.question or "",
-                slug=slug,
-                outcome="YES",
-                tipo=tipo,
-                change_5m=move,
-                current_price=round(yes * 100, 2),
-                confidence=min(1.0, abs_move / 4.0),
-                polymarket_url=f"https://polymarket.com/event/{slug}",
-            ))
-            created += 1
-
-            if len(preview) < 10:
-                preview.append({"slug": slug, "tipo": tipo, "move": move, "ref": ref_label})
-
+            resp = requests.get(f"{DATA_API}/leaderboard?window={window}&limit=20", headers=HEADERS, timeout=8)
+            if resp.status_code == 200:
+                items = resp.json()
+                items = items if isinstance(items, list) else items.get("data", [])
+                if items:
+                    leaders = []
+                    for i, t in enumerate(items[:20]):
+                        addr = t.get("proxyWallet") or t.get("address") or ""
+                        won = t.get("positionsWon") or 0
+                        lost = t.get("positionsLost") or 0
+                        leaders.append({
+                            "rank": i + 1,
+                            "username": t.get("name") or t.get("pseudonym") or addr[:10] + "...",
+                            "address": addr,
+                            "profit_usd": t.get("profit") or t.get("pnl") or 0,
+                            "volume_usd": t.get("volume") or 0,
+                            "win_rate": round(won / max(won + lost, 1) * 100, 1),
+                            "ver_apostas": f"https://polymarket.com/profile/{addr}",
+                        })
+                    return {"status": "ok", "leaders": leaders}
         except Exception:
-            errors += 1
             continue
-
-    db.commit()
-
-    return {
-        "status": "ok",
-        "scanned_markets": scanned_markets,
-        "scanned_tokens": scanned_tokens,
-        "created_signals": created,
-        "errors": errors,
-        "preview": preview,
-        "atualizado_em": now.isoformat(),
-        "params": {
-            "limit_markets": int(limit_markets),
-            "min_move": float(min_move),
-            "arb_over": float(arb_over),
-            "arb_under": float(arb_under),
-            "cooldown_minutes": int(cooldown_minutes),
-            "repeat_boost": float(repeat_boost),
-            "max_created": int(max_created),
-            "ref_snapshot": "closest <= now-5m (fallback 10m/15m; max age 25m)",
-        }
-    }
+    return {"status": "unavailable", "links": {"leaderboard": "https://polymarket.com/leaderboard", "whales": "https://polymarketwhales.info"}}
 
 
-# ----------------------------
-# /signals/v1 (ALIAS) e /signals/v1/top
-# ----------------------------
-@app.get("/signals/v1")
-def signals_v1_alias(limit: int = 50, db: Session = Depends(get_db)):
-    return signals_v1_top(limit=limit, db=db)
-
-
-@app.get("/signals/v1/top")
-def signals_v1_top(limit: int = 50, db: Session = Depends(get_db)):
-    """
-    Top sinais sem spam:
-    - dedupe por slug (mantém o mais recente por mercado)
-    - ordena por abs(change_5m)
-    """
-    try:
-        db.execute(text("SELECT 1"))
-
-        limit_n = min(max(int(limit), 1), 200)
-
-        rows = (
-            db.query(Signal)
-            .order_by(Signal.created_at.desc())
-            .limit(3000)
-            .all()
-        )
-
-        seen = set()
-        uniq = []
-        for r in rows:
-            if not r.slug:
-                continue
-            key = r.slug
-            if key in seen:
-                continue
-            seen.add(key)
-            uniq.append(r)
-
-        uniq = sorted(uniq, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:limit_n]
-
-        return {
-            "total": len(uniq),
-            "signals": [
-                {
-                    "id": r.id,
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
-                    "market": r.market,
-                    "slug": r.slug,
-                    "outcome": r.outcome,
-                    "tipo": r.tipo,
-                    "change_5m": float(r.change_5m or 0.0),
-                    "current_price": float(r.current_price or 0.0),
-                    "confidence": float(r.confidence or 0.0),
-                    "polymarket_url": r.polymarket_url,
-                }
-                for r in uniq
-            ],
-        }
-
-    except Exception as e:
-        return {"total": 0, "signals": [], "error": str(e)}
-
-
-# ----------------------------
-# TELEGRAM HELPERS
-# ----------------------------
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-
-def _telegram_send(text: str) -> dict:
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return {"ok": False, "error": "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"}
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    r = requests.post(url, json=payload, timeout=10)
-    try:
-        return r.json()
-    except Exception:
-        return {"ok": False, "error": f"Telegram non-json response: {r.text[:200]}"}
-
-
-@app.get("/alerts/test")
-def alerts_test():
-    resp = _telegram_send("✅ <b>PolySignal</b> conectado! (teste)")
-    return {"status": "ok", "telegram": resp}
-
-
-@app.get("/alerts/run")
-def alerts_run(
-    minutes: int = 10,
-    limit: int = 10,
-    dry_run: int = 0,
-    db: Session = Depends(get_db),
-):
-    """
-    Alerta inteligente:
-    - Se houver HIGH/EXTREME/ARBITRAGE -> manda só eles
-    - Senão -> manda top MED (até limit)
-    Use dry_run=1 para NÃO enviar e apenas ver o texto.
-    """
-    global _LAST_ALERT_SENT_AT
-
-    now = datetime.utcnow()
-    cutoff = now - timedelta(minutes=max(int(minutes), 1))
-
-    if _LAST_ALERT_SENT_AT and (now - _LAST_ALERT_SENT_AT).total_seconds() < 60:
-        return {"status": "skip", "reason": "too_soon"}
-
-    limit_n = min(max(int(limit), 1), 30)
-
-    strong = (
-        db.query(Signal)
-        .filter(
-            Signal.created_at >= cutoff,
-            (Signal.tipo.like("%HIGH%"))
-            | (Signal.tipo.like("%EXTREME%"))
-            | (Signal.tipo.like("ARBITRAGE_%"))
-        )
-        .order_by(Signal.created_at.desc())
-        .limit(800)
-        .all()
-    )
-    strong = sorted(strong, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:limit_n]
-
-    rows = strong
-    mode = "STRONG"
-
-    if not rows:
-        med = (
-            db.query(Signal)
-            .filter(
-                Signal.created_at >= cutoff,
-                (Signal.tipo.like("%MED%")) | (Signal.tipo.like("ARBITRAGE_%"))
-            )
-            .order_by(Signal.created_at.desc())
-            .limit(800)
-            .all()
-        )
-        med = sorted(med, key=lambda r: abs(float(r.change_5m or 0.0)), reverse=True)[:limit_n]
-        rows = med
-        mode = "MED_FALLBACK"
-
-    if not rows:
-        return {"status": "ok", "sent": 0, "message": "no signals in window", "mode": mode}
-
-    spike_n = sum(1 for r in rows if "SPIKE" in (r.tipo or ""))
-    dump_n = sum(1 for r in rows if "DUMP" in (r.tipo or ""))
-    arb_n = sum(1 for r in rows if (r.tipo or "").startswith("ARBITRAGE_"))
-    max_abs = max(abs(float(r.change_5m or 0.0)) for r in rows) if rows else 0.0
-    summary_line = f"Resumo: {spike_n} SPIKE | {dump_n} DUMP | {arb_n} ARB | Max: {max_abs:.2f} pts"
-
-    lines = []
-    title = "🚨 <b>PolySignal</b> — sinais fortes agora" if mode == "STRONG" else "🟡 <b>PolySignal</b> — top sinais (MED)"
-    lines.append(title)
-    lines.append(f"Janela: últimos {minutes} min | Top {len(rows)} | Mode: {mode}")
-    lines.append(summary_line)
-    lines.append("")
-
-    for r in rows:
-        change = float(r.change_5m or 0.0)
-        price = float(r.current_price or 0.0)
-        tipo = r.tipo or ""
-        market = (r.market or "").strip()
-        slug = r.slug or ""
-        url = r.polymarket_url or f"https://polymarket.com/event/{slug}"
-
-        if tipo.startswith("ARBITRAGE_"):
-            emoji = "🟣"
-        elif "SPIKE" in tipo:
-            emoji = "🟢"
-        elif "DUMP" in tipo:
-            emoji = "🔴"
-        else:
-            emoji = "⚪"
-
-        sign = "+" if change >= 0 else ""
-        lines.append(f"{emoji} <b>{tipo}</b> | {sign}{change:.2f} pts | {price:.2f}%")
-        lines.append(f"<a href=\"{url}\">{market[:120]}</a>")
-        lines.append("")
-
-    text_out = "\n".join(lines).strip()
-
-    if int(dry_run) == 1:
-        return {"status": "dry_run", "would_send": len(rows), "mode": mode, "text": text_out}
-
-    telegram_resp = _telegram_send(text_out)
-    ok = bool(telegram_resp.get("ok"))
-
-    if ok:
-        _LAST_ALERT_SENT_AT = now
-
-    return {"status": "ok" if ok else "fail", "sent": len(rows) if ok else 0, "mode": mode, "telegram": telegram_resp}
-
-
-# ----------------------------
-# DEBUG: last snapshot
-# ----------------------------
-@app.get("/debug/last_snapshot")
-def debug_last_snapshot(db: Session = Depends(get_db)):
-    last_ts = db.query(func.max(Snapshot.timestamp)).scalar()
-    return {
-        "last_snapshot_timestamp": last_ts.isoformat() if last_ts else None,
-        "now": datetime.utcnow().isoformat()
-    }
-
-
-# ----------------------------
-# CRON: /cron/tick
-# ----------------------------
-@app.get("/cron/tick")
-def cron_tick(db: Session = Depends(get_db)):
-    """
-    Cron endpoint:
-    1) roda refresh_markets(db)
-    2) roda signals_scan(...)
-    3) retorna last_snapshot_timestamp
-    """
-    try:
-        try:
-            refresh_markets(db)
-        except Exception as e:
-            print(f"[cron] refresh error: {e}")
-
-        scan_resp = None
-        try:
-            scan_resp = signals_scan(
-                limit_markets=300,
-                min_move=0.4,
-                arb_over=1.02,
-                arb_under=0.98,
-                cooldown_minutes=8,
-                repeat_boost=1.0,
-                max_created=120,
-                db=db,
-            )
-        except Exception as e:
-            print(f"[cron] scan error: {e}")
-
-        last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
-
-        return {
-            "status": "ok",
-            "tick_now": datetime.utcnow().isoformat(),
-            "last_snapshot_timestamp": last.timestamp.isoformat() if last and last.timestamp else None,
-            "scan": scan_resp if scan_resp else {"status": "skip_or_error"},
-        }
-
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-    
-# ============================
-# DEBUG CLOB TRADES (pra achar o erro real)
-# ============================
-from fastapi import Query
-
-@app.get("/debug/clob_trades")
-def debug_clob_trades(limit: int = Query(50, ge=1, le=200)):
-    """
-    Mostra status_code e um pedaço do body do CLOB.
-    Serve pra diagnosticar 403/429/timeout.
-    """
-    url = f"{POLYMARKET_CLOB}/trades?limit={int(limit)}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=12)
-        txt = resp.text or ""
-        return {
-            "ok": resp.status_code == 200,
-            "status_code": resp.status_code,
-            "url": url,
-            "body_head": txt[:400],
-        }
-    except Exception as e:
-        return {"ok": False, "url": url, "error": str(e)}
-
-
-# ============================
-# LEADERS LIVE (robusto + log)
-# ============================
 @app.get("/leaders/live")
 def get_live_trades():
-    """Apostas recentes na blockchain (CLOB)."""
-    url = f"{POLYMARKET_CLOB}/trades?limit=100"
+    url = f"{CLOB_API}/trades?limit=100"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=12)
-
-        # Se não for 200, devolve diagnóstico em vez de "unavailable" vazio
         if resp.status_code != 200:
-            return {
-                "status": "unavailable",
-                "error": "clob_non_200",
-                "status_code": resp.status_code,
-                "body_head": (resp.text or "")[:400],
-                "url": url,
-                "links": {
-                    "atividade": "https://polymarket.com/activity",
-                    "whales": "https://polymarketwhales.info",
-                },
-            }
+            return {"status": "unavailable", "status_code": resp.status_code, "body_head": resp.text[:200]}
 
         data = resp.json()
         trades_raw = data if isinstance(data, list) else data.get("data", [])
         trades = []
         wallets_seen = {}
-
         for tx in trades_raw:
             valor = float(tx.get("size") or tx.get("usdcSize") or 0)
             wallet = tx.get("maker") or tx.get("owner") or ""
             if not wallet:
                 continue
-
             wallets_seen[wallet] = wallets_seen.get(wallet, 0) + 1
             trades.append({
                 "wallet": wallet[:8] + "..." + wallet[-4:],
@@ -3076,38 +789,1070 @@ def get_live_trades():
             "status": "ok",
             "total_apostas": len(trades),
             "apostas_recentes": sorted(trades, key=lambda x: x["valor_usd"], reverse=True)[:20],
-            "top_carteiras": [
-                {"wallet": w[:8] + "..." + w[-4:], "wallet_full": w, "num_apostas": n,
-                 "polymarket_url": f"https://polymarket.com/profile/{w}"}
-                for w, n in top_wallets
-            ]
+            "top_carteiras": [{"wallet": w[:8] + "..." + w[-4:], "wallet_full": w, "num_apostas": n,
+                               "polymarket_url": f"https://polymarket.com/profile/{w}"} for w, n in top_wallets],
         }
-
     except Exception as e:
+        return {"status": "unavailable", "error": str(e)}
+
+
+@app.get("/leaders/wallet/{address}")
+def get_wallet_detail(address: str):
+    try:
+        resp = requests.get(f"{DATA_API}/positions?user={address}&sizeThreshold=10&limit=50", headers=HEADERS, timeout=8)
+        if resp.status_code == 200:
+            items = resp.json()
+            items = items if isinstance(items, list) else items.get("data", [])
+            if items:
+                positions = []
+                total = 0
+                for p in items:
+                    valor = float(p.get("currentValue") or p.get("size") or 0)
+                    total += valor
+                    positions.append({
+                        "mercado": p.get("title") or p.get("market") or p.get("question"),
+                        "outcome": p.get("outcome"), "valor_usd": round(valor, 2),
+                        "preco_medio": p.get("avgPrice") or p.get("curPrice"), "pnl": p.get("cashPnl") or p.get("pnl"),
+                    })
+                return {"status": "ok", "wallet": address[:8] + "..." + address[-4:],
+                        "total_posicoes": len(positions), "total_exposto_usd": round(total, 2),
+                        "posicoes": positions, "polymarket_url": f"https://polymarket.com/profile/{address}"}
+    except Exception as e:
+        print(f"[wallet] erro: {e}")
+    return {"status": "unavailable", "polymarket_url": f"https://polymarket.com/profile/{address}"}
+
+
+# ─────────────────────────────────────────────────────────────
+# MARKET INEFFICIENCY ENGINE
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/inefficiencies")
+def get_inefficiencies(db: Session = Depends(get_db)):
+    now = datetime.utcnow()
+    w5m = now - timedelta(minutes=5)
+    w1h = now - timedelta(hours=1)
+    results = []
+
+    for token in db.query(Token).filter(Token.price > 0.05, Token.price < 0.95).all():
+        cp = token.price
+        snaps = (
+            db.query(Snapshot).filter(Snapshot.token_id == token.token_id)
+            .order_by(Snapshot.timestamp.desc()).limit(500).all()
+        )
+        if len(snaps) < 20:
+            continue
+        prices = [s.price for s in snaps]
+
+        s5m = next((s for s in snaps if s.timestamp <= w5m), None)
+        s1h = next((s for s in snaps if s.timestamp <= w1h), None)
+        c5m = round((cp - s5m.price) * 100, 2) if s5m else 0
+        c1h = round((cp - s1h.price) * 100, 2) if s1h else None
+        if abs(c5m) < 3:
+            continue
+
+        all_changes = [abs(prices[i] - prices[i+1]) for i in range(min(len(prices)-1, 200))]
+        avg_hist = sum(all_changes) / max(len(all_changes), 1)
+        vol_ratio = abs(c5m / 100) / max(avg_hist, 0.0001)
+
+        hist_mean = sum(prices[12:62]) / min(50, len(prices[12:])) if len(prices) > 12 else cp
+        mispricing_score = min(round(abs(cp - hist_mean) * 300, 1), 100)
+
+        reversals = total_sim = 0
+        for i in range(6, min(len(prices) - 6, 200)):
+            move = prices[i-6] - prices[i]
+            future = prices[i] - prices[i+6]
+            if abs(move) > 0.03:
+                total_sim += 1
+                if (move > 0 and future < -0.01) or (move < 0 and future > 0.01):
+                    reversals += 1
+        reversal_prob = round(reversals / max(total_sim, 1) * 100, 1)
+
+        ineff_score = min(round((vol_ratio * 20) + (mispricing_score * 0.4) + (reversal_prob * 0.4), 1), 100)
+        if ineff_score < 25:
+            continue
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        if c5m > 0 and reversal_prob > 55:
+            edge, apostar = "REVERSAO_QUEDA", "NO"
+        elif c5m < 0 and reversal_prob > 55:
+            edge, apostar = "REVERSAO_SUBIDA", "YES"
+        elif abs(c5m) > 8:
+            edge, apostar = "MOVIMENTO_EXTREMO", "NO" if c5m > 0 else "YES"
+        else:
+            edge, apostar = "DISTORCAO", "YES" if cp < hist_mean else "NO"
+
+        conviction = "🔴 ALTA" if ineff_score >= 70 else "🟠 MÉDIA" if ineff_score >= 50 else "🟡 MODERADA" if ineff_score >= 35 else "🔵 BAIXA"
+
+        results.append({
+            "market": market.question, "slug": market.market_slug, "outcome": token.outcome,
+            "current_price_pct": round(cp * 100, 1),
+            "change_5m": c5m, "change_1h": c1h,
+            "ineficiencia_score": ineff_score, "conviction": conviction,
+            "edge_tipo": edge, "apostar": apostar,
+            "metricas": {"volatilidade_vs_historico": round(vol_ratio, 2), "mispricing_score": mispricing_score,
+                         "reversal_probability_pct": reversal_prob, "padroes_similares": total_sim},
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
+            "detectado_em": now.isoformat(),
+        })
+
+    results.sort(key=lambda x: x["ineficiencia_score"], reverse=True)
+    return {
+        "total_ineficiencias": len(results), "top_10": results[:10],
+        "metodologia": "Volatility Ratio + Mispricing Score + Reversal Probability",
+        "atualizado_em": now.isoformat(),
+    }
+
+
+@app.get("/metrics/{slug}")
+def get_market_metrics(slug: str, db: Session = Depends(get_db)):
+    market = db.query(Market).filter(Market.market_slug == slug).first()
+    if not market:
+        return {"error": "Mercado não encontrado"}
+
+    metrics_por_token = []
+    for token in market.tokens:
+        cp = token.price
+        if cp == 0:
+            continue
+        snaps = (
+            db.query(Snapshot).filter(Snapshot.token_id == token.token_id)
+            .order_by(Snapshot.timestamp.desc()).limit(2000).all()
+        )
+        if len(snaps) < 10:
+            continue
+        prices = [s.price for s in snaps]
+
+        # Volatility
+        recent = prices[:12]
+        all_ch = [abs(prices[i] - prices[i+1]) for i in range(len(prices)-1)]
+        rec_ch = [abs(recent[i] - recent[i+1]) for i in range(len(recent)-1)]
+        avg_h = sum(all_ch) / max(len(all_ch), 1)
+        avg_r = sum(rec_ch) / max(len(rec_ch), 1)
+        vol_ratio = round(avg_r / max(avg_h, 0.0001), 2)
+        vol_score = min(round(vol_ratio * 25, 1), 100)
+        vol_label = "EXTREMA" if vol_ratio > 3 else "ALTA" if vol_ratio > 2 else "ELEVADA" if vol_ratio > 1.2 else "NORMAL"
+
+        # Mispricing
+        if len(prices) >= 50:
+            hist_mean = sum(prices[12:62]) / 50
+            mispricing_score = min(round(abs(cp - hist_mean) * 300, 1), 100)
+            price_dir = "ACIMA" if cp > hist_mean else "ABAIXO"
+            hist_mean_pct = round(hist_mean * 100, 1)
+        else:
+            mispricing_score, price_dir, hist_mean_pct = 0, "NEUTRO", round(cp * 100, 1)
+
+        # Reversal
+        reversals = total_sim = 0
+        for i in range(6, len(prices) - 6):
+            move = prices[i-6] - prices[i]
+            future = prices[i] - prices[i+6]
+            if abs(move) > 0.03:
+                total_sim += 1
+                if (move > 0 and future < -0.01) or (move < 0 and future > 0.01):
+                    reversals += 1
+        rev_prob = round(reversals / max(total_sim, 1) * 100, 1)
+
+        # Confidence
+        ev = min(len(snaps)/100, 20) + min(vol_score*0.3, 25) + min(mispricing_score*0.3, 25) + min(total_sim/5, 15) + (15 if rev_prob > 60 else 0)
+        confidence_score = min(round(ev, 1), 100)
+
+        edge = edge_dir = None
+        if mispricing_score >= 20 and confidence_score >= 40:
+            edge = "POSSIVEL_QUEDA" if price_dir == "ACIMA" else "POSSIVEL_SUBIDA"
+            edge_dir = "NO" if price_dir == "ACIMA" else "YES"
+        if vol_ratio > 2 and rev_prob > 55:
+            edge = "REVERSAO_PROVAVEL"
+            recent_change = prices[0] - prices[min(12, len(prices)-1)]
+            edge_dir = "NO" if recent_change > 0 else "YES"
+
+        metrics_por_token.append({
+            "outcome": token.outcome,
+            "current_price_pct": round(cp * 100, 1),
+            "volatility": {"score": vol_score, "label": vol_label, "ratio_vs_historico": vol_ratio},
+            "mispricing": {"score": mispricing_score, "preco_historico_medio_pct": hist_mean_pct, "desvio_direcao": price_dir},
+            "reversal": {"probability_pct": rev_prob, "padroes_similares_encontrados": total_sim},
+            "confidence_score": confidence_score,
+            "edge": edge, "edge_direction": edge_dir,
+            "snapshots_analisados": len(snaps),
+        })
+
+    if not metrics_por_token:
+        return {"error": "Dados insuficientes"}
+
+    return {
+        "market": market.question, "slug": slug,
+        "has_edge": any(m["edge"] for m in metrics_por_token),
+        "max_confidence": max(m["confidence_score"] for m in metrics_por_token),
+        "tokens": metrics_por_token,
+        "polymarket_url": f"https://polymarket.com/event/{slug}",
+        "analisado_em": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/backtest")
+def backtest(db: Session = Depends(get_db)):
+    tokens = db.query(Token).limit(50).all()
+    acertos = erros = 0
+    amostra = []
+    for t in tokens:
+        snaps = db.query(Snapshot).filter(Snapshot.token_id == t.token_id).order_by(Snapshot.timestamp.asc()).limit(200).all()
+        if len(snaps) < 20:
+            continue
+        for i in range(5, len(snaps) - 5):
+            pe = snaps[i].price * 100
+            if pe < 10 or pe > 90:
+                continue
+            media_ant = sum(s.price * 100 for s in snaps[max(0,i-5):i]) / 5
+            variacao = pe - media_ant
+            if abs(variacao) < 3:
+                continue
+            pf = snaps[min(i+5, len(snaps)-1)].price * 100
+            acertou = (variacao > 0 and pf > pe) or (variacao < 0 and pf < pe)
+            if acertou:
+                acertos += 1
+            else:
+                erros += 1
+            if len(amostra) < 20:
+                market = db.query(Market).filter(Market.id == t.market_id).first()
+                amostra.append({"market": market.question if market else "?", "outcome": t.outcome,
+                                "entrada": round(pe,1), "saida": round(pf,1),
+                                "resultado": "✅ ACERTO" if acertou else "❌ ERRO"})
+    total = acertos + erros
+    win_rate = round(acertos / total * 100, 1) if total > 0 else 0
+    return {"total_simulados": total, "acertos": acertos, "erros": erros, "win_rate_pct": win_rate,
+            "conclusao": "Momentum tem edge" if win_rate > 55 else "Momentum sem edge claro",
+            "amostra": amostra, "atualizado_em": datetime.utcnow().isoformat()}
+
+
+# ─────────────────────────────────────────────────────────────
+# SIGNALS SCAN
+# ─────────────────────────────────────────────────────────────
+
+def _level_from_move(abs_move: float) -> str:
+    if abs_move >= 12: return "EXTREME"
+    if abs_move >= 6: return "HIGH"
+    if abs_move >= 2: return "MED"
+    return "LOW"
+
+
+def _last_signal(db: Session, slug: str, tipo_prefix: str, cooldown_min: int):
+    if cooldown_min <= 0:
+        return None
+    since = datetime.utcnow() - timedelta(minutes=cooldown_min)
+    return (
+        db.query(Signal)
+        .filter(Signal.slug == slug, Signal.created_at >= since, Signal.tipo.like(f"{tipo_prefix}%"))
+        .order_by(Signal.created_at.desc()).first()
+    )
+
+
+def _ref_price(db: Session, token_id: str, now: datetime, target_min: int = 5, max_age_min: int = 30):
+    """Busca snapshot de referência com janela flexível (5m → 10m → 15m → 20m)."""
+    min_ts = now - timedelta(minutes=max_age_min)
+    for mins in [target_min, 10, 15, 20]:
+        t = now - timedelta(minutes=mins)
+        snap = (
+            db.query(Snapshot)
+            .filter(Snapshot.token_id == token_id, Snapshot.timestamp <= t, Snapshot.timestamp >= min_ts)
+            .order_by(Snapshot.timestamp.desc()).first()
+        )
+        if snap and snap.price is not None:
+            return float(snap.price), f"ref ≤ now-{mins}m"
+    return None, "not found"
+
+
+@app.api_route("/signals/scan", methods=["GET", "POST"])
+def signals_scan(
+    limit_markets: int = 300,
+    min_move: float = 0.3,
+    arb_over: float = 1.02,
+    arb_under: float = 0.98,
+    cooldown_minutes: int = 8,
+    repeat_boost: float = 1.0,
+    max_created: int = 150,
+    db: Session = Depends(get_db),
+):
+    now = datetime.utcnow()
+    created = errors = scanned = 0
+    preview = []
+
+    markets = (
+        db.query(Market).join(Token, Token.market_id == Market.id)
+        .group_by(Market.id).order_by(Market.id.desc()).limit(int(limit_markets)).all()
+    )
+
+    for market in markets:
+        if created >= int(max_created):
+            break
+        scanned += 1
+        try:
+            yes_t = no_t = None
+            for t in (market.tokens or []):
+                o = (t.outcome or "").upper()
+                if o == "YES": yes_t = t
+                elif o == "NO": no_t = t
+
+            if not yes_t or not no_t:
+                continue
+
+            yes = float(yes_t.price or 0)
+            no = float(no_t.price or 0)
+
+            if yes <= 0.000001 and no <= 0.000001: continue
+            if yes >= 0.999 or yes <= 0.001: continue
+
+            slug = market.market_slug or ""
+            if not slug: continue
+
+            total = yes + no
+
+            # ── ARBITRAGE ──
+            if yes > 0.001 and no > 0.001:
+                if total >= float(arb_over):
+                    prev = _last_signal(db, slug, "ARBITRAGE_OVER", cooldown_minutes)
+                    err_pts = round((total - 1.0) * 100, 2)
+                    if not (prev and abs(err_pts) < abs(float(prev.change_5m or 0)) * float(repeat_boost)):
+                        for outcome, price in [("YES", yes), ("NO", no)]:
+                            db.add(Signal(market=market.question or "", slug=slug, outcome=outcome,
+                                          tipo="ARBITRAGE_OVER", change_5m=err_pts,
+                                          current_price=round(price * 100, 2),
+                                          confidence=min(1.0, (total - 1.0) / 0.08),
+                                          polymarket_url=f"https://polymarket.com/event/{slug}"))
+                            created += 1
+                        if len(preview) < 10:
+                            preview.append({"slug": slug, "tipo": "ARBITRAGE_OVER", "err_pts": err_pts})
+                    continue
+
+                if total <= float(arb_under):
+                    prev = _last_signal(db, slug, "ARBITRAGE_UNDER", cooldown_minutes)
+                    err_pts = round((1.0 - total) * 100, 2)
+                    if not (prev and abs(err_pts) < abs(float(prev.change_5m or 0)) * float(repeat_boost)):
+                        for outcome, price in [("YES", yes), ("NO", no)]:
+                            db.add(Signal(market=market.question or "", slug=slug, outcome=outcome,
+                                          tipo="ARBITRAGE_UNDER", change_5m=-abs(err_pts),
+                                          current_price=round(price * 100, 2),
+                                          confidence=min(1.0, (1.0 - total) / 0.08),
+                                          polymarket_url=f"https://polymarket.com/event/{slug}"))
+                            created += 1
+                        if len(preview) < 10:
+                            preview.append({"slug": slug, "tipo": "ARBITRAGE_UNDER", "err_pts": err_pts})
+                    continue
+
+            # ── MOVEMENT ──
+            old_price, ref_label = _ref_price(db, yes_t.token_id, now, target_min=5, max_age_min=30)
+            if old_price is None or old_price <= 0:
+                continue
+
+            move = round((yes - old_price) * 100, 2)
+            abs_move = abs(move)
+            if abs_move < float(min_move):
+                continue
+
+            base_tipo = "SPIKE" if move > 0 else "DUMP"
+            lvl = _level_from_move(abs_move)
+            tipo = f"{base_tipo}_{lvl}"
+
+            prev = _last_signal(db, slug, base_tipo, cooldown_minutes)
+            if prev and abs_move < abs(float(prev.change_5m or 0)) * float(repeat_boost):
+                continue
+
+            db.add(Signal(market=market.question or "", slug=slug, outcome="YES", tipo=tipo,
+                          change_5m=move, current_price=round(yes * 100, 2),
+                          confidence=min(1.0, abs_move / 4.0),
+                          polymarket_url=f"https://polymarket.com/event/{slug}"))
+            created += 1
+            if len(preview) < 10:
+                preview.append({"slug": slug, "tipo": tipo, "move": move, "ref": ref_label})
+
+        except Exception:
+            errors += 1
+            continue
+
+    db.commit()
+    return {
+        "status": "ok", "scanned_markets": scanned, "created_signals": created,
+        "errors": errors, "preview": preview, "atualizado_em": now.isoformat(),
+    }
+
+
+@app.get("/signals")
+@app.get("/signals/v1")
+@app.get("/signals/v1/top")
+def signals_v1_top(limit: int = 50, db: Session = Depends(get_db)):
+    try:
+        limit_n = min(max(int(limit), 1), 200)
+        rows = db.query(Signal).order_by(Signal.created_at.desc()).limit(3000).all()
+        seen = set()
+        uniq = []
+        for r in rows:
+            if r.slug and r.slug not in seen:
+                seen.add(r.slug)
+                uniq.append(r)
+        uniq = sorted(uniq, key=lambda r: abs(float(r.change_5m or 0)), reverse=True)[:limit_n]
         return {
-            "status": "unavailable",
-            "error": "exception",
-            "detail": str(e),
-            "url": url,
-            "links": {
-                "atividade": "https://polymarket.com/activity",
-                "whales": "https://polymarketwhales.info",
-            }
+            "total": len(uniq),
+            "signals": [{
+                "id": r.id, "created_at": r.created_at.isoformat() if r.created_at else None,
+                "market": r.market, "slug": r.slug, "outcome": r.outcome, "tipo": r.tipo,
+                "change_5m": float(r.change_5m or 0), "current_price": float(r.current_price or 0),
+                "confidence": float(r.confidence or 0), "polymarket_url": r.polymarket_url,
+            } for r in uniq],
         }
-    
-from fastapi import Query
+    except Exception as e:
+        return {"total": 0, "signals": [], "error": str(e)}
+
+
+# ─────────────────────────────────────────────────────────────
+# TELEGRAM
+# ─────────────────────────────────────────────────────────────
+
+def _telegram_send(text: str) -> dict:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"ok": False, "error": "TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não configurados"}
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text,
+                                     "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=10)
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/alerts/test")
+def alerts_test():
+    resp = _telegram_send("✅ <b>PolySignal v3</b> conectado e funcionando!")
+    return {"status": "ok", "telegram": resp}
+
+
+@app.get("/alerts/run")
+def alerts_run(minutes: int = 10, limit: int = 10, dry_run: int = 0, db: Session = Depends(get_db)):
+    global _LAST_ALERT_SENT_AT
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=max(int(minutes), 1))
+
+    if _LAST_ALERT_SENT_AT and (now - _LAST_ALERT_SENT_AT).total_seconds() < 60:
+        return {"status": "skip", "reason": "too_soon"}
+
+    limit_n = min(max(int(limit), 1), 30)
+
+    # Tenta HIGH/EXTREME primeiro
+    strong = (
+        db.query(Signal)
+        .filter(Signal.created_at >= cutoff,
+                (Signal.tipo.like("%HIGH%")) | (Signal.tipo.like("%EXTREME%")) | (Signal.tipo.like("ARBITRAGE_%")))
+        .order_by(Signal.created_at.desc()).limit(800).all()
+    )
+    strong = sorted(strong, key=lambda r: abs(float(r.change_5m or 0)), reverse=True)[:limit_n]
+
+    rows, mode = strong, "STRONG"
+    if not rows:
+        med = (
+            db.query(Signal)
+            .filter(Signal.created_at >= cutoff, Signal.tipo.like("%MED%"))
+            .order_by(Signal.created_at.desc()).limit(800).all()
+        )
+        rows = sorted(med, key=lambda r: abs(float(r.change_5m or 0)), reverse=True)[:limit_n]
+        mode = "MED_FALLBACK"
+
+    if not rows:
+        return {"status": "ok", "sent": 0, "message": "sem sinais na janela", "mode": mode}
+
+    spike_n = sum(1 for r in rows if "SPIKE" in (r.tipo or ""))
+    dump_n = sum(1 for r in rows if "DUMP" in (r.tipo or ""))
+    arb_n = sum(1 for r in rows if (r.tipo or "").startswith("ARBITRAGE_"))
+    max_abs = max(abs(float(r.change_5m or 0)) for r in rows)
+
+    title = "🚨 <b>PolySignal</b> — sinais fortes" if mode == "STRONG" else "🟡 <b>PolySignal</b> — sinais moderados"
+    lines = [title, f"📊 {spike_n} SPIKE | {dump_n} DUMP | {arb_n} ARB | Max: {max_abs:.2f} pts | Janela: {minutes}min", ""]
+
+    for r in rows:
+        change = float(r.change_5m or 0)
+        price = float(r.current_price or 0)
+        tipo = r.tipo or ""
+        url = r.polymarket_url or f"https://polymarket.com/event/{r.slug}"
+        emoji = "🟣" if tipo.startswith("ARBITRAGE_") else "🟢" if "SPIKE" in tipo else "🔴" if "DUMP" in tipo else "⚪"
+        sign = "+" if change >= 0 else ""
+        lines.append(f"{emoji} <b>{tipo}</b> | {sign}{change:.2f} pts @ {price:.1f}%")
+        lines.append(f'<a href="{url}">{(r.market or "")[:100]}</a>')
+        lines.append("")
+
+    text_out = "\n".join(lines).strip()
+
+    if int(dry_run) == 1:
+        return {"status": "dry_run", "would_send": len(rows), "mode": mode, "text": text_out}
+
+    telegram_resp = _telegram_send(text_out)
+    ok = bool(telegram_resp.get("ok"))
+    if ok:
+        _LAST_ALERT_SENT_AT = now
+
+    return {"status": "ok" if ok else "fail", "sent": len(rows) if ok else 0, "mode": mode, "telegram": telegram_resp}
+
+
+# ─────────────────────────────────────────────────────────────
+# DEBUG
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/debug/last_snapshot")
+def debug_last_snapshot(db: Session = Depends(get_db)):
+    last = db.query(func.max(Snapshot.timestamp)).scalar()
+    age = round((datetime.utcnow() - last).total_seconds() / 60, 1) if last else None
+    return {
+        "last_snapshot_timestamp": last.isoformat() if last else None,
+        "age_minutes": age,
+        "worker_healthy": age is not None and age < 10,
+        "now": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/debug/tokens")
+def debug_tokens(db: Session = Depends(get_db)):
+    tokens_sample = db.query(Token).limit(20).all()
+    return {
+        "total_tokens": db.query(Token).count(),
+        "total_snapshots": db.query(Snapshot).count(),
+        "total_signals": db.query(Signal).count(),
+        "amostra_tokens": [{"id": t.token_id, "outcome": t.outcome, "price_pct": round(t.price * 100, 1)} for t in tokens_sample],
+    }
+
 
 @app.get("/debug/clob_trades")
 def debug_clob_trades(limit: int = Query(5, ge=1, le=100)):
+    url = f"{CLOB_API}/trades?limit={limit}"
     try:
-        url = f"{POLYMARKET_CLOB}/trades?limit={limit}"
         resp = requests.get(url, headers=HEADERS, timeout=10)
+        try:
+            data = resp.json()
+        except Exception:
+            data = None
+        return {"ok": resp.status_code == 200, "status_code": resp.status_code,
+                "url": url, "body_head": resp.text[:400], "json": data}
+    except Exception as e:
+        return {"ok": False, "url": url, "error": str(e)}
+
+
+# ─────────────────────────────────────────────────────────────
+# CRON TICK
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/cron/tick")
+def cron_tick(db: Session = Depends(get_db)):
+    try:
+        try:
+            refresh_markets(db)
+        except Exception as e:
+            print(f"[cron] refresh error: {e}")
+
+        scan_resp = None
+        try:
+            scan_resp = signals_scan(db=db)
+        except Exception as e:
+            print(f"[cron] scan error: {e}")
+
+        last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
         return {
-            "url": url,
-            "status_code": resp.status_code,
-            "body_head": (resp.text or "")[:800],
-            "json": resp.json() if resp.headers.get("content-type","").startswith("application/json") else None,
+            "status": "ok",
+            "tick_now": datetime.utcnow().isoformat(),
+            "last_snapshot_timestamp": last.timestamp.isoformat() if last and last.timestamp else None,
+            "scan": scan_resp if scan_resp else {"status": "error"},
         }
     except Exception as e:
-        return {"error": str(e)}
-    
+        return {"status": "error", "detail": str(e)}
+
+
+# ─────────────────────────────────────────────────────────────
+# MULTI-SOURCE HELPERS (Reddit + Trends + Whales)
+# ─────────────────────────────────────────────────────────────
+
+def _fetch_reddit(query: str) -> list:
+    results = []
+    subreddits = ["worldnews", "geopolitics", "politics", "economics", "sports"]
+    for sub in subreddits[:3]:
+        try:
+            resp = requests.get(
+                f"https://www.reddit.com/r/{sub}/search.json",
+                params={"q": query, "sort": "new", "limit": 5, "t": "day"},
+                headers={"User-Agent": "PolySignal/3.0"}, timeout=6
+            )
+            if resp.status_code == 200:
+                for c in resp.json().get("data", {}).get("children", []):
+                    d = c.get("data", {})
+                    results.append({
+                        "title": d.get("title", ""), "score": d.get("score", 0),
+                        "comments": d.get("num_comments", 0),
+                        "url": f"https://reddit.com{d.get('permalink','')}",
+                        "fonte": f"Reddit r/{sub}",
+                    })
+        except Exception:
+            pass
+        time.sleep(0.2)
+    return results[:8]
+
+
+def _fetch_google_trends(query: str) -> dict:
+    try:
+        resp = requests.get(
+            "https://trends.google.com/trends/api/dailytrends",
+            params={"hl": "en-US", "tz": "-180", "geo": "US", "ns": "15"}, timeout=6
+        )
+        if resp.status_code == 200:
+            data = json.loads(resp.text[6:])
+            query_lower = query.lower()
+            for day in data.get("default", {}).get("trendingSearchesDays", []):
+                for item in day.get("trendingSearches", []):
+                    title = item.get("title", {}).get("query", "").lower()
+                    if any(w in title for w in query_lower.split()[:3]):
+                        return {"trending": True, "traffic": item.get("formattedTraffic", ""), "termo": title}
+    except Exception:
+        pass
+    return {"trending": False, "traffic": "0", "termo": ""}
+
+
+def _fetch_whale_activity(slug: str) -> dict:
+    try:
+        resp = requests.get(f"{CLOB_API}/trades?limit=50", headers=HEADERS, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            trades = data if isinstance(data, list) else data.get("data", [])
+            big_trades = []
+            total_volume = 0
+            for t in trades:
+                valor = float(t.get("size") or t.get("usdcSize") or 0)
+                total_volume += valor
+                if valor >= 500:
+                    big_trades.append({
+                        "valor": round(valor, 2),
+                        "outcome": t.get("outcome") or t.get("side"),
+                        "wallet": (t.get("maker") or "")[:8] + "...",
+                    })
+            big_trades.sort(key=lambda x: x["valor"], reverse=True)
+            return {"total_volume_recente": round(total_volume, 2), "num_baleias": len(big_trades),
+                    "maior_aposta": big_trades[0] if big_trades else None, "baleias": big_trades[:3]}
+    except Exception:
+        pass
+    return {"total_volume_recente": 0, "num_baleias": 0, "maior_aposta": None, "baleias": []}
+
+
+def _multi_source_analysis(question: str, slug: str, articles: list) -> dict:
+    keywords = question.replace("?","").replace("Will ","").replace("will ","")[:60]
+    reddit_posts = _fetch_reddit(keywords)
+    trends = _fetch_google_trends(keywords)
+    whales = _fetch_whale_activity(slug)
+
+    score_news   = min(len(articles) * 8, 30)
+    score_reddit = min(len(reddit_posts) * 5, 20)
+    score_trends = 20 if trends.get("trending") else 0
+    score_whales = min(whales.get("num_baleias", 0) * 10, 30)
+    score_total  = score_news + score_reddit + score_trends + score_whales
+
+    news_text   = "\n".join([f"- [{a['source']}] {a['title']}" for a in articles[:5]])
+    reddit_text = "\n".join([f"- [{p['fonte']}] {p['title']} ({p['score']} upvotes)" for p in reddit_posts[:4]])
+    whale_text  = f"Baleias: {whales.get('num_baleias',0)} | Maior: ${whales.get('maior_aposta',{}).get('valor',0) if whales.get('maior_aposta') else 0}"
+
+    prompt = f"""Analise esta oportunidade de prediction market:
+
+MERCADO: {question}
+
+NOTÍCIAS:
+{news_text or 'Nenhuma'}
+
+REDDIT:
+{reddit_text or 'Nenhum'}
+
+ATIVIDADE DE BALEIAS: {whale_text}
+GOOGLE TRENDS: {'EM ALTA: ' + trends.get('termo','') if trends.get('trending') else 'Não trending'}
+
+Responda APENAS com JSON:
+{{"score_yes": <0-100>, "recomendacao": <"APOSTE YES" ou "APOSTE NO" ou "EVITE">, "confianca": <0.0-1.0>, "resumo": <max 80 chars português>, "sentimento": <"POSITIVO" ou "NEGATIVO" ou "NEUTRO">}}"""
+
+    ai = {"score_yes": 50, "recomendacao": "EVITE", "confianca": 0.3, "resumo": "IA indisponível", "sentimento": "NEUTRO"}
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 200,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=15
+        )
+        if resp.status_code == 200:
+            text = resp.json().get("content", [{}])[0].get("text", "{}")
+            ai = json.loads(text.replace("```json","").replace("```","").strip())
+    except Exception as e:
+        print(f"[multi_source] IA erro: {e}")
+
+    score_final = round((score_total * 0.5) + (ai.get("confianca", 0) * 100 * 0.5), 1)
+    return {
+        "score_final": score_final,
+        "score_noticias": score_news, "score_reddit": score_reddit,
+        "score_trends": score_trends, "score_whales": score_whales,
+        "ai": ai, "reddit_posts": reddit_posts[:3], "trending": trends, "whales": whales,
+        "num_fontes": sum([1 if articles else 0, 1 if reddit_posts else 0,
+                          1 if trends.get("trending") else 0, 1 if whales.get("num_baleias",0) > 0 else 0]),
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# /best e /best/v2 — MELHORES APOSTAS
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/best")
+def get_best(db: Session = Depends(get_db)):
+    """Top oportunidades filtradas por score + confirmação IA."""
+    now = datetime.utcnow()
+    w5m  = now - timedelta(minutes=5)
+    w15m = now - timedelta(minutes=15)
+    w1h  = now - timedelta(hours=1)
+    candidates = []
+
+    for token in db.query(Token).all():
+        cp = token.price
+        if cp < 0.20 or cp > 0.80 or cp == 0:
+            continue
+
+        def snap(w):
+            return (db.query(Snapshot)
+                    .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= w)
+                    .order_by(Snapshot.timestamp.desc()).first())
+
+        s5m, s15m, s1h = snap(w5m), snap(w15m), snap(w1h)
+        if not s5m or not s15m:
+            continue
+
+        c5m  = round((cp - s5m.price) * 100, 2)
+        c15m = round((cp - s15m.price) * 100, 2)
+        c1h  = round((cp - s1h.price) * 100, 2) if s1h else None
+
+        if abs(c5m) < 5.0:
+            continue
+        # Tendência consistente
+        if c5m > 0 and c15m < 0: continue
+        if c5m < 0 and c15m > 0: continue
+
+        score = min(abs(c5m) * 2 + abs(c15m) * 1.5 + abs(c1h or 0) + (15 if 0.40 <= cp <= 0.60 else 0), 100)
+        if score < 40:
+            continue
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        keywords = market.question.replace("?","").replace("Will ","")[:60]
+        articles = _fetch_news(keywords, max_results=5)
+        analysis = _analyze_with_claude(market.question, articles)
+
+        rec = analysis.get("recomendacao", "EVITE")
+        confianca_ia = analysis.get("confianca", 0)
+
+        # IA deve confirmar a direção
+        if c5m > 0 and rec == "APOSTE NO": continue
+        if c5m < 0 and rec == "APOSTE YES": continue
+
+        score_final = round(score * 0.6 + confianca_ia * 100 * 0.4, 1)
+        direcao = "YES" if c5m > 0 else "NO"
+        preco = round(cp * 100, 1)
+        potencial = round((100 - preco) / preco * 10, 2) if direcao == "YES" else round(preco / (100 - preco) * 10, 2)
+
+        candidates.append({
+            "market": market.question, "slug": market.market_slug,
+            "outcome": token.outcome, "direcao": direcao,
+            "preco_entrada": preco, "potencial_lucro_10usd": potencial,
+            "score_mercado": round(score, 0), "score_ia": round(confianca_ia * 100, 0),
+            "score_final": score_final,
+            "change_5m": c5m, "change_15m": c15m, "change_1h": c1h,
+            "recomendacao_ia": rec, "resumo_ia": analysis.get("resumo"),
+            "sinal": "🟢 APOSTE" if score_final >= 60 else "🟡 CONSIDERE",
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
+            "detectado_em": now.isoformat(),
+        })
+
+    candidates.sort(key=lambda x: x["score_final"], reverse=True)
+    top = candidates[:5]
+    return {
+        "total_oportunidades": len(candidates), "top_apostas": top,
+        "capital_necessario": len(top) * 10,
+        "resumo": f"{len(candidates)} oportunidades. Top {len(top)} recomendadas.",
+        "atualizado_em": now.isoformat(),
+    }
+
+
+@app.get("/best/v2")
+def get_best_v2(db: Session = Depends(get_db)):
+    """Multi-fonte: NewsAPI + Reddit + Google Trends + Baleias + IA."""
+    now = datetime.utcnow()
+    w5m = now - timedelta(minutes=5)
+    candidates = []
+
+    for token in db.query(Token).all():
+        cp = token.price
+        if cp < 0.15 or cp > 0.85 or cp == 0:
+            continue
+
+        s5m = (db.query(Snapshot)
+               .filter(Snapshot.token_id == token.token_id, Snapshot.timestamp <= w5m)
+               .order_by(Snapshot.timestamp.desc()).first())
+        if not s5m:
+            continue
+
+        c5m = round((cp - s5m.price) * 100, 2)
+        if abs(c5m) < 4.0:
+            continue
+
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        keywords = market.question.replace("?","").replace("Will ","")[:60]
+        articles = _fetch_news(keywords, max_results=6)
+        analysis = _multi_source_analysis(market.question, market.market_slug, articles)
+
+        score_final = analysis["score_final"]
+        ai = analysis["ai"]
+        rec = ai.get("recomendacao", "EVITE")
+
+        if score_final < 35 or rec == "EVITE":
+            continue
+
+        direcao = "YES" if c5m > 0 else "NO"
+        preco = round(cp * 100, 1)
+        potencial = round((100 - preco) / preco * 10, 2) if direcao == "YES" else round(preco / (100 - preco) * 10, 2)
+        sinal = "🟢 APOSTE" if score_final >= 65 else "🟡 CONSIDERE" if score_final >= 45 else "⚪ FRACO"
+
+        candidates.append({
+            "market": market.question, "slug": market.market_slug, "direcao": direcao,
+            "preco_entrada": preco, "potencial_lucro_10usd": potencial,
+            "sinal": sinal, "score_final": score_final,
+            "scores": {"noticias": analysis["score_noticias"], "reddit": analysis["score_reddit"],
+                       "trends": analysis["score_trends"], "baleias": analysis["score_whales"]},
+            "num_fontes_confirmando": analysis["num_fontes"],
+            "change_5m": c5m,
+            "resumo_ia": ai.get("resumo"),
+            "baleias": analysis["whales"].get("baleias", []),
+            "trending": analysis["trending"].get("trending", False),
+            "noticias_titulos": [a["title"] for a in articles[:3]],
+            "reddit_posts": [p["title"] for p in analysis["reddit_posts"][:2]],
+            "polymarket_url": f"https://polymarket.com/event/{market.market_slug}",
+            "detectado_em": now.isoformat(),
+        })
+
+    candidates.sort(key=lambda x: x["score_final"], reverse=True)
+    top = candidates[:5]
+    return {
+        "total_oportunidades": len(candidates), "top_apostas": top,
+        "capital_necessario": len(top) * 10,
+        "resumo": f"{len(candidates)} oportunidades confirmadas por múltiplas fontes.",
+        "atualizado_em": now.isoformat(),
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# VERSÕES EXTRAS — INEFFICIENCIES + BACKTEST
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/inefficiencies/v2")
+def get_inefficiencies_v2(db: Session = Depends(get_db)):
+    """Versão simplificada: desvio do preço histórico médio."""
+    resultados = []
+    for m in db.query(Market).filter(Market.tokens.any()).all():
+        for t in m.tokens:
+            snaps = db.query(Snapshot).filter(Snapshot.token_id == t.token_id).order_by(Snapshot.timestamp.desc()).limit(200).all()
+            if len(snaps) < 10: continue
+            preco = t.price * 100
+            if preco < 5 or preco > 95: continue
+            precos = [s.price * 100 for s in snaps]
+            media = sum(precos) / len(precos)
+            desvio = abs(preco - media)
+            if desvio < 1.5: continue
+            volatilidade = max(precos) - min(precos)
+            score = round(min(100, (desvio / max(volatilidade, 1)) * 100), 1)
+            resultados.append({"market": m.question, "slug": m.market_slug, "outcome": t.outcome,
+                               "preco_atual": round(preco,1), "media_historica": round(media,1),
+                               "desvio": round(desvio,1), "score": score, "snapshots": len(snaps),
+                               "polymarket_url": f"https://polymarket.com/event/{m.market_slug}"})
+    resultados.sort(key=lambda x: x["score"], reverse=True)
+    return {"total": len(resultados), "top_10": resultados[:10],
+            "metodologia": "Desvio do preço histórico médio", "atualizado_em": datetime.utcnow().isoformat()}
+
+
+@app.get("/inefficiencies/v3")
+def get_inefficiencies_v3(db: Session = Depends(get_db)):
+    """v3: tokens ativos com desvio > 2pts."""
+    resultados = []
+    for t in db.query(Token).limit(200).all():
+        preco = t.price * 100
+        if preco < 5 or preco > 95: continue
+        snaps = db.query(Snapshot).filter(Snapshot.token_id == t.token_id).order_by(Snapshot.timestamp.desc()).limit(50).all()
+        if len(snaps) < 10: continue
+        precos = [s.price * 100 for s in snaps]
+        media = sum(precos) / len(precos)
+        desvio = abs(preco - media)
+        if desvio < 2: continue
+        volatilidade = max(precos) - min(precos)
+        score = round(min(100, (desvio / max(volatilidade, 0.1)) * 100), 1)
+        mercado = db.query(Market).filter(Market.id == t.market_id).first()
+        if not mercado: continue
+        resultados.append({"market": mercado.question, "slug": mercado.market_slug, "outcome": t.outcome,
+                           "preco_atual": round(preco,1), "media_historica": round(media,1),
+                           "desvio": round(desvio,1), "score": score,
+                           "polymarket_url": f"https://polymarket.com/event/{mercado.market_slug}"})
+    resultados.sort(key=lambda x: x["score"], reverse=True)
+    return {"total": len(resultados), "top_10": resultados[:10], "atualizado_em": datetime.utcnow().isoformat()}
+
+
+@app.get("/inefficiencies/v4")
+def get_inefficiencies_v4(db: Session = Depends(get_db)):
+    """v4: apenas tokens com preço ativo (5-95%), mais rápido."""
+    resultados = []
+    for t in db.query(Token).filter(Token.price > 0.05, Token.price < 0.95).all():
+        snaps = db.query(Snapshot).filter(Snapshot.token_id == t.token_id).order_by(Snapshot.timestamp.desc()).limit(50).all()
+        if len(snaps) < 10: continue
+        preco = t.price * 100
+        precos = [s.price * 100 for s in snaps]
+        media = sum(precos) / len(precos)
+        desvio = abs(preco - media)
+        if desvio < 2: continue
+        volatilidade = max(precos) - min(precos)
+        score = round(min(100, (desvio / max(volatilidade, 0.1)) * 100), 1)
+        mercado = db.query(Market).filter(Market.id == t.market_id).first()
+        if not mercado: continue
+        resultados.append({"market": mercado.question, "slug": mercado.market_slug, "outcome": t.outcome,
+                           "preco_atual": round(preco,1), "media_historica": round(media,1),
+                           "desvio": round(desvio,1), "score": score,
+                           "polymarket_url": f"https://polymarket.com/event/{mercado.market_slug}"})
+    resultados.sort(key=lambda x: x["score"], reverse=True)
+    return {"total": len(resultados), "tokens_ativos_encontrados": len(resultados),
+            "top_10": resultados[:10], "atualizado_em": datetime.utcnow().isoformat()}
+
+
+@app.get("/backtest/v2")
+def backtest_v2(db: Session = Depends(get_db)):
+    """Backtest com janela 5 snapshots."""
+    tokens = db.query(Token).limit(50).all()
+    acertos = erros = 0
+    amostra = []
+    for t in tokens:
+        snaps = db.query(Snapshot).filter(Snapshot.token_id == t.token_id).order_by(Snapshot.timestamp.asc()).limit(100).all()
+        if len(snaps) < 20: continue
+        for i in range(5, len(snaps) - 5):
+            pe = snaps[i].price * 100
+            if pe < 10 or pe > 90: continue
+            media = sum(s.price * 100 for s in snaps[max(0,i-5):i]) / 5
+            var = pe - media
+            if abs(var) < 3: continue
+            pf = snaps[min(i+5, len(snaps)-1)].price * 100
+            ok = (var > 0 and pf > pe) or (var < 0 and pf < pe)
+            if ok: acertos += 1
+            else: erros += 1
+            if len(amostra) < 15:
+                m = db.query(Market).filter(Market.id == t.market_id).first()
+                amostra.append({"market": m.question if m else "?", "outcome": t.outcome,
+                                "entrada": round(pe,1), "saida": round(pf,1),
+                                "resultado": "✅ ACERTO" if ok else "❌ ERRO"})
+    total = acertos + erros
+    return {"total_simulados": total, "acertos": acertos, "erros": erros,
+            "win_rate_pct": round(acertos/total*100,1) if total > 0 else 0,
+            "amostra": amostra, "atualizado_em": datetime.utcnow().isoformat()}
+
+
+@app.get("/backtest/v3")
+def backtest_v3(db: Session = Depends(get_db)):
+    """Backtest v3: 30 tokens ativos, janela de 10 snapshots."""
+    tokens = db.query(Token).filter(Token.price > 0.05, Token.price < 0.95).limit(30).all()
+    acertos = erros = 0
+    amostra = []
+    for t in tokens:
+        snaps = db.query(Snapshot).filter(Snapshot.token_id == t.token_id).order_by(Snapshot.timestamp.asc()).limit(200).all()
+        if len(snaps) < 30: continue
+        for i in range(10, len(snaps) - 10):
+            pe = snaps[i].price * 100
+            if pe < 10 or pe > 90: continue
+            media = sum(s.price * 100 for s in snaps[max(0,i-10):i]) / 10
+            var = pe - media
+            if abs(var) < 4: continue
+            pf = snaps[min(i+10, len(snaps)-1)].price * 100
+            ok = (var > 0 and pf > pe) or (var < 0 and pf < pe)
+            if ok: acertos += 1
+            else: erros += 1
+            if len(amostra) < 20:
+                m = db.query(Market).filter(Market.id == t.market_id).first()
+                amostra.append({"market": m.question if m else "?", "outcome": t.outcome,
+                                "entrada": round(pe,1), "saida": round(pf,1),
+                                "resultado": "✅ ACERTO" if ok else "❌ ERRO"})
+    total = acertos + erros
+    return {"total_simulados": total, "acertos": acertos, "erros": erros,
+            "win_rate_pct": round(acertos/total*100,1) if total > 0 else 0,
+            "conclusao": "Momentum tem edge" if total > 0 and acertos/total > 0.55 else "Win rate abaixo do esperado",
+            "amostra": amostra, "atualizado_em": datetime.utcnow().isoformat()}
+
+
+@app.get("/intelligence/v3/{slug}")
+def get_intelligence_v3(slug: str, db: Session = Depends(get_db)):
+    """Intelligence v3: score determinístico sem chamar IA (mais rápido, sem custo)."""
+    market = db.query(Market).filter(Market.market_slug == slug).first()
+    if not market:
+        return {"error": "Mercado não encontrado"}
+
+    yes_price = no_price = None
+    for token in market.tokens:
+        o = (token.outcome or "").upper()
+        if o == "YES": yes_price = round(token.price * 100, 1)
+        elif o == "NO": no_price = round(token.price * 100, 1)
+
+    keywords = market.question.replace("?","").replace("Will ","")[:80]
+
+    # Notícias (sem IA)
+    articles = _fetch_news(keywords, max_results=8)
+    all_text = " ".join([a["title"] + " " + a.get("description","") for a in articles]).lower()
+
+    pos_words = ["confirmed","approved","wins","rises","signed","passes","success","breakthrough","yes","agreed"]
+    neg_words = ["fails","rejected","loses","denied","cancelled","drops","collapse","refused","no","veto"]
+    pos = sum(1 for w in pos_words if w in all_text)
+    neg = sum(1 for w in neg_words if w in all_text)
+
+    # Score baseado em desvio de preço + sentimento de notícias
+    news_score = 50 + (pos - neg) * 8
+    news_score = max(10, min(90, news_score))
+
+    # Desvio de preço do histórico
+    yes_token = next((t for t in market.tokens if (t.outcome or "").upper() == "YES"), None)
+    price_deviation_score = 0
+    if yes_token:
+        snaps = db.query(Snapshot).filter(Snapshot.token_id == yes_token.token_id).order_by(Snapshot.timestamp.desc()).limit(50).all()
+        if len(snaps) >= 10:
+            hist_mean = sum(s.price * 100 for s in snaps) / len(snaps)
+            deviation = (yes_price or 50) - hist_mean
+            price_deviation_score = round(deviation, 1)
+
+    score_yes = round((news_score * 0.7) + (50 + price_deviation_score * 0.3), 1)
+    score_yes = max(10, min(90, score_yes))
+    edge = round(score_yes - (yes_price or 50), 1)
+
+    if abs(edge) >= 8 and len(articles) >= 3:
+        rec = "APOSTE YES" if edge > 0 else "APOSTE NO"
+        sinal = "🟢 APOSTE YES" if edge > 0 else "🔴 APOSTE NO"
+        sinal_cor = "green" if edge > 0 else "red"
+        confianca = min(0.8, len(articles) / 10 + abs(edge) / 50)
+    else:
+        rec = "EVITE"
+        sinal = "🟡 EVITE"
+        sinal_cor = "yellow"
+        confianca = 0.3
+
+    sentimento = "POSITIVO" if pos > neg else "NEGATIVO" if neg > pos else "NEUTRO"
+
+    return {
+        "market": market.question, "slug": slug,
+        "yes_price_mercado": yes_price, "no_price_mercado": no_price,
+        "score_yes_determinisico": score_yes, "edge": edge,
+        "sinal": sinal, "sinal_cor": sinal_cor,
+        "recomendacao": rec, "confianca": round(confianca, 2),
+        "sentimento": sentimento,
+        "resumo": f"{len(articles)} notícias. {pos} pos, {neg} neg. Desvio preço: {price_deviation_score:+.1f}pts",
+        "fontes_relevantes": len(articles),
+        "noticias": articles[:5],
+        "polymarket_url": f"https://polymarket.com/event/{slug}",
+        "atualizado_em": datetime.utcnow().isoformat(),
+        "nota": "v3 = sem IA, determinístico, mais rápido",
+    }
