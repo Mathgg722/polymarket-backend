@@ -592,92 +592,126 @@ def get_news(query: str = "prediction markets politics economy"):
 
 
 # ─────────────────────────────────────────────────────────────
-# REDDIT — Posts via RSS (funciona de servidor/Railway)
+# REDDIT — via PullPush.io (não bloqueia datacenter)
 # ─────────────────────────────────────────────────────────────
 
 SUBREDDITS_POLY  = ["Polymarket", "polymarketbets", "predictionmarkets", "polymarket_analysis", "polymarket_news"]
 SUBREDDITS_GERAL = ["worldnews", "geopolitics", "politics", "economics", "ukraine", "middleeast", "CryptoCurrency", "investing"]
 
-def _fetch_reddit_rss(sub: str, sort: str = "new", limit: int = 10) -> list:
-    """Busca posts via RSS — funciona mesmo de datacenter."""
+PULLPUSH_HEADERS = {
+    "User-Agent": "PolySignal/3.0",
+    "Accept": "application/json",
+}
+
+def _fetch_pullpush(subreddit: str, size: int = 10) -> list:
+    """Busca posts via PullPush.io — espelho do Reddit sem bloqueio de datacenter."""
     posts = []
-    urls_to_try = [
-        f"https://www.reddit.com/r/{sub}/{sort}.rss?limit={limit}",
-        f"https://old.reddit.com/r/{sub}/{sort}.rss?limit={limit}",
-    ]
-    headers = {
-        "User-Agent": "PolySignal/3.0 (prediction market analysis bot; contact via polymarket)",
-        "Accept": "application/rss+xml, application/xml, text/xml",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    for url in urls_to_try:
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            if r.status_code != 200:
-                continue
-            root = ET.fromstring(r.content)
-            ns = {"atom": "http://www.w3.org/2005/Atom"}
-            # Tenta formato Atom (Reddit usa Atom no RSS)
-            entries = root.findall(".//entry") or root.findall(".//item")
-            for entry in entries[:limit]:
-                # Atom
-                title = (entry.findtext("title") or entry.findtext("atom:title", namespaces=ns) or "").strip()
-                link_el = entry.find("link")
-                if link_el is not None:
-                    link = link_el.get("href") or link_el.text or ""
-                else:
-                    link = entry.findtext("atom:link", namespaces=ns) or ""
-                content = (entry.findtext("content") or entry.findtext("summary") or "").strip()
-                author = (entry.findtext("author/name") or entry.findtext("atom:author/atom:name", namespaces=ns) or "").strip()
-                updated = (entry.findtext("updated") or entry.findtext("pubDate") or "").strip()
-                if title and len(title) > 3:
-                    posts.append({
-                        "title": title,
-                        "selftext": content[:400] if content else "",
-                        "score": 0,
-                        "num_comments": 0,
-                        "url": link.strip(),
-                        "source": f"r/{sub}",
-                        "subreddit": sub,
-                        "is_poly": sub in SUBREDDITS_POLY,
-                        "author": author,
-                        "flair": "",
-                        "created_at": updated,
-                        "created_utc": 0,
-                    })
-            if posts:
-                break  # Deu certo, não precisa tentar próximo URL
-        except Exception as e:
-            print(f"[reddit_rss] r/{sub} {sort}: {e}")
+    try:
+        url = "https://api.pullpush.io/reddit/search/submission/"
+        params = {
+            "subreddit": subreddit,
+            "size": size,
+            "sort": "desc",
+            "sort_type": "created_utc",
+            "filter": "id,title,selftext,score,num_comments,permalink,url,author,link_flair_text,created_utc,subreddit",
+        }
+        r = requests.get(url, params=params, headers=PULLPUSH_HEADERS, timeout=10)
+        if r.status_code == 200:
+            for item in r.json().get("data", []):
+                title = (item.get("title") or "").strip()
+                if not title:
+                    continue
+                created = item.get("created_utc", 0)
+                posts.append({
+                    "title": title,
+                    "selftext": (item.get("selftext") or "")[:400],
+                    "score": item.get("score", 0),
+                    "num_comments": item.get("num_comments", 0),
+                    "url": f"https://reddit.com{item.get('permalink', '')}",
+                    "external_url": item.get("url", ""),
+                    "source": f"r/{subreddit}",
+                    "subreddit": subreddit,
+                    "is_poly": subreddit in SUBREDDITS_POLY,
+                    "author": item.get("author", ""),
+                    "flair": item.get("link_flair_text") or "",
+                    "created_utc": created,
+                    "created_at": datetime.utcfromtimestamp(created).isoformat() if created else None,
+                })
+        else:
+            print(f"[pullpush] r/{subreddit} → HTTP {r.status_code}")
+    except Exception as e:
+        print(f"[pullpush] r/{subreddit}: {e}")
+    return posts
+
+
+def _fetch_pullpush_search(query: str, size: int = 20) -> list:
+    """Busca posts por palavra-chave no PullPush — ex: 'polymarket'."""
+    posts = []
+    try:
+        url = "https://api.pullpush.io/reddit/search/submission/"
+        params = {
+            "q": query,
+            "size": size,
+            "sort": "desc",
+            "sort_type": "created_utc",
+            "filter": "id,title,selftext,score,num_comments,permalink,url,author,link_flair_text,created_utc,subreddit",
+        }
+        r = requests.get(url, params=params, headers=PULLPUSH_HEADERS, timeout=10)
+        if r.status_code == 200:
+            for item in r.json().get("data", []):
+                title = (item.get("title") or "").strip()
+                if not title:
+                    continue
+                sub = item.get("subreddit", "")
+                created = item.get("created_utc", 0)
+                posts.append({
+                    "title": title,
+                    "selftext": (item.get("selftext") or "")[:400],
+                    "score": item.get("score", 0),
+                    "num_comments": item.get("num_comments", 0),
+                    "url": f"https://reddit.com{item.get('permalink', '')}",
+                    "external_url": item.get("url", ""),
+                    "source": f"r/{sub}",
+                    "subreddit": sub,
+                    "is_poly": sub in SUBREDDITS_POLY,
+                    "author": item.get("author", ""),
+                    "flair": item.get("link_flair_text") or "",
+                    "created_utc": created,
+                    "created_at": datetime.utcfromtimestamp(created).isoformat() if created else None,
+                })
+    except Exception as e:
+        print(f"[pullpush_search] '{query}': {e}")
     return posts
 
 
 @app.get("/reddit")
-def get_reddit(sort: str = "new", limit: int = Query(60, ge=10, le=100)):
-    """Posts recentes dos subreddits Polymarket + contexto global via RSS."""
+def get_reddit(limit: int = Query(60, ge=10, le=100)):
+    """Posts recentes sobre Polymarket e contexto global via PullPush.io."""
     posts = []
     seen_urls: set = set()
 
-    # Polymarket subs — hot + new
-    for sub in SUBREDDITS_POLY:
-        for s in ["hot", "new"]:
-            for p in _fetch_reddit_rss(sub, sort=s, limit=10):
-                if p["url"] not in seen_urls:
-                    seen_urls.add(p["url"])
-                    posts.append(p)
-        time.sleep(0.3)
-
-    # Gerais — só new
-    for sub in SUBREDDITS_GERAL:
-        for p in _fetch_reddit_rss(sub, sort="new", limit=5):
+    def add(new_posts):
+        for p in new_posts:
             if p["url"] not in seen_urls:
                 seen_urls.add(p["url"])
                 posts.append(p)
+
+    # 1) Busca keyword "polymarket" em todo Reddit — mais abrangente
+    add(_fetch_pullpush_search("polymarket", size=25))
+    time.sleep(0.3)
+
+    # 2) Subreddits Polymarket específicos
+    for sub in SUBREDDITS_POLY:
+        add(_fetch_pullpush(sub, size=10))
         time.sleep(0.2)
 
-    # Polymarket primeiro, depois os demais
-    posts.sort(key=lambda x: (not x["is_poly"], x.get("created_at", "") or ""))
-    posts.reverse() if not any(x["is_poly"] for x in posts[:3]) else None
+    # 3) Subreddits de contexto
+    for sub in SUBREDDITS_GERAL:
+        add(_fetch_pullpush(sub, size=5))
+        time.sleep(0.15)
+
+    # Polymarket primeiro, depois mais recentes
+    posts.sort(key=lambda x: (not x["is_poly"], -(x.get("created_utc") or 0)))
 
     poly_count = sum(1 for p in posts if p["is_poly"])
     return {
@@ -687,7 +721,6 @@ def get_reddit(sort: str = "new", limit: int = Query(60, ge=10, le=100)):
         "subreddits_monitored": SUBREDDITS_POLY + SUBREDDITS_GERAL,
         "posts": posts[:limit],
     }
-
 
 
 def _fetch_news(query: str, max_results: int = 8) -> list:
