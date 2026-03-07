@@ -592,8 +592,75 @@ def get_news(query: str = "prediction markets politics economy"):
 
 
 # ─────────────────────────────────────────────────────────────
-# INTELLIGENCE (com Claude real)
+# REDDIT — Posts em tempo real
 # ─────────────────────────────────────────────────────────────
+
+SUBREDDITS_POLY  = ["Polymarket", "polymarketbets", "predictionmarkets", "polymarket_analysis", "polymarket_news"]
+SUBREDDITS_GERAL = ["worldnews", "geopolitics", "politics", "economics", "ukraine", "middleeast", "CryptoCurrency", "investing"]
+
+@app.get("/reddit")
+def get_reddit(sort: str = "new", limit: int = Query(60, ge=10, le=100)):
+    """Busca posts recentes dos subreddits Polymarket + gerais."""
+    posts = []
+    seen_urls = set()
+
+    def fetch_sub(sub: str, sort_: str, n: int, is_poly: bool):
+        try:
+            url = f"https://www.reddit.com/r/{sub}/{sort_}.json?limit={n}"
+            r = requests.get(url, headers={"User-Agent": "PolySignal/3.0"}, timeout=8)
+            if r.status_code == 200:
+                for c in r.json().get("data", {}).get("children", []):
+                    d = c.get("data", {})
+                    title = (d.get("title") or "").strip()
+                    if not title:
+                        continue
+                    post_url = f"https://reddit.com{d.get('permalink','')}"
+                    if post_url in seen_urls:
+                        continue
+                    seen_urls.add(post_url)
+                    posts.append({
+                        "title": title,
+                        "selftext": (d.get("selftext") or "")[:400],
+                        "score": d.get("score", 0),
+                        "upvote_ratio": round(d.get("upvote_ratio", 0) * 100),
+                        "num_comments": d.get("num_comments", 0),
+                        "url": post_url,
+                        "external_url": d.get("url", ""),
+                        "source": f"r/{sub}",
+                        "subreddit": sub,
+                        "is_poly": is_poly,
+                        "author": d.get("author", ""),
+                        "flair": d.get("link_flair_text") or "",
+                        "created_utc": d.get("created_utc", 0),
+                        "created_at": datetime.utcfromtimestamp(d.get("created_utc", 0)).isoformat() if d.get("created_utc") else None,
+                    })
+        except Exception as e:
+            print(f"[reddit] r/{sub}: {e}")
+
+    # Polymarket subs — prioridade: hot + new
+    for sub in SUBREDDITS_POLY:
+        fetch_sub(sub, "hot", 10, True)
+        fetch_sub(sub, "new", 10, True)
+        time.sleep(0.2)
+
+    # Gerais — só new
+    for sub in SUBREDDITS_GERAL:
+        fetch_sub(sub, "new", 5, False)
+        time.sleep(0.15)
+
+    # Ordena: Polymarket primeiro, depois mais recentes
+    posts.sort(key=lambda x: (not x["is_poly"], -(x.get("created_utc") or 0)))
+
+    poly_count = sum(1 for p in posts if p["is_poly"])
+    return {
+        "total": len(posts),
+        "polymarket_posts": poly_count,
+        "general_posts": len(posts) - poly_count,
+        "subreddits_monitored": SUBREDDITS_POLY + SUBREDDITS_GERAL,
+        "posts": posts[:limit],
+    }
+
+
 
 def _fetch_news(query: str, max_results: int = 8) -> list:
     articles = []

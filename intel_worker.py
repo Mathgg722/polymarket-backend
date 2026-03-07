@@ -39,7 +39,23 @@ RSS_FEEDS = [
     ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
 ]
 
-SUBREDDITS = ["worldnews", "geopolitics", "politics", "economics", "ukraine", "middleeast", "sports"]
+# Subreddits PRIORITÁRIOS — Polymarket direto
+SUBREDDITS_POLY = [
+    "Polymarket",
+    "polymarketbets",
+    "predictionmarkets",
+    "polymarket_analysis",
+    "polymarket_news",
+]
+
+# Subreddits gerais — contexto geopolítico/financeiro
+SUBREDDITS_GERAL = [
+    "worldnews", "geopolitics", "politics",
+    "economics", "ukraine", "middleeast",
+    "sports", "CryptoCurrency", "investing",
+]
+
+SUBREDDITS = SUBREDDITS_POLY + SUBREDDITS_GERAL
 
 alerted = set()
 markets_cache = []
@@ -82,30 +98,71 @@ def fetch_all_rss() -> list:
 
 # ── Reddit ────────────────────────────────────────────────────
 
+def fetch_reddit_sub(sub: str, sort: str = "new", limit: int = 8) -> list:
+    """Busca posts de um subreddit específico."""
+    posts = []
+    try:
+        url = f"https://www.reddit.com/r/{sub}/{sort}.json?limit={limit}"
+        resp = requests.get(url, headers={"User-Agent": "PolySignal/3.0 (intel)"}, timeout=8)
+        if resp.status_code == 200:
+            for c in resp.json().get("data", {}).get("children", []):
+                d = c.get("data", {})
+                title = d.get("title", "").strip()
+                if not title:
+                    continue
+                posts.append({
+                    "title": title,
+                    "selftext": (d.get("selftext") or "")[:300],
+                    "score": d.get("score", 0),
+                    "upvote_ratio": d.get("upvote_ratio", 0),
+                    "num_comments": d.get("num_comments", 0),
+                    "url": f"https://reddit.com{d.get('permalink','')}",
+                    "external_url": d.get("url", ""),
+                    "source": f"r/{sub}",
+                    "is_poly": sub in SUBREDDITS_POLY,
+                    "created": d.get("created_utc", 0),
+                    "author": d.get("author", ""),
+                    "flair": d.get("link_flair_text") or "",
+                })
+        elif resp.status_code == 404:
+            print(f"  ⚠️  r/{sub} não encontrado (pode ser privado/inexistente)")
+    except Exception as e:
+        print(f"  ❌ r/{sub}: {e}")
+    return posts
+
+
 def fetch_reddit() -> list:
     posts = []
-    for sub in SUBREDDITS[:6]:
-        try:
-            resp = requests.get(
-                f"https://www.reddit.com/r/{sub}/new.json?limit=5",
-                headers={"User-Agent": "PolySignal/3.0"}, timeout=6
-            )
-            if resp.status_code == 200:
-                for c in resp.json().get("data", {}).get("children", []):
-                    d = c.get("data", {})
-                    posts.append({
-                        "title": d.get("title", ""),
-                        "score": d.get("score", 0),
-                        "url": f"https://reddit.com{d.get('permalink','')}",
-                        "source": f"r/{sub}",
-                        "created": d.get("created_utc", 0),
-                    })
-        except Exception:
-            pass
+
+    # 1) Subreddits Polymarket — busca hot + new
+    print("  🎯 Buscando subreddits Polymarket...")
+    for sub in SUBREDDITS_POLY:
+        for sort in ["hot", "new"]:
+            sub_posts = fetch_reddit_sub(sub, sort=sort, limit=10)
+            posts.extend(sub_posts)
+            time.sleep(0.4)
+
+    # 2) Subreddits gerais — só new, menos posts
+    print("  🌍 Buscando subreddits gerais...")
+    for sub in SUBREDDITS_GERAL:
+        sub_posts = fetch_reddit_sub(sub, sort="new", limit=5)
+        posts.extend(sub_posts)
         time.sleep(0.3)
-    posts.sort(key=lambda x: x.get("created", 0), reverse=True)
-    print(f"💬 Reddit: {len(posts)} posts")
-    return posts[:25]
+
+    # Remove duplicatas por URL
+    seen = set()
+    unique = []
+    for p in posts:
+        if p["url"] not in seen:
+            seen.add(p["url"])
+            unique.append(p)
+
+    # Ordena: posts Polymarket primeiro, depois por data
+    unique.sort(key=lambda x: (not x["is_poly"], -x.get("created", 0)))
+
+    poly_count = sum(1 for p in unique if p["is_poly"])
+    print(f"💬 Reddit: {len(unique)} posts ({poly_count} de subreddits Polymarket)")
+    return unique[:50]
 
 
 # ── GDELT ─────────────────────────────────────────────────────
@@ -276,14 +333,15 @@ def format_alert(match: dict, analysis: dict) -> str:
 
 def run():
     print("🚀 PolySignal Intel Worker v3 iniciado!")
-    print(f"📰 {len(RSS_FEEDS)} feeds RSS | 💬 {len(SUBREDDITS)} subreddits | 🌐 GDELT")
+    print(f"📰 {len(RSS_FEEDS)} feeds RSS | 🎯 {len(SUBREDDITS_POLY)} subs Polymarket | 🌍 {len(SUBREDDITS_GERAL)} subs gerais | 🌐 GDELT")
     print(f"📱 Telegram: {'✅' if TELEGRAM_TOKEN else '❌ NÃO CONFIGURADO'}")
     print(f"⏱  Intervalo: {CHECK_INTERVAL}s")
 
     send_telegram(f"""🚀 <b>PolySignal Intel v3 Ativo!</b>
 
 📰 {len(RSS_FEEDS)} feeds RSS (Reuters, BBC, AP, Al Jazeera...)
-💬 {len(SUBREDDITS)} subreddits monitorados
+🎯 Subreddits Polymarket: r/Polymarket, r/polymarketbets, r/predictionmarkets, r/polymarket_analysis
+🌍 {len(SUBREDDITS_GERAL)} subreddits de contexto global
 🌐 GDELT — toda mídia do mundo
 🤖 IA Claude analisando cada match
 
@@ -305,8 +363,9 @@ Alertas chegam quando notícia + mercado = oportunidade real! 🎯""")
         all_news = []
         all_news.extend(fetch_all_rss())
 
-        if cycle % 2 == 0:
-            all_news.extend(fetch_reddit())
+        # Reddit: subreddits Polymarket a cada ciclo, gerais a cada 2
+        reddit_posts = fetch_reddit()
+        all_news.extend(reddit_posts)
 
         if cycle % 3 == 0:
             all_news.extend(fetch_gdelt())
