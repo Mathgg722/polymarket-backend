@@ -592,64 +592,92 @@ def get_news(query: str = "prediction markets politics economy"):
 
 
 # ─────────────────────────────────────────────────────────────
-# REDDIT — Posts em tempo real
+# REDDIT — Posts via RSS (funciona de servidor/Railway)
 # ─────────────────────────────────────────────────────────────
 
 SUBREDDITS_POLY  = ["Polymarket", "polymarketbets", "predictionmarkets", "polymarket_analysis", "polymarket_news"]
 SUBREDDITS_GERAL = ["worldnews", "geopolitics", "politics", "economics", "ukraine", "middleeast", "CryptoCurrency", "investing"]
 
-@app.get("/reddit")
-def get_reddit(sort: str = "new", limit: int = Query(60, ge=10, le=100)):
-    """Busca posts recentes dos subreddits Polymarket + gerais."""
+def _fetch_reddit_rss(sub: str, sort: str = "new", limit: int = 10) -> list:
+    """Busca posts via RSS — funciona mesmo de datacenter."""
     posts = []
-    seen_urls = set()
-
-    def fetch_sub(sub: str, sort_: str, n: int, is_poly: bool):
+    urls_to_try = [
+        f"https://www.reddit.com/r/{sub}/{sort}.rss?limit={limit}",
+        f"https://old.reddit.com/r/{sub}/{sort}.rss?limit={limit}",
+    ]
+    headers = {
+        "User-Agent": "PolySignal/3.0 (prediction market analysis bot; contact via polymarket)",
+        "Accept": "application/rss+xml, application/xml, text/xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    for url in urls_to_try:
         try:
-            url = f"https://www.reddit.com/r/{sub}/{sort_}.json?limit={n}"
-            r = requests.get(url, headers={"User-Agent": "PolySignal/3.0"}, timeout=8)
-            if r.status_code == 200:
-                for c in r.json().get("data", {}).get("children", []):
-                    d = c.get("data", {})
-                    title = (d.get("title") or "").strip()
-                    if not title:
-                        continue
-                    post_url = f"https://reddit.com{d.get('permalink','')}"
-                    if post_url in seen_urls:
-                        continue
-                    seen_urls.add(post_url)
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.content)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            # Tenta formato Atom (Reddit usa Atom no RSS)
+            entries = root.findall(".//entry") or root.findall(".//item")
+            for entry in entries[:limit]:
+                # Atom
+                title = (entry.findtext("title") or entry.findtext("atom:title", namespaces=ns) or "").strip()
+                link_el = entry.find("link")
+                if link_el is not None:
+                    link = link_el.get("href") or link_el.text or ""
+                else:
+                    link = entry.findtext("atom:link", namespaces=ns) or ""
+                content = (entry.findtext("content") or entry.findtext("summary") or "").strip()
+                author = (entry.findtext("author/name") or entry.findtext("atom:author/atom:name", namespaces=ns) or "").strip()
+                updated = (entry.findtext("updated") or entry.findtext("pubDate") or "").strip()
+                if title and len(title) > 3:
                     posts.append({
                         "title": title,
-                        "selftext": (d.get("selftext") or "")[:400],
-                        "score": d.get("score", 0),
-                        "upvote_ratio": round(d.get("upvote_ratio", 0) * 100),
-                        "num_comments": d.get("num_comments", 0),
-                        "url": post_url,
-                        "external_url": d.get("url", ""),
+                        "selftext": content[:400] if content else "",
+                        "score": 0,
+                        "num_comments": 0,
+                        "url": link.strip(),
                         "source": f"r/{sub}",
                         "subreddit": sub,
-                        "is_poly": is_poly,
-                        "author": d.get("author", ""),
-                        "flair": d.get("link_flair_text") or "",
-                        "created_utc": d.get("created_utc", 0),
-                        "created_at": datetime.utcfromtimestamp(d.get("created_utc", 0)).isoformat() if d.get("created_utc") else None,
+                        "is_poly": sub in SUBREDDITS_POLY,
+                        "author": author,
+                        "flair": "",
+                        "created_at": updated,
+                        "created_utc": 0,
                     })
+            if posts:
+                break  # Deu certo, não precisa tentar próximo URL
         except Exception as e:
-            print(f"[reddit] r/{sub}: {e}")
+            print(f"[reddit_rss] r/{sub} {sort}: {e}")
+    return posts
 
-    # Polymarket subs — prioridade: hot + new
+
+@app.get("/reddit")
+def get_reddit(sort: str = "new", limit: int = Query(60, ge=10, le=100)):
+    """Posts recentes dos subreddits Polymarket + contexto global via RSS."""
+    posts = []
+    seen_urls: set = set()
+
+    # Polymarket subs — hot + new
     for sub in SUBREDDITS_POLY:
-        fetch_sub(sub, "hot", 10, True)
-        fetch_sub(sub, "new", 10, True)
-        time.sleep(0.2)
+        for s in ["hot", "new"]:
+            for p in _fetch_reddit_rss(sub, sort=s, limit=10):
+                if p["url"] not in seen_urls:
+                    seen_urls.add(p["url"])
+                    posts.append(p)
+        time.sleep(0.3)
 
     # Gerais — só new
     for sub in SUBREDDITS_GERAL:
-        fetch_sub(sub, "new", 5, False)
-        time.sleep(0.15)
+        for p in _fetch_reddit_rss(sub, sort="new", limit=5):
+            if p["url"] not in seen_urls:
+                seen_urls.add(p["url"])
+                posts.append(p)
+        time.sleep(0.2)
 
-    # Ordena: Polymarket primeiro, depois mais recentes
-    posts.sort(key=lambda x: (not x["is_poly"], -(x.get("created_utc") or 0)))
+    # Polymarket primeiro, depois os demais
+    posts.sort(key=lambda x: (not x["is_poly"], x.get("created_at", "") or ""))
+    posts.reverse() if not any(x["is_poly"] for x in posts[:3]) else None
 
     poly_count = sum(1 for p in posts if p["is_poly"])
     return {
