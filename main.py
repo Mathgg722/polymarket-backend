@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Depends, Query
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text, func, desc
 from sqlalchemy.orm import Session
@@ -141,9 +142,14 @@ def get_active_markets(db: Session = Depends(get_db)):
             "id": m.id,
             "question": m.question,
             "slug": m.market_slug,
+            "market_slug": m.market_slug,   # compatibilidade
             "end_date": str(m.end_date) if m.end_date else None,
             "yes_price": yes_price,
             "no_price": no_price,
+            "tokens": [
+                {"outcome": t.outcome, "price": round(t.price, 4), "token_id": t.token_id}
+                for t in m.tokens
+            ],
             "polymarket_url": f"https://polymarket.com/event/{m.market_slug}",
         })
     return result
@@ -429,23 +435,47 @@ def refresh_markets(db: Session = Depends(get_db)):
 # TRADES
 # ─────────────────────────────────────────────────────────────
 
+class TradeCreate(BaseModel):
+    market: str                  # pode ser slug OU question
+    outcome: str                 # "YES" ou "NO"
+    amount: float
+    entry_price: float = 0.0    # 0 = usar preço atual do token
+    notes: str = ""
+
 @app.post("/trades")
-def open_trade(market_slug: str, outcome: str, amount: float, notes: str = "", db: Session = Depends(get_db)):
-    market = db.query(Market).filter(Market.market_slug == market_slug).first()
+def open_trade(body: TradeCreate, db: Session = Depends(get_db)):
+    # Tenta achar pelo slug primeiro, depois pela question
+    market = (
+        db.query(Market).filter(Market.market_slug == body.market).first()
+        or db.query(Market).filter(Market.question.ilike(f"%{body.market[:40]}%")).first()
+    )
     if not market:
-        return {"error": "Mercado não encontrado"}
-    token = db.query(Token).filter(Token.market_id == market.id, Token.outcome == outcome.upper()).first()
-    if not token:
-        return {"error": f"Token {outcome} não encontrado"}
-    entry_price = round(token.price * 100, 2)
-    shares = round(amount / entry_price * 100, 4) if entry_price > 0 else 0
-    trade = Trade(market_slug=market_slug, question=market.question, outcome=outcome.upper(),
-                  amount=amount, entry_price=entry_price, shares=shares, notes=notes, status="open")
-    db.add(trade)
-    db.commit()
-    db.refresh(trade)
-    return {"message": "Aposta registrada!", "trade_id": trade.id, "entry_price": f"{entry_price}%",
-            "shares": shares, "created_at": str(trade.created_at)}
+        # Cria trade genérico mesmo sem mercado no banco (para GeoBot)
+        entry_price = round(float(body.entry_price), 2) if body.entry_price > 0 else 50.0
+        shares = round(body.amount / entry_price * 100, 4) if entry_price > 0 else 0
+        trade = Trade(
+            market_slug=body.market[:200], question=body.market[:500],
+            outcome=body.outcome.upper(), amount=body.amount,
+            entry_price=entry_price, shares=shares, notes=body.notes, status="open"
+        )
+        db.add(trade); db.commit(); db.refresh(trade)
+        return {"message": "Aposta registrada (mercado não encontrado no banco)!",
+                "trade_id": trade.id, "entry_price": f"{entry_price}%", "shares": shares}
+
+    outcome_upper = body.outcome.upper()
+    token = db.query(Token).filter(Token.market_id == market.id, Token.outcome == outcome_upper).first()
+    entry_price = round(token.price * 100, 2) if token else round(float(body.entry_price), 2)
+    if entry_price == 0:
+        entry_price = round(float(body.entry_price), 2) or 50.0
+    shares = round(body.amount / entry_price * 100, 4) if entry_price > 0 else 0
+    trade = Trade(
+        market_slug=market.market_slug, question=market.question,
+        outcome=outcome_upper, amount=body.amount,
+        entry_price=entry_price, shares=shares, notes=body.notes, status="open"
+    )
+    db.add(trade); db.commit(); db.refresh(trade)
+    return {"message": "Aposta registrada!", "trade_id": trade.id,
+            "entry_price": f"{entry_price}%", "shares": shares, "created_at": str(trade.created_at)}
 
 
 @app.get("/trades")
@@ -839,7 +869,7 @@ def get_inefficiencies(db: Session = Depends(get_db)):
             db.query(Snapshot).filter(Snapshot.token_id == token.token_id)
             .order_by(Snapshot.timestamp.desc()).limit(500).all()
         )
-        if len(snaps) < 20:
+        if len(snaps) < 8:
             continue
         prices = [s.price for s in snaps]
 
@@ -847,7 +877,7 @@ def get_inefficiencies(db: Session = Depends(get_db)):
         s1h = next((s for s in snaps if s.timestamp <= w1h), None)
         c5m = round((cp - s5m.price) * 100, 2) if s5m else 0
         c1h = round((cp - s1h.price) * 100, 2) if s1h else None
-        if abs(c5m) < 3:
+        if abs(c5m) < 1.5:
             continue
 
         all_changes = [abs(prices[i] - prices[i+1]) for i in range(min(len(prices)-1, 200))]
@@ -868,7 +898,7 @@ def get_inefficiencies(db: Session = Depends(get_db)):
         reversal_prob = round(reversals / max(total_sim, 1) * 100, 1)
 
         ineff_score = min(round((vol_ratio * 20) + (mispricing_score * 0.4) + (reversal_prob * 0.4), 1), 100)
-        if ineff_score < 25:
+        if ineff_score < 15:
             continue
 
         market = db.query(Market).filter(Market.id == token.market_id).first()

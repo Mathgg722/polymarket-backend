@@ -18,9 +18,10 @@ MIN_MOVE        = os.environ.get("MIN_MOVE", "0.3")
 COOLDOWN        = os.environ.get("COOLDOWN_MINUTES", "8")
 LIMIT_MARKETS   = os.environ.get("LIMIT_MARKETS", "300")
 
-SCAN_URL  = f"{API_BASE}/signals/scan?min_move={MIN_MOVE}&cooldown_minutes={COOLDOWN}&limit_markets={LIMIT_MARKETS}&repeat_boost=1.0"
-ALERT_URL = f"{API_BASE}/alerts/run?minutes=15&limit=10"
-STATUS_URL = f"{API_BASE}/debug/last_snapshot"
+SCAN_URL    = f"{API_BASE}/signals/scan?min_move={MIN_MOVE}&cooldown_minutes={COOLDOWN}&limit_markets={LIMIT_MARKETS}&repeat_boost=1.0"
+ALERT_URL   = f"{API_BASE}/alerts/run?minutes=15&limit=10"
+STATUS_URL  = f"{API_BASE}/debug/last_snapshot"
+REFRESH_URL = f"{API_BASE}/refresh"
 
 
 def hit(url: str, method: str = "GET") -> dict:
@@ -64,7 +65,17 @@ def main():
             else:
                 print(f"  ❌ Status check falhou: {status_res.get('error','?')}")
 
-        # 2) Scan de sinais
+        # 2) Atualiza preços (refresh) a cada 5 ciclos (~10min)
+        if cycle % 5 == 1:
+            ref = hit(REFRESH_URL, method="POST")
+            if ref["ok"]:
+                d = ref["data"]
+                updated = d.get("updated_tokens", d.get("updated", "?"))
+                print(f"  🔄 Refresh: {updated} tokens atualizados")
+            else:
+                print(f"  ⚠️  Refresh falhou: {ref.get('error', ref.get('status','?'))}")
+
+        # 3) Scan de sinais
         scan_res = hit(SCAN_URL)
         if scan_res["ok"]:
             d = scan_res["data"]
@@ -80,7 +91,7 @@ def main():
             print(f"  ❌ Scan falhou: {scan_res.get('error', scan_res.get('status','?'))}")
             consecutive_errors += 1
 
-        # 3) Alertas Telegram
+        # 4) Alertas Telegram
         if ENABLE_ALERTS == "1":
             alert_res = hit(ALERT_URL)
             if alert_res["ok"]:
