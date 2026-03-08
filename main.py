@@ -949,6 +949,7 @@ Responda SOMENTE com JSON válido (sem markdown):
     }
 
 
+def _fetch_news(query: str, max_results: int = 8) -> list:
     articles = []
     try:
         params = {"q": query, "language": "en", "sortBy": "publishedAt", "pageSize": max_results, "apiKey": NEWSAPI_KEY}
