@@ -741,9 +741,9 @@ def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(
     try:
         params = {"q": "prediction market OR polymarket OR geopolitics OR election OR war OR economy",
                   "language": "en", "sortBy": "publishedAt", "pageSize": 15, "apiKey": NEWSAPI_KEY}
-        r = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
-        if r.status_code == 200:
-            for a in r.json().get("articles", []):
+        resp1 = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
+        if resp1.status_code == 200:
+            for a in resp1.json().get("articles", []):
                 if a.get("title") and "[Removed]" not in a.get("title",""):
                     all_news.append({
                         "title": a["title"],
@@ -758,11 +758,11 @@ def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(
 
     # Reddit (PullPush — keyword polymarket)
     try:
-        r = requests.get("https://api.pullpush.io/reddit/search/submission/",
+        resp2 = requests.get("https://api.pullpush.io/reddit/search/submission/",
             params={"q": "polymarket OR prediction market", "size": 10, "sort": "desc", "sort_type": "created_utc"},
             headers={"User-Agent": "PolySignal/3.0"}, timeout=8)
-        if r.status_code == 200:
-            for item in r.json().get("data", []):
+        if resp2.status_code == 200:
+            for item in resp2.json().get("data", []):
                 title = (item.get("title") or "").strip()
                 if title:
                     all_news.append({
@@ -780,9 +780,9 @@ def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(
     try:
         params = {"query": "election OR war OR attack OR economy OR crisis", "mode": "artlist",
                   "maxrecords": 10, "format": "json", "timespan": "60min", "sort": "datedesc"}
-        r = requests.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params, timeout=8)
-        if r.status_code == 200:
-            for a in r.json().get("articles", []):
+        resp3 = requests.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params, timeout=8)
+        if resp3.status_code == 200:
+            for a in resp3.json().get("articles", []):
                 if a.get("title"):
                     all_news.append({
                         "title": a["title"], "description": "",
@@ -853,7 +853,7 @@ def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(
         # Fallback: analisa as top notícias sem mercado específico
         top_matches = [{"news": n, "market": None, "relevance": 50} for n in all_news[:limit]]
 
-    # 4) Claude IA — análise profunda de cada match
+    # 4) Análise — usa _analyze_with_claude (mesma função do /intelligence) + enriquece
     analyses = []
     for match in top_matches:
         news = match["news"]
@@ -867,74 +867,97 @@ def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(
             yes_price = round((yes_tok.price if yes_tok else 0.5) * 100, 1)
             no_price  = round((no_tok.price  if no_tok  else 0.5) * 100, 1)
 
-        market_q = market.question if market else "Mercados de prediction geral"
+        market_q   = market.question if market else "Prediction markets geral"
         market_slug = market.market_slug if market else ""
 
-        prompt = f"""Você é professor expert em prediction markets, análise geopolítica e finanças quantitativas.
+        # Monta artigos no formato que _analyze_with_claude espera
+        artigos = [{
+            "title": news["title"],
+            "description": news["description"][:300],
+            "source": news["source"],
+        }]
 
-NOTÍCIA:
-Fonte: {news['source']} ({news['fonte_tipo']})
-Título: {news['title']}
-Descrição: {news['description'][:400]}
+        # Chama a função Claude já existente e testada
+        base = _analyze_with_claude(market_q, artigos)
 
-MERCADO AFETADO: {market_q}
-Preço atual: YES={yes_price}% | NO={no_price}%
+        # Enriquece com campos educacionais via análise por palavras-chave
+        score_yes  = base.get("score_yes", yes_price)
+        edge       = round(score_yes - yes_price, 1)
+        sentimento = base.get("sentimento", "NEUTRO")
+        rec_raw    = base.get("recomendacao", "EVITE")
+        confianca  = round(base.get("confianca", 0.3) * 100)
+        resumo     = base.get("resumo", "")
 
-Faça uma análise PROFUNDA e EDUCACIONAL. Ensine o trader como pensar sobre isso.
+        # Detecta categoria pelo título da notícia
+        t = news["title"].lower()
+        if any(w in t for w in ["war","attack","strike","missile","troops","military","invasion","ceasefire"]):
+            categoria, prazo = "GEOPOLITICA", "IMEDIATO(1-2h)"
+        elif any(w in t for w in ["election","vote","president","minister","candidate","poll","primary"]):
+            categoria, prazo = "ELEICOES", "MEDIO(1-2 semanas)"
+        elif any(w in t for w in ["bitcoin","btc","crypto","ethereum","coinbase","blockchain"]):
+            categoria, prazo = "CRYPTO", "CURTO(1-3 dias)"
+        elif any(w in t for w in ["inflation","fed","rate","gdp","economy","recession","tariff"]):
+            categoria, prazo = "ECONOMIA", "CURTO(1-3 dias)"
+        elif any(w in t for w in ["nba","nfl","nhl","soccer","playoff","championship","cup","game","vs"]):
+            categoria, prazo = "ESPORTES", "IMEDIATO(1-2h)"
+        elif any(w in t for w in ["ai","tech","openai","google","microsoft","apple","startup"]):
+            categoria, prazo = "TECNOLOGIA", "CURTO(1-3 dias)"
+        else:
+            categoria, prazo = "OUTROS", "CURTO(1-3 dias)"
 
-Responda SOMENTE com JSON válido (sem markdown):
-{{
-  "titulo_analise": "<título curto e direto em português, max 60 chars>",
-  "impacto": "<ALTA|MEDIA|BAIXA>",
-  "direcao": "<BULLISH_YES|BEARISH_YES|NEUTRO>",
-  "preco_justo_yes": <número 0-100 — sua estimativa do preço correto>,
-  "edge": <diferença entre preço_justo e preço_atual — pode ser negativo>,
-  "acao_recomendada": "<COMPRAR YES|COMPRAR NO|AGUARDAR|EVITAR>",
-  "confianca": <0-100>,
-  "raciocinio": "<Explique em 2-3 frases claras POR QUE essa notícia afeta esse mercado>",
-  "logica_mercado": "<1 frase: qual a lógica que conecta a notícia ao preço>",
-  "o_que_fazer": "<instrução prática direta: ex: 'Comprar YES abaixo de 45% é edge positivo'>",
-  "risco_principal": "<principal risco que pode invalidar a tese>",
-  "prazo": "<IMEDIATO(1-2h)|CURTO(1-3 dias)|MEDIO(1-2 semanas)>",
-  "categoria": "<GEOPOLITICA|ECONOMIA|ELEICOES|CRYPTO|ESPORTES|TECNOLOGIA|OUTROS>",
-  "lição": "<1 frase educacional — o que aprender com essa situação para futuros trades>"
-}}"""
+        # Impacto pelo edge
+        impacto   = "ALTA" if abs(edge) >= 10 else "MEDIA" if abs(edge) >= 4 else "BAIXA"
+        direcao   = "BULLISH_YES" if edge > 3 else "BEARISH_YES" if edge < -3 else "NEUTRO"
 
-        try:
-            if not ANTHROPIC_KEY:
-                raise Exception("ANTHROPIC_KEY não configurada")
-            r = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 600,
-                      "messages": [{"role": "user", "content": prompt}]},
-                timeout=25
-            )
-            if r.status_code == 200:
-                text = r.json().get("content",[{}])[0].get("text","{}").strip()
-                text = text.replace("```json","").replace("```","").strip()
-                # Extrai só o JSON se vier texto antes/depois
-                start = text.find("{")
-                end = text.rfind("}") + 1
-                if start >= 0 and end > start:
-                    text = text[start:end]
-                ia = json.loads(text)
-                print(f"[analysis] ✅ Claude OK: {ia.get('titulo_analise','?')[:40]}")
-            else:
-                print(f"[analysis] Claude HTTP {r.status_code}: {r.text[:200]}")
-                raise Exception(f"HTTP {r.status_code}")
-        except Exception as e:
-            print(f"[analysis] Claude erro: {e}")
-            ia = {
-                "titulo_analise": news["title"][:60],
-                "impacto": "MEDIA", "direcao": "NEUTRO",
-                "preco_justo_yes": yes_price, "edge": 0,
-                "acao_recomendada": "AGUARDAR", "confianca": 30,
-                "raciocinio": "Análise IA indisponível momentaneamente.",
-                "logica_mercado": "—", "o_que_fazer": "Acompanhe o mercado.",
-                "risco_principal": "Dados insuficientes.", "prazo": "CURTO",
-                "categoria": "OUTROS", "lição": "Sempre espere mais dados antes de agir.",
-            }
+        # Ação recomendada
+        if rec_raw == "APOSTE YES" and confianca >= 50:
+            acao = "COMPRAR YES"
+        elif rec_raw == "APOSTE NO" and confianca >= 50:
+            acao = "COMPRAR NO"
+        elif confianca < 35:
+            acao = "AGUARDAR"
+        else:
+            acao = "EVITAR"
+
+        # Textos educacionais baseados na análise
+        if direcao == "BULLISH_YES":
+            raciocinio  = f"A notícia de '{news['source']}' sugere desenvolvimento positivo para '{market_q[:50]}'. Sentimento: {sentimento}. O mercado pode estar subprecificado."
+            logica      = f"Notícia positiva → demanda por YES cresce → preço sobe de {yes_price}% para ~{score_yes}%"
+            o_que_fazer = f"Considere comprar YES abaixo de {min(score_yes-2, 95)}%. Edge estimado: +{abs(edge)}%"
+            risco       = "Notícia pode ser exagerada ou já estar precificada pelos grandes traders."
+            licao       = "Notícias de alto impacto criam janelas de 5-15min antes do mercado reagir — velocidade é vantagem."
+        elif direcao == "BEARISH_YES":
+            raciocinio  = f"A notícia de '{news['source']}' sugere desenvolvimento negativo para '{market_q[:50]}'. Sentimento: {sentimento}. O YES pode estar sobreprecificado."
+            logica      = f"Notícia negativa → venda de YES → preço cai de {yes_price}% para ~{score_yes}%"
+            o_que_fazer = f"Considere comprar NO acima de {max(no_price-2, 5)}%. Edge estimado: +{abs(edge)}%"
+            risco       = "Mercado pode já ter precificado a notícia ou o evento pode não se confirmar."
+            licao       = "Mercados superreagem a notícias negativas. Sempre verifique se o preço já caiu antes de agir."
+        else:
+            raciocinio  = f"A notícia de '{news['source']}' tem relação com '{market_q[:50]}' mas o impacto no preço é incerto. Aguarde confirmação."
+            logica      = f"Correlação identificada mas sinal fraco — preço atual {yes_price}% pode estar correto."
+            o_que_fazer = f"Não agir agora. Monitorar se outras notícias confirmam a tendência."
+            risco       = "Sem sinal claro, entrar agora é especulação pura."
+            licao       = "Paciência é edge. Não agir em sinal fraco preserva capital para oportunidades reais."
+
+        titulo = f"{categoria}: {news['title'][:45]}…" if len(news['title']) > 45 else f"{categoria}: {news['title']}"
+
+        ia = {
+            "titulo_analise": titulo[:60],
+            "impacto": impacto,
+            "direcao": direcao,
+            "preco_justo_yes": score_yes,
+            "edge": edge,
+            "acao_recomendada": acao,
+            "confianca": confianca,
+            "raciocinio": raciocinio,
+            "logica_mercado": logica,
+            "o_que_fazer": o_que_fazer,
+            "risco_principal": risco,
+            "prazo": prazo,
+            "categoria": categoria,
+            "lição": licao,
+        }
+        print(f"[analysis] ✅ {categoria} | edge={edge} | {acao} | conf={confianca}%")
 
         analyses.append({
             # Notícia
