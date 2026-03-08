@@ -723,7 +723,232 @@ def get_reddit(limit: int = Query(60, ge=10, le=100)):
     }
 
 
-def _fetch_news(query: str, max_results: int = 8) -> list:
+# ─────────────────────────────────────────────────────────────
+# NEWS DEEP ANALYSIS — IA analisa impacto em mercados
+# ─────────────────────────────────────────────────────────────
+
+@app.get("/news/analysis")
+def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(get_db)):
+    """
+    Coleta notícias de TODAS as fontes (NewsAPI + Google News + Reddit + GDELT),
+    cruza com mercados ativos, e usa Claude IA para análise profunda de impacto.
+    Retorna análises educacionais com o que fazer em cada situação.
+    """
+    # 1) Coletar notícias de todas as fontes
+    all_news = []
+
+    # NewsAPI
+    try:
+        params = {"q": "prediction market OR polymarket OR geopolitics OR election OR war OR economy",
+                  "language": "en", "sortBy": "publishedAt", "pageSize": 15, "apiKey": NEWSAPI_KEY}
+        r = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
+        if r.status_code == 200:
+            for a in r.json().get("articles", []):
+                if a.get("title") and "[Removed]" not in a.get("title",""):
+                    all_news.append({
+                        "title": a["title"],
+                        "description": (a.get("description") or "")[:300],
+                        "source": a.get("source",{}).get("name","NewsAPI"),
+                        "url": a.get("url",""),
+                        "published_at": a.get("publishedAt",""),
+                        "fonte_tipo": "news",
+                    })
+    except Exception as e:
+        print(f"[analysis] NewsAPI: {e}")
+
+    # Reddit (PullPush — keyword polymarket)
+    try:
+        r = requests.get("https://api.pullpush.io/reddit/search/submission/",
+            params={"q": "polymarket OR prediction market", "size": 10, "sort": "desc", "sort_type": "created_utc"},
+            headers={"User-Agent": "PolySignal/3.0"}, timeout=8)
+        if r.status_code == 200:
+            for item in r.json().get("data", []):
+                title = (item.get("title") or "").strip()
+                if title:
+                    all_news.append({
+                        "title": title,
+                        "description": (item.get("selftext") or "")[:300],
+                        "source": f"r/{item.get('subreddit','reddit')}",
+                        "url": f"https://reddit.com{item.get('permalink','')}",
+                        "published_at": datetime.utcfromtimestamp(item.get("created_utc",0)).isoformat(),
+                        "fonte_tipo": "reddit",
+                    })
+    except Exception as e:
+        print(f"[analysis] Reddit: {e}")
+
+    # GDELT
+    try:
+        params = {"query": "election OR war OR attack OR economy OR crisis", "mode": "artlist",
+                  "maxrecords": 10, "format": "json", "timespan": "60min", "sort": "datedesc"}
+        r = requests.get("https://api.gdeltproject.org/api/v2/doc/doc", params=params, timeout=8)
+        if r.status_code == 200:
+            for a in r.json().get("articles", []):
+                if a.get("title"):
+                    all_news.append({
+                        "title": a["title"], "description": "",
+                        "source": a.get("domain","GDELT"), "url": a.get("url",""),
+                        "published_at": a.get("seendate",""), "fonte_tipo": "gdelt",
+                    })
+    except Exception as e:
+        print(f"[analysis] GDELT: {e}")
+
+    if not all_news:
+        return {"total": 0, "analyses": [], "summary": "Sem notícias disponíveis no momento."}
+
+    # 2) Buscar mercados ativos do banco
+    markets = db.query(Market).join(Token).filter(
+        Token.price > 0.05, Token.price < 0.95
+    ).distinct().limit(200).all()
+
+    if not markets:
+        return {"total": 0, "analyses": [], "summary": "Sem mercados ativos."}
+
+    STOP = {"will","the","this","that","with","from","have","been","they","their","which","what","does","about","after","before","into","more","some"}
+
+    # 3) Match notícia × mercado
+    top_matches = []
+    for news in all_news[:30]:
+        content = (news["title"] + " " + news["description"]).lower()
+        best_market = None
+        best_overlap = 0
+        for m in markets:
+            q = (m.question or "").lower()
+            words = [w for w in q.split() if len(w) > 4 and w not in STOP]
+            overlap = sum(1 for w in words if w in content)
+            relevance = overlap / max(len(words), 1)
+            if overlap >= 2 and relevance > best_overlap:
+                best_overlap = relevance
+                best_market = m
+        if best_market and best_overlap > 0:
+            top_matches.append({"news": news, "market": best_market, "relevance": round(best_overlap*100,1)})
+
+    top_matches.sort(key=lambda x: x["relevance"], reverse=True)
+    top_matches = top_matches[:limit]
+
+    if not top_matches:
+        # Fallback: analisa as top notícias sem mercado específico
+        top_matches = [{"news": n, "market": None, "relevance": 50} for n in all_news[:limit]]
+
+    # 4) Claude IA — análise profunda de cada match
+    analyses = []
+    for match in top_matches:
+        news = match["news"]
+        market = match["market"]
+
+        # Busca token YES do mercado
+        yes_price = no_price = 50
+        if market:
+            yes_tok = db.query(Token).filter(Token.market_id == market.id, Token.outcome == "YES").first()
+            no_tok  = db.query(Token).filter(Token.market_id == market.id, Token.outcome == "NO").first()
+            yes_price = round((yes_tok.price if yes_tok else 0.5) * 100, 1)
+            no_price  = round((no_tok.price  if no_tok  else 0.5) * 100, 1)
+
+        market_q = market.question if market else "Mercados de prediction geral"
+        market_slug = market.market_slug if market else ""
+
+        prompt = f"""Você é professor expert em prediction markets, análise geopolítica e finanças quantitativas.
+
+NOTÍCIA:
+Fonte: {news['source']} ({news['fonte_tipo']})
+Título: {news['title']}
+Descrição: {news['description'][:400]}
+
+MERCADO AFETADO: {market_q}
+Preço atual: YES={yes_price}% | NO={no_price}%
+
+Faça uma análise PROFUNDA e EDUCACIONAL. Ensine o trader como pensar sobre isso.
+
+Responda SOMENTE com JSON válido (sem markdown):
+{{
+  "titulo_analise": "<título curto e direto em português, max 60 chars>",
+  "impacto": "<ALTA|MEDIA|BAIXA>",
+  "direcao": "<BULLISH_YES|BEARISH_YES|NEUTRO>",
+  "preco_justo_yes": <número 0-100 — sua estimativa do preço correto>,
+  "edge": <diferença entre preço_justo e preço_atual — pode ser negativo>,
+  "acao_recomendada": "<COMPRAR YES|COMPRAR NO|AGUARDAR|EVITAR>",
+  "confianca": <0-100>,
+  "raciocinio": "<Explique em 2-3 frases claras POR QUE essa notícia afeta esse mercado>",
+  "logica_mercado": "<1 frase: qual a lógica que conecta a notícia ao preço>",
+  "o_que_fazer": "<instrução prática direta: ex: 'Comprar YES abaixo de 45% é edge positivo'>",
+  "risco_principal": "<principal risco que pode invalidar a tese>",
+  "prazo": "<IMEDIATO(1-2h)|CURTO(1-3 dias)|MEDIO(1-2 semanas)>",
+  "categoria": "<GEOPOLITICA|ECONOMIA|ELEICOES|CRYPTO|ESPORTES|TECNOLOGIA|OUTROS>",
+  "lição": "<1 frase educacional — o que aprender com essa situação para futuros trades>"
+}}"""
+
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 600,
+                      "messages": [{"role": "user", "content": prompt}]},
+                timeout=20
+            )
+            if r.status_code == 200:
+                text = r.json().get("content",[{}])[0].get("text","{}").strip()
+                text = text.replace("```json","").replace("```","").strip()
+                ia = json.loads(text)
+            else:
+                raise Exception(f"HTTP {r.status_code}")
+        except Exception as e:
+            print(f"[analysis] Claude erro: {e}")
+            ia = {
+                "titulo_analise": news["title"][:60],
+                "impacto": "MEDIA", "direcao": "NEUTRO",
+                "preco_justo_yes": yes_price, "edge": 0,
+                "acao_recomendada": "AGUARDAR", "confianca": 30,
+                "raciocinio": "Análise IA indisponível momentaneamente.",
+                "logica_mercado": "—", "o_que_fazer": "Acompanhe o mercado.",
+                "risco_principal": "Dados insuficientes.", "prazo": "CURTO",
+                "categoria": "OUTROS", "lição": "Sempre espere mais dados antes de agir.",
+            }
+
+        analyses.append({
+            # Notícia
+            "news_title": news["title"],
+            "news_source": news["source"],
+            "news_url": news["url"],
+            "news_tipo": news["fonte_tipo"],
+            "news_published": news.get("published_at",""),
+            # Mercado
+            "market_question": market_q,
+            "market_slug": market_slug,
+            "market_yes_price": yes_price,
+            "market_no_price": no_price,
+            "polymarket_url": f"https://polymarket.com/event/{market_slug}" if market_slug else "",
+            "relevance_score": match["relevance"],
+            # Análise IA
+            **ia,
+        })
+        time.sleep(0.3)  # rate limit
+
+    # 5) Resumo geral
+    bullish = sum(1 for a in analyses if a.get("direcao") == "BULLISH_YES")
+    bearish = sum(1 for a in analyses if a.get("direcao") == "BEARISH_YES")
+    high_impact = sum(1 for a in analyses if a.get("impacto") == "ALTA")
+    buy_signals = [a for a in analyses if a.get("acao_recomendada") in ("COMPRAR YES","COMPRAR NO") and a.get("confianca",0) >= 60]
+
+    return {
+        "total": len(analyses),
+        "fontes_usadas": len(all_news),
+        "mercados_analisados": len(top_matches),
+        "resumo": {
+            "bullish": bullish,
+            "bearish": bearish,
+            "neutro": len(analyses) - bullish - bearish,
+            "alto_impacto": high_impact,
+            "oportunidades_confirmadas": len(buy_signals),
+            "sentimento_geral": "BULLISH" if bullish > bearish else "BEARISH" if bearish > bullish else "NEUTRO",
+        },
+        "melhores_oportunidades": sorted(
+            [a for a in analyses if abs(a.get("edge",0)) >= 5],
+            key=lambda x: abs(x.get("edge",0)), reverse=True
+        )[:3],
+        "analyses": analyses,
+        "gerado_em": datetime.utcnow().isoformat(),
+    }
+
+
     articles = []
     try:
         params = {"q": query, "language": "en", "sortBy": "publishedAt", "pageSize": max_results, "apiKey": NEWSAPI_KEY}
