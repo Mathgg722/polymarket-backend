@@ -2296,3 +2296,644 @@ def get_intelligence_v3(slug: str, db: Session = Depends(get_db)):
         "atualizado_em": datetime.utcnow().isoformat(),
         "nota": "v3 = sem IA, determinístico, mais rápido",
     }
+# ═══════════════════════════════════════════════════════════════════════════
+# POLYSIGNAL GAME THEORY ENGINE v4 — Prof. Jiang Xueqin (Predictive History)
+# Fontes: SinjuPost transcrições Jan 5 + Jan 26 2026, WION, Sea&Job, Wikipedia
+# UNIVERSAL: Geopolítica + Economia + Esportes + Eleições + Commodities
+# Formula MEC: Sucesso = Massa × Energia × Coordenação
+# ═══════════════════════════════════════════════════════════════════════════
+import xml.etree.ElementTree as ET
+
+JIANG_METHODOLOGY = {
+    "citacao": "I use game theory and I basically see geopolitics as a game played by different players who are trying to maximize their own self-interest.",
+    "pilares": ["Incentivos estruturais (não ideologia)", "Analogia histórica verificada", "Ciclos civilizacionais Spengler+Turchin", "Análise financeira estrutural"],
+    "formula_mec": "Sucesso = Massa × Energia × Coordenação",
+    "lei_mec": "Ator com menos Massa mas superior Energia×Coordenação SEMPRE vence o ator com mais Massa mas baixa Coordenação",
+    "series_yt": [
+        {"ep":1,"titulo":"The Dating Game","data":"Jan 6 2026"},
+        {"ep":2,"titulo":"The Prisoner's Dilemma","data":"Jan 8 2026"},
+        {"ep":3,"titulo":"The Business Game","data":"Jan 13 2026"},
+        {"ep":4,"titulo":"The Immigration Trap","data":"Jan 15 2026"},
+        {"ep":5,"titulo":"The World Game","data":"Jan 20 2026"},
+        {"ep":6,"titulo":"The Sports Game","data":"Jan 22 2026"},
+        {"ep":7,"titulo":"America's Game","data":"Jan 27 2026"},
+        {"ep":"viral","titulo":"The Iran Trap","data":"Mai 2024"},
+        {"ep":"diesen1","titulo":"Predictions 2026","data":"Jan 5 2026"},
+        {"ep":"diesen2","titulo":"Great Power Wars / New World Order","data":"Jan 26 2026"},
+    ],
+}
+
+JIANG_PREDICTIONS = [
+    # ─── GEOPOLÍTICA ──────────────────────────────────────────
+    {
+        "id":"iran_us_loses","tema":"EUA perde guerra do Irã","categoria":"GEOPOLITICA","subcategoria":"Guerra","icone":"⚔️",
+        "keywords":["iran","war","us","military","troops","invasion","iranian","tehran","operation","ground","nuclear","conflict","attack","strike","irgc","bomb"],
+        "status":"EM_ANDAMENTO","confirmado":True,
+        "timeline":[{"d":"2024-05","p":78,"e":"The Iran Trap — previsão original"},{"d":"2025-06","p":82,"e":"Newsweek: escalada confirmada"},{"d":"2026-03","p":85,"e":"Conflito ativo — viral Mar 2026"}],
+        "mec":{"iran":{"m":45,"e":95,"c":88,"s":3750,"cor":"#00d26a","n":"20 anos prep + IRGC coordenado"},"eua":{"m":90,"e":40,"c":35,"s":1260,"cor":"#ff4d4d","n":"Generais são clerks, não fighters"},"israel":{"m":65,"e":80,"c":70,"s":3640,"cor":"#ffa500","n":"Agenda própria: quer EUA pagar o custo"}},
+        "jogadores":[
+            {"n":"Irã (IRGC)","t":"DEFENSOR_ASSIMETRICO","incentivo":"20 anos preparando. Guerra unifica população. Regime sobrevive via deterrência.","vantagem":"Terreno montanhoso, drones $50k vs interceptores $1M+"},
+            {"n":"Trump","t":"LIDER_MEDIA_DRIVEN","incentivo":"Guerra = ferramenta política. Distrai doméstico. Potencial 3º mandato via emergência.","risco":"Armadilha igual Athens na Sicília"},
+            {"n":"Israel (Netanyahu)","t":"MANIPULADOR","incentivo":"Greater Israel. EUA+Irã se enfraquecem, Israel preenche vácuo."},
+        ],
+        "estrutura":"STRATEGIC_TRAP",
+        "mecanismo":"Escalation Dominance: cada provocação iraniana FORÇA resposta americana. Inevitável.",
+        "analogia":"Expedição Siciliana 415 BC: Atenas invade território defensável. Logística colapsa. Derrota total.",
+        "prob_jiang":78,"prob_mkt":45,"edge":33,"direcao":"YES","confianca":0.85,"prazo":"2026-2027",
+        "gatilhos_sim":["Tropas terrestres comprometidas","Houthis fecham Hormuz","Irã atinge bases sauditas"],
+        "gatilhos_nao":["Negociação nuclear via China","Colapso interno do regime"],
+        "citacao":"He based his analysis on the Sicilian Expedition from 415–413 BC... The Athenian forces faced terrible defeat. — WION News Mar 2026",
+    },
+    {
+        "id":"iran_ceasefire","tema":"Cessar-fogo EUA-Irã (saída honrosa Trump)","categoria":"GEOPOLITICA","subcategoria":"Diplomacia","icone":"🕊️",
+        "keywords":["iran","ceasefire","peace","deal","withdraw","negotiations","nuclear","agreement","talks","diplomacy"],
+        "status":"ATIVA","confirmado":False,
+        "timeline":[{"d":"2025-06","p":55,"e":"Newsweek: Trump Truth Social sobre cessar-fogo"},{"d":"2026-03","p":62,"e":"Sea&Job: ceasefire brokerado Iran-Israel"}],
+        "mec":{"trump_saida":{"m":70,"e":65,"c":55,"s":2502,"cor":"#ffa500","n":"Ameaça nuclear = leverage para retirada honrosa"},"iran_consolida":{"m":45,"e":75,"c":82,"s":2767,"cor":"#00d26a","n":"Prefere consolidar ganhos"}},
+        "jogadores":[
+            {"n":"Trump","t":"NEGOCIADOR_NUCLEAR","incentivo":"Declarar vitória + retirar antes de midterms.","estrategia":"'Oblitero Teerã' = leverage para saída que preserva face"},
+            {"n":"Irã","t":"VENCEDOR_CANSADO","incentivo":"Consolidar ganhos. Quer reconhecimento regional."},
+        ],
+        "estrutura":"CHICKEN_GAME_SAIDA_NEGOCIADA",
+        "mecanismo":"Ambos têm incentivos para pausa. Trump precisa de saída sem humilhação. Irã quer reconhecimento.",
+        "analogia":"Armistício Coreia 1953: linha congelada, nenhum lado satisfeito, todos seguem em frente",
+        "prob_jiang":62,"prob_mkt":55,"edge":7,"direcao":"YES","confianca":0.68,"prazo":"6-18 meses",
+        "gatilhos_sim":["Midterms se aproximam","Casualties acima do threshold","Economia deteriora"],
+        "gatilhos_nao":["Israel sabota negociações","Ataque iraniano em solo americano"],
+        "citacao":"Jiang ceasefire: Trump brokering a ceasefire between Iran and Israel. — Sea & Job Mar 2026",
+    },
+    {
+        "id":"ukraine_frozen","tema":"Congelamento Rússia-Ucrânia","categoria":"GEOPOLITICA","subcategoria":"Guerra","icone":"❄️",
+        "keywords":["russia","ukraine","ceasefire","peace","war","zelensky","putin","frontline","territory","nato","kyiv","donbas"],
+        "status":"ATIVA","confirmado":False,
+        "timeline":[{"d":"2026-01","p":72,"e":"Jiang Jan 5: 'Russia-Ukraine basically settled'"},{"d":"2026-03","p":74,"e":"Negociações em andamento"}],
+        "mec":{"russia":{"m":75,"e":60,"c":70,"s":3150,"cor":"#cc0000","n":"Ganhos consolidados, posição defensável"},"ucrania":{"m":40,"e":88,"c":65,"s":2288,"cor":"#0057b7","n":"Alta motivação, exaustão de recursos"},"trump":{"m":85,"e":72,"c":55,"s":3366,"cor":"#ff7700","n":"Urgência de midterms"}},
+        "jogadores":[
+            {"n":"Putin","t":"CONSOLIDADOR","incentivo":"Congelar linha como vitória declarada."},
+            {"n":"Zelensky","t":"SOBREVIVENTE_MEDIA","incentivo":"Não pode ceder oficialmente. Aceita congelamento de facto."},
+            {"n":"Trump","t":"MEDIADOR_TRANSACIONAL","incentivo":"Vitória política rápida. Liberar recursos para Irã/China."},
+        ],
+        "estrutura":"BARGANHA_ASSIMETRICA_MEDIADOR",
+        "mecanismo":"Todos têm incentivo para pausa: Putin consolida, Trump ganha vitória, Europa rearma.",
+        "analogia":"Armistício Coreia 1953",
+        "prob_jiang":72,"prob_mkt":58,"edge":14,"direcao":"YES","confianca":0.78,"prazo":"3-12 meses",
+        "gatilhos_sim":["Trump pressiona Zelensky","Europa corta suporte sem acordo"],
+        "gatilhos_nao":["Ofensiva russa rompe frente","Zelensky traído pelos militares"],
+        "citacao":"Russia, the war in Ukraine, it's basically pretty settled, stabilized. — Jiang, Glenn Diesen Jan 5 2026",
+    },
+    {
+        "id":"trump_china_deal","tema":"Grand Bargain Trump-Xi (Nixon-China 2026)","categoria":"GEOPOLITICA","subcategoria":"Diplomacia","icone":"🤝",
+        "keywords":["trump","china","xi","trade","deal","tariff","grand bargain","dollar","april","beijing","negotiation","trade war","decoupling"],
+        "status":"ATIVA","confirmado":False,
+        "timeline":[{"d":"2026-01","p":60,"e":"Jiang Jan 5: Venezuela criou leverage para visita China em Abril"},{"d":"2026-02","p":58,"e":"Tensões comerciais continuam"}],
+        "mec":{"trump":{"m":85,"e":82,"c":60,"s":4182,"cor":"#ff4d4d","n":"Nixon ambition + Venezuela leverage + urgência midterms"},"xi":{"m":82,"e":65,"c":90,"s":4797,"cor":"#cc0000","n":"Jogo longo, quer ser igual, preservar autonomia"}},
+        "jogadores":[
+            {"n":"Trump","t":"NEGOCIADOR_NIXON","incentivo":"Replicar Nixon-China 1972. Forçar China a continuar no dólar. Venezuela = trunfo."},
+            {"n":"Xi","t":"ESTRATEGISTA_DECADAL","incentivo":"Evitar decoupling. Parecer igual, não subordinado.","limite":"Humilhação pública → China acelera dedolarização"},
+        ],
+        "estrutura":"NEGOCIACAO_ASSIMETRIA_TEMPORAL",
+        "mecanismo":"Trump tem urgência (midterms). Xi tem paciência. Mas ambos precisam: Trump para dólar, Xi para exportações.",
+        "analogia":"Nixon-China 1972: inimigos ideológicos fazem acordo transacional",
+        "prob_jiang":60,"prob_mkt":35,"edge":25,"direcao":"YES","confianca":0.68,"prazo":"Abril-Junho 2026",
+        "gatilhos_sim":["Crise financeira americana","Iran war cria urgência"],
+        "gatilhos_nao":["Taiwan incident","Escândalo Trump paralisa presidência"],
+        "citacao":"Venezuela was designed to strangle China's resource access. Leverage for the April visit. — Jiang Jan 5 2026",
+    },
+    {
+        "id":"europe_rearmament","tema":"Remilitarização Europa — inevitável","categoria":"GEOPOLITICA","subcategoria":"Defesa","icone":"🛡️",
+        "keywords":["europe","nato","defense","rearmament","military","spending","army","autonomous","macron","germany","troops","eu army"],
+        "status":"EM_ANDAMENTO","confirmado":True,
+        "timeline":[{"d":"2026-01","p":84,"e":"Jiang: 'irrational but inevitable remilitarization'"},{"d":"2026-02","p":86,"e":"Alemanha aprova Zeitenwende histórico"},{"d":"2026-03","p":88,"e":"Múltiplos países anunciam aumento de defesa"}],
+        "mec":{"trump_catalisador":{"m":85,"e":72,"c":58,"s":3549,"cor":"#ff4d4d","n":"Ameaça de abandono FORÇA coordenação europeia"},"europa":{"m":70,"e":62,"c":50,"s":2170,"cor":"#003399","n":"Processo doloroso mas estruturalmente inevitável"}},
+        "jogadores":[
+            {"n":"Trump","t":"CATALISADOR_INVOLUNTARIO","incentivo":"Forçar Europa a pagar defesa.","paradoxo":"Ao ameaçar abandonar OTAN, cria a defesa europeia independente"},
+            {"n":"Europa (FR+DE+PL)","t":"CRIANCA_FORCADA_A_CRESCER","incentivo":"Sobrevivência ante ameaça russa + abandono americano."},
+        ],
+        "estrutura":"PROVISAO_BEM_COLETIVO_FORCADA",
+        "mecanismo":"Quando protetor ameaça sair, custo de autodefesa se torna aceitável.",
+        "analogia":"Criação OTAN 1949: ameaça soviética forçou cooperação defensiva involuntária",
+        "prob_jiang":84,"prob_mkt":72,"edge":12,"direcao":"YES","confianca":0.87,"prazo":"1-3 anos (em andamento)",
+        "gatilhos_sim":["Incidente russo nas fronteiras OTAN","Trump retira tropas da Alemanha"],
+        "gatilhos_nao":["Colapso russo reduz urgência","Crise econômica europeia paralisa gastos"],
+        "citacao":"The irrational remilitarization of Europe. — Jiang, Glenn Diesen Jan 5 2026",
+    },
+    {
+        "id":"us_instability","tema":"Instabilidade doméstica EUA — Trump como César","categoria":"GEOPOLITICA","subcategoria":"Política Doméstica","icone":"🔥",
+        "keywords":["us","america","civil war","domestic","instability","crisis","trump","polarization","ice","protests","insurrection","emergency"],
+        "status":"EM_ANDAMENTO","confirmado":True,
+        "timeline":[{"d":"2026-01","p":35,"e":"Jiang Jan 5: AI bubble → guerra civil"},{"d":"2026-01","p":38,"e":"Jiang Jan 26: ICE como Gestapo, incita guerra civil"},{"d":"2026-03","p":42,"e":"Protestos Minneapolis, Trump 3º mandato declarado"}],
+        "mec":{"status_quo":{"m":80,"e":38,"c":32,"s":973,"cor":"#888888","n":"Sistema com baixa energia e coordenação declinante"},"maga":{"m":55,"e":88,"c":72,"s":3484,"cor":"#ff4d4d","n":"Energia narrativa máxima + base coordenada"}},
+        "jogadores":[
+            {"n":"Trump/MAGA","t":"CESAR_DO_SECULO_21","incentivo":"Destruir establishment e reconstruir sob seu controle. ICE = nova Gestapo.","citacao_jiang":"Trump understands he needs to incite civil war, declare insurrection, override elections."},
+            {"n":"Establishment","t":"ELITE_DESCONECTADA","incentivo":"Preservar privilégios. Incapaz de empatia.","jiang":"Meritocracy lie: Yale teaches you to conform, not think critically."},
+        ],
+        "estrutura":"CRISE_SISTEMICA_TURCHIN",
+        "mecanismo":"Elite overproduction + fiscal strain + fragmentação = Turchin collapse conditions. Richard Rorty previu em 1998.",
+        "analogia":"Roma século III DC: crise simultânea militar + econômica + política",
+        "prob_jiang":40,"prob_mkt":18,"edge":22,"direcao":"YES","confianca":0.58,"prazo":"2026-2028",
+        "gatilhos_sim":["AI bubble colapsa + recessão","Trump declara emergência nacional"],
+        "gatilhos_nao":["Acordo rápido no Irã","Unidade nacional ante ameaça externa"],
+        "citacao":"ICE is meant to be a Gestapo. Trump needs to incite civil war so he can declare insurrection, override elections. — Jiang Jan 26 2026",
+    },
+    {
+        "id":"north_korea_provoke","tema":"Provocação Norte-Coreana — Extorsão Iterada","categoria":"GEOPOLITICA","subcategoria":"Nuclear","icone":"☢️",
+        "keywords":["north korea","kim","missile","nuclear test","dprk","icbm","pyongyang","provocation","south korea","nuke"],
+        "status":"ATIVA","confirmado":False,
+        "timeline":[{"d":"2026-01","p":65,"e":"Framework Jiang — padrão cíclico desde 2006"},{"d":"2026-02","p":65,"e":"EUA focado no Irã = oportunidade para Kim"}],
+        "mec":{"kim":{"m":30,"e":88,"c":92,"s":2429,"cor":"#cc0000","n":"Pequeno mas altíssima coordenação e energia de sobrevivência"},"eua_coreia":{"m":90,"e":42,"c":50,"s":1890,"cor":"#888888","n":"Não quer guerra cara pela DPRK"}},
+        "jogadores":[
+            {"n":"Kim Jong-un","t":"EXTORSIONISTA_ITERADO","incentivo":"Sobrevivência via deterrência. Provoca para obter concessões.","padrao":"Teste → Sanções → Negociação → Congelamento → Teste (ciclo 12-18 meses)"},
+            {"n":"China","t":"PATRONO_CUMPLICE","incentivo":"Buffer contra EUA. Nunca desnucleariza porque remove o buffer."},
+        ],
+        "estrutura":"EXTORSAO_ITERADA_PATRONO_CUMPLICE",
+        "mecanismo":"Ninguém paga o custo de mudar o sistema. Padrão se reproduz indefinidamente.",
+        "analogia":"Padrão verificável: 7 testes nucleares desde 2006, ciclos sanção-negociação repetidos",
+        "prob_jiang":65,"prob_mkt":50,"edge":15,"direcao":"YES","confianca":0.70,"prazo":"12-18 meses",
+        "gatilhos_sim":["EUA focado no Irã = oportunidade","Coreia do Sul eleições"],
+        "gatilhos_nao":["Trump-Kim bilateral (já tentado)","Colapso interno DPRK"],
+        "citacao":"Framework Jiang — extorsão iterada como estrutura de jogo estável",
+    },
+    # ─── ECONOMIA ─────────────────────────────────────────────
+    {
+        "id":"ai_bubble","tema":"Bolha de IA colapsa → guerra civil","categoria":"ECONOMIA","subcategoria":"Tecnologia","icone":"💥",
+        "keywords":["ai","artificial intelligence","bubble","tech","crash","openai","nvidia","data center","investment","stock","chatgpt","llm","valuations","deepseek"],
+        "status":"ATIVA","confirmado":False,
+        "timeline":[{"d":"2026-01","p":58,"e":"Jiang Jan 5: unclear how data centers make money"},{"d":"2026-02","p":62,"e":"DeepSeek choca mercado, Nvidia -$600B em 1 dia"}],
+        "mec":{"narrativa":{"m":92,"e":85,"c":28,"s":2189,"cor":"#888888","n":"Corrida armamentos sem coordenação — todos investem, ninguém pode parar"},"realidade_roi":{"m":40,"e":100,"c":100,"s":4000,"cor":"#00d26a","n":"Quando ROI bate na narrativa, realidade sempre vence"}},
+        "jogadores":[
+            {"n":"Big Tech","t":"DILEMA_PRISIONEIRO","incentivo":"Ninguém pode sair primeiro. Quem sair perde posição competitiva.","citacao_jiang":"Data centers cost billions. Unclear how they make money. Most use AI to cheat in school."},
+            {"n":"Mercado de capitais","t":"AMPLIFICADOR_FOMO","incentivo":"FOMO. Um earnings ruim → panic selling em cascata."},
+        ],
+        "estrutura":"CORRIDA_ARMAMENTOS_COLAPSO_INEVITAVEL",
+        "mecanismo":"Bolha sustenta-se pela narrativa. Quando ROI decepcionante vira público → colapso sistêmico.",
+        "conexao":"Venezuela foi para tirar prata (melhor condutor elétrico) da China. AI precisa de prata.",
+        "analogia":"Dot-com 2000: tecnologia real, valorização desconectada de fundamentos",
+        "prob_jiang":60,"prob_mkt":32,"edge":28,"direcao":"YES","confianca":0.65,"prazo":"2026-2027",
+        "gatilhos_sim":["Earnings big tech mostra ROI negativo","DeepSeek continua destruindo valor","Recessão reduz capital especulativo"],
+        "gatilhos_nao":["IA gera produtividade real mensurável","Guerra cria demanda militar sustentável"],
+        "citacao":"This bubble can sustain past 2026, but when it collapses, entire society collapses. You're looking at civil war. — Jiang Jan 5 2026",
+    },
+    {
+        "id":"silver_rally","tema":"Rally Prata/Ouro — Demanda IA+EV supera oferta","categoria":"ECONOMIA","subcategoria":"Commodities","icone":"🥈",
+        "keywords":["silver","gold","commodity","price","rally","precious metal","xag","xau","metals","conductor","supply","mining","ev","electric"],
+        "status":"EM_ANDAMENTO","confirmado":True,
+        "timeline":[{"d":"2026-01","p":76,"e":"Jiang: demand exceeds supply for 5 years"},{"d":"2026-02","p":78,"e":"Ouro atinge máximos históricos"}],
+        "mec":{"demanda":{"m":82,"e":92,"c":88,"s":6637,"cor":"#00d26a","n":"IA + EVs + Guerra = demanda convergente imparável"},"oferta":{"m":50,"e":60,"c":42,"s":1260,"cor":"#ff4d4d","n":"Mineração lenta, impossível escalar rapidamente"}},
+        "jogadores":[
+            {"n":"Demanda (IA+EVs+Guerra)","t":"DRIVER_ESTRUTURAL","incentivo":"Prata = melhor condutor elétrico. Sem segundo lugar. IA, EVs, chips militares.","citacao_jiang":"Silver is the best metal conductor in the world. There's no second. Demand exceeds supply for 5 years."},
+            {"n":"EUA vs China (guerra pela prata)","t":"COMPETIDORES_RECURSOS","incentivo":"América Latina = 40% da prata mundial. Controlar = controlar futuro de IA e EVs."},
+        ],
+        "estrutura":"ESCASSEZ_ESTRUTURAL_DEMANDA_EXPONENCIAL",
+        "mecanismo":"Demanda cresce exponencialmente. Oferta fisicamente limitada. Geopolítica intensifica escassez.",
+        "analogia":"Oil shock 1973: demanda geopolítica encontra escassez real → preço explode",
+        "prob_jiang":78,"prob_mkt":60,"edge":18,"direcao":"YES","confianca":0.80,"prazo":"1-3 anos",
+        "gatilhos_sim":["Iran fecha Hormuz → ouro explode","IA capex continua crescendo","China perde acesso à AL"],
+        "gatilhos_nao":["Recessão global reduz demanda","Nova tecnologia substitui prata"],
+        "citacao":"Silver is the best metal conductor in the world. There's no second. Demand exceeds supply for 5 years. — Jiang Jan 5 2026",
+    },
+    {
+        "id":"dollar_decline","tema":"Declínio lento do Dólar (NO tem edge)","categoria":"ECONOMIA","subcategoria":"Moeda","icone":"💵",
+        "keywords":["dollar","reserve currency","brics","dedollarization","yuan","gold","usd","fed","debt","petrodollar","sanctions","swift"],
+        "status":"ATIVA","confirmado":False,
+        "timeline":[{"d":"2026-01","p":15,"e":"Jiang: declínio lento como Libra Esterlina, não colapso"},{"d":"2026-02","p":15,"e":"Trump Grand Bargain reforçando dependência do USD"}],
+        "mec":{"dolar_inercia":{"m":95,"e":55,"c":78,"s":4069,"cor":"#00d26a","n":"Inércia gigantesca — problema de coordenação de saída"},"brics":{"m":65,"e":72,"c":30,"s":1404,"cor":"#ff4d4d","n":"Baixa coordenação — ninguém quer ser o primeiro a sair"}},
+        "jogadores":[
+            {"n":"EUA/Fed","t":"HEGEMON_MONETARIO","incentivo":"Preservar exorbitant privilege. Venezuela + AL = forçar mundo a usar dólares."},
+            {"n":"BRICS+/China","t":"COALIZAÇÃO_DESCOORDENADA","incentivo":"Reduzir vulnerabilidade a sanções.","limitacao":"Problema do prisioneiro: quem sai primeiro paga custo mais alto"},
+        ],
+        "estrutura":"PROBLEMA_COORDENACAO_LOCK_IN",
+        "mecanismo":"Ninguém quer ser o primeiro a sair do dólar. Declínio gradual de 30 anos, não colapso em meses.",
+        "analogia":"Declínio da Libra Esterlina 1945-1975: 30 anos de queda gradual",
+        "prob_jiang":15,"prob_mkt":28,"edge":13,"direcao":"NO",
+        "nota_direcao":"Edge está em NO — mercado superestima velocidade da dedolarização",
+        "confianca":0.82,"prazo":"5-15 anos",
+        "gatilhos_sim":["EUA default real","Alternativa técnica viável ao SWIFT"],
+        "gatilhos_nao":["Grand Bargain Trump-Xi fortalece dólar","BRICS+ fracassa em coordenar"],
+        "citacao":"America created the petrodollar [1971]. Trump wants to repeat for the 21st century. Decline is like the British Pound: 30 years, not overnight. — Jiang Jan 5 2026",
+    },
+    {
+        "id":"venezuela_chess","tema":"Venezuela = xadrez contra China (não petróleo)","categoria":"ECONOMIA","subcategoria":"Recursos","icone":"♟️",
+        "keywords":["venezuela","maduro","latin america","oil","silver","china","us","caribbean","resources","hemisphere","colômbia","mexico"],
+        "status":"EM_ANDAMENTO","confirmado":True,
+        "timeline":[{"d":"2026-01","p":70,"e":"Jiang Jan 5: Venezuela foi para cortar acesso da China à prata"},{"d":"2026-02","p":72,"e":"EUA expande pressão para Colômbia e México"}],
+        "mec":{"eua":{"m":85,"e":75,"c":65,"s":4153,"cor":"#ff4d4d","n":"Primeiro mover, leverage sobre hemisfério"},"china":{"m":80,"e":70,"c":88,"s":4928,"cor":"#cc0000","n":"Alta coordenação mas reagindo à iniciativa americana"}},
+        "jogadores":[
+            {"n":"Trump/EUA","t":"HEGEMON_HEMISFERIO","incentivo_real":"NÃO é o petróleo. É TIRAR da China o acesso à prata e recursos para IA e EVs.","citacao_jiang":"What America did was to spite China... to cut China's access to resources."},
+            {"n":"China","t":"DEPENDENTE_ESTRATEGICO","incentivo":"América Latina = 40% da prata mundial. Se EUA controla → China depende de EUA para IA/EVs."},
+        ],
+        "estrutura":"CONTROLE_RECURSOS_ESTRATEGICOS",
+        "mecanismo":"Micro-militarismo americano (Venezuela, México, Colômbia) = demonstração de controle do hemisfério para leverage no Grand Bargain.",
+        "analogia":"Corrida imperial século XIX: potências controlam recursos coloniais para garantir vantagem industrial",
+        "prob_jiang":72,"prob_mkt":45,"edge":27,"direcao":"YES","confianca":0.73,"prazo":"2026",
+        "gatilhos_sim":["Acordo formal de extração mineral EUA-Venezuela","China perde contratos na AL"],
+        "gatilhos_nao":["Maduro reverte acordos","China contorna via outros parceiros"],
+        "citacao":"What America did was to spite China... to cut China's access to resources. — Jiang Jan 5 2026",
+    },
+    # ─── ESPORTES (Game Theory #6) ─────────────────────────────
+    {
+        "id":"sports_mec","tema":"Campeonatos Esportivos — MEC determina vencedor","categoria":"ESPORTES","subcategoria":"Competição","icone":"🏆",
+        "keywords":["championship","nba","nfl","soccer","world cup","playoffs","finals","team","tournament","winner","title","league","cup"],
+        "status":"UNIVERSAL","confirmado":False,
+        "timeline":[{"d":"2026-01","p":65,"e":"Game Theory #6: The Sports Game — MEC aplicado a esportes"}],
+        "mec":{
+            "time_coordenado":{"m":60,"e":85,"c":95,"s":4845,"cor":"#00d26a","n":"Menor elenco, coordenação superior SEMPRE vence"},
+            "time_talentoso":{"m":90,"e":70,"c":45,"s":2835,"cor":"#ff4d4d","n":"Talento sem sistema = derrota para times coordenados"},
+        },
+        "jogadores":[
+            {"n":"Time com alta Coordenação","t":"COORDENADO_MENOR_MASSA","incentivo":"Química coletiva multiplica talento individual.","exemplos":["Golden State Warriors 2015","Leicester City 2016","Grécia Euro 2004"]},
+            {"n":"Time Talentoso Descoordinado","t":"TALENTOSO_SEM_SISTEMA","incentivo":"Talento individual não basta sem sistema.","exemplos":["Brazil 2014 (7-1)","LA Lakers superteam fracassado"]},
+        ],
+        "estrutura":"COMPETICAO_MEC",
+        "mecanismo":"Para mercados esportivos: calcular MEC de cada time. Quem tem MEC superior vence com maior probabilidade.",
+        "formula_aplicada":{"massa":"Odds do mercado (já refletem talento)","energia":"Motivação: jogo decisivo? Revenge? Home/away?","coordenacao":"Lesões, conflitos internos, forma últimos 5 jogos"},
+        "analogia":"Toda virada histórica no esporte = time com menos Massa mas mais Energia+Coordenação",
+        "prob_jiang":65,"prob_mkt":50,"edge":15,"direcao":"DEPENDE_MEC","confianca":0.72,"prazo":"Por jogo",
+        "gatilhos_sim":["Lesão de estrela reduz Massa do favorito","Motivação extra (revenge, homenagem)"],
+        "gatilhos_nao":["Estrela desconhecida surge","Mudança tática de última hora"],
+        "citacao":"Game Theory #6: The Sports Game — MEC applied to athletic competition. Jan 22 2026.",
+    },
+    # ─── ELEIÇÕES (Game Theory #5 + #7) ───────────────────────
+    {
+        "id":"election_mec","tema":"Eleições — MEC + Ciclo Histórico determina vencedor","categoria":"ELEICOES","subcategoria":"Política","icone":"🗳️",
+        "keywords":["election","vote","president","minister","candidate","poll","win","party","primary","midterm","ballot","congress","senate","house"],
+        "status":"UNIVERSAL","confirmado":False,
+        "timeline":[{"d":"2026-01","p":55,"e":"Game Theory #5 World Game + #7 America's Game — padrão cíclico"},{"d":"2024-11","p":70,"e":"Jiang previu Trump 2024 com metodologia MEC"}],
+        "mec":{
+            "incumbente":{"m":80,"e":45,"c":55,"s":1980,"cor":"#888888","n":"Complacência após vitória. Massa alta mas energia declinante."},
+            "outsider":{"m":55,"e":90,"c":75,"s":3712,"cor":"#00d26a","n":"Energia narrativa extrema + coalizão simples e coordenada"},
+        },
+        "jogadores":[
+            {"n":"Incumbente/Establishment","t":"ALTA_MASSA_BAIXA_ENERGIA","vulnerabilidade":"Complacência, mensagem dividida, coalizão fragmentada","exemplo":"Hillary 2016 (alta Massa, baixa Energia+Coordenação)"},
+            {"n":"Outsider/Populista","t":"BAIXA_MASSA_ALTA_ENERGIA","vantagem":"Energia narrativa extrema + coalizão simples","exemplo":"Trump 2016+2024 (Jiang previu com MEC)"},
+        ],
+        "estrutura":"JOGO_MEC_CICLOS_HISTORICOS",
+        "mecanismo":"Padrão histórico: partido no poder perde energia após 1º mandato. Oposição ganha energia via acúmulo de frustrações.",
+        "ciclo":"Midterm pattern: partido do presidente perde cadeiras (padrão desde 1930)",
+        "analogia":"Padrão verificável em todas as democracias modernas",
+        "prob_jiang":55,"prob_mkt":50,"edge":10,"direcao":"DEPENDE_MEC","confianca":0.62,"prazo":"Por eleição",
+        "gatilhos_sim":["Crise econômica aumenta energia da oposição","Escândalo reduz coordenação do incumbente"],
+        "gatilhos_nao":["Crise externa unifica país em torno do incumbente"],
+        "citacao":"Game Theory #7: America's Game — US as nation-game, not nation-state. Incumbents lose energy. Jan 27 2026.",
+    },
+    # ─── NEGÓCIOS (Game Theory #3) ──────────────────────────────
+    {
+        "id":"business_disruption","tema":"Disrupção Empresarial — Startup vs Incumbente","categoria":"NEGOCIOS","subcategoria":"Competição","icone":"🚀",
+        "keywords":["startup","company","market","disruption","competition","monopoly","business","industry","market share","stock","ipo","acquisition"],
+        "status":"UNIVERSAL","confirmado":False,
+        "timeline":[{"d":"2026-01","p":60,"e":"Game Theory #3: The Business Game — Jan 13 2026"}],
+        "mec":{
+            "startup":{"m":30,"e":98,"c":88,"s":2587,"cor":"#00d26a","n":"Menos recursos mas energia de sobrevivência e coordenação focada"},
+            "incumbente":{"m":95,"e":42,"c":45,"s":1793,"cor":"#ff4d4d","n":"Recursos abundantes mas complacência e inércia organizacional"},
+        },
+        "jogadores":[
+            {"n":"Startup Disruptora","t":"DESAFIANTE_ALTO_MEC","incentivo":"Tudo ou nada. Energia máxima. Foco absoluto em um problema.","vantagem":"Zero legacy systems, velocidade de decisão, founder energy"},
+            {"n":"Incumbente estabelecido","t":"INCUMBENTE_BAIXO_MEC","vulnerabilidade":"Burocracia, complacência, medo de canibalizar o próprio produto"},
+        ],
+        "estrutura":"DISRUPCAO_ASSIMETRICA",
+        "mecanismo":"Incumbente tem Massa 3x maior mas Energia+Coordenação 4x menor. MEC do startup frequentemente superior.",
+        "analogia":"Netflix vs Blockbuster: Massa menor, MEC massivamente superior",
+        "prob_jiang":60,"prob_mkt":45,"edge":15,"direcao":"DEPENDE_MEC","confianca":0.68,"prazo":"Por caso",
+        "gatilhos_sim":["Incumbente ignora ameaça inicial","Regulação protege mercado do incumbente temporariamente"],
+        "gatilhos_nao":["Incumbente adquire startup antes da escala","Regulação bloqueia o disruptor"],
+        "citacao":"Game Theory #3: The Business Game — incentive structures determine market outcomes. Jan 13 2026.",
+    },
+]
+
+# ─── ÍNDICE RÁPIDO ────────────────────────────────────────────
+_GT_INDEX: dict = {}
+for _p in JIANG_PREDICTIONS:
+    for _kw in _p.get("keywords", []):
+        _GT_INDEX.setdefault(_kw.lower(), []).append(_p["id"])
+
+_GT_MAP = {p["id"]: p for p in JIANG_PREDICTIONS}
+
+
+def _mec_score(m, e, c):
+    return round(m * e * c / 100)
+
+
+def _match_gt(question: str, slug: str) -> list:
+    text = (question + " " + slug).lower()
+    scores: dict = {}
+    for kw, ids in _GT_INDEX.items():
+        if kw in text:
+            for pid in ids:
+                scores[pid] = scores.get(pid, 0) + 1
+    if not scores:
+        return []
+    matched = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return [_GT_MAP[pid] for pid, _ in matched if pid in _GT_MAP]
+
+
+def _gt_ai_analysis(question: str, yes_price: float, pred: dict) -> dict:
+    mec = pred.get("mec", {})
+    mec_txt = " | ".join([f"{k}: MEC={v['s']} (M={v['m']},E={v['e']},C={v['c']})" for k, v in mec.items() if isinstance(v, dict) and "s" in v])
+    jogadores_txt = "\n".join([f"  - {j['n']} ({j['t']}): {j.get('incentivo', j.get('incentivo_real', ''))}" for j in pred.get("jogadores", [])])
+
+    prompt = f"""Você é especialista na metodologia "Predictive History" do Prof. Jiang Xueqin (Yale 1999, canal YouTube).
+
+METODOLOGIA DOS 4 PILARES:
+1. INCENTIVOS ESTRUTURAIS: Atores são FORÇADOS pela estrutura do jogo, não por ideologia
+2. ANALOGIA HISTÓRICA: Mesmo padrão de incentivos = mesmo resultado
+3. CICLOS CIVILIZACIONAIS: Elite overproduction + fiscal strain + fragmentação (Turchin)
+4. FORMULA MEC: Sucesso = Massa × Energia × Coordenação
+
+MERCADO POLYMARKET: "{question}"
+PREÇO YES ATUAL: {yes_price}%
+
+FRAMEWORK JIANG:
+- Tema: {pred['tema']}
+- Estrutura do jogo: {pred['estrutura']}
+- Mecanismo: {pred.get('mecanismo','')}
+- Analogia histórica: {pred['analogia']}
+- MEC Analysis: {mec_txt}
+- Prob base Jiang: {pred['prob_jiang']}%
+- Citação direta: {pred.get('citacao','')}
+
+JOGADORES E INCENTIVOS:
+{jogadores_txt}
+
+Analise APENAS com base em incentivos estruturais (ignore sentimentos, notícias de ontem).
+Responda SOMENTE com JSON válido sem markdown:
+{{"prob_ajustada":<0-100>,"edge":<prob_ajustada-{yes_price}>,"acao":"COMPRAR YES"|"COMPRAR NO"|"AGUARDAR","pilar":"INCENTIVOS"|"HISTORICO"|"CICLOS"|"MEC","raciocinio":"<max 150 chars>","ponto_critico":"<max 80 chars>","mec_vencedor":"<ator com MEC mais alto>","confianca":<0.0-1.0>}}"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 500,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=20,
+        )
+        if resp.status_code == 200:
+            raw = resp.json()["content"][0]["text"].replace("```json","").replace("```","").strip()
+            result = json.loads(raw)
+            print(f"[GT-v4] ✅ {question[:45]}")
+            return result
+    except Exception as ex:
+        print(f"[GT-v4] err: {ex}")
+
+    prob = pred["prob_jiang"]
+    edge = round(prob - yes_price, 1)
+    return {
+        "prob_ajustada": prob, "edge": edge,
+        "acao": "COMPRAR YES" if edge > 10 else "COMPRAR NO" if edge < -10 else "AGUARDAR",
+        "pilar": "MEC", "raciocinio": pred.get("mecanismo","")[:150],
+        "ponto_critico": (pred.get("gatilhos_sim") or ["Ver gatilhos"])[0],
+        "mec_vencedor": max([(k, v["s"]) for k, v in pred.get("mec", {}).items() if isinstance(v, dict) and "s" in v], key=lambda x: x[1], default=("N/A", 0))[0],
+        "confianca": pred["confianca"] * 0.75,
+    }
+
+
+def _fetch_jiang_feed() -> list:
+    items = []
+    # YouTube RSS
+    try:
+        r = requests.get("https://www.youtube.com/feeds/videos.xml?channel_id=UCzepRVhWFtJFHhGjPTWfdEg", timeout=8)
+        if r.status_code == 200:
+            root = ET.fromstring(r.content)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            for entry in root.findall("atom:entry", ns)[:6]:
+                title = entry.findtext("atom:title","",ns)
+                link = entry.find("atom:link",ns)
+                pub = entry.findtext("atom:published","",ns)
+                if title:
+                    items.append({"tipo":"youtube","titulo":title,"url":link.get("href","") if link is not None else "","data":pub,"score":999})
+    except Exception as e:
+        print(f"[GT-feed] YT: {e}")
+
+    # Reddit via PullPush
+    try:
+        r = requests.get("https://api.pullpush.io/reddit/search/submission/",
+                         params={"q":"Jiang Xueqin OR Predictive History","size":5,"sort":"desc","sort_type":"created_utc"},
+                         headers={"User-Agent":"PolySignal/4.0"},timeout=8)
+        if r.status_code == 200:
+            for item in r.json().get("data",[]):
+                t = (item.get("title") or "").strip()
+                if t:
+                    items.append({"tipo":"reddit","titulo":t,"url":f"https://reddit.com{item.get('permalink','')}",
+                                  "data":datetime.utcfromtimestamp(item.get("created_utc",0)).isoformat(),"score":item.get("score",0)})
+    except Exception as e:
+        print(f"[GT-feed] Reddit: {e}")
+
+    items.sort(key=lambda x: x.get("score",0), reverse=True)
+    return items[:12]
+
+
+@app.get("/game-theory")
+def get_game_theory_v4(
+    limit: int = Query(10, ge=1, le=25),
+    categoria: str = Query(None, description="GEOPOLITICA|ECONOMIA|ESPORTES|ELEICOES|NEGOCIOS"),
+    min_edge: float = Query(5.0),
+    db: Session = Depends(get_db),
+):
+    """
+    PolySignal Game Theory Intelligence v4 — Prof. Jiang Xueqin.
+    Universal: Geopolítica + Economia + Esportes + Eleições + Negócios.
+    4 Pilares + Fórmula MEC + Cross-check com mercados Polymarket ao vivo.
+    """
+    now = datetime.utcnow()
+
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > 0.03, Token.price < 0.97)
+        .distinct().limit(500).all()
+    )
+
+    analyses, seen = [], set()
+
+    for market in markets:
+        if len(analyses) >= limit * 4:
+            break
+        q = market.question or ""
+        slug = market.market_slug or ""
+        matched = _match_gt(q, slug)
+        if not matched:
+            continue
+
+        pred = next((p for p in matched if p["id"] not in seen), matched[0])
+        if categoria and pred["categoria"] != categoria.upper():
+            continue
+
+        yes_price = no_price = 50.0
+        for t in market.tokens:
+            o = (t.outcome or "").upper()
+            if o == "YES": yes_price = round(t.price * 100, 1)
+            elif o == "NO": no_price = round(t.price * 100, 1)
+
+        ia = _gt_ai_analysis(q, yes_price, pred)
+        prob = ia.get("prob_ajustada", pred["prob_jiang"])
+        edge = ia.get("edge", round(prob - yes_price, 1))
+        acao = ia.get("acao", "AGUARDAR")
+        confianca = round(ia.get("confianca", pred["confianca"]) * 100)
+
+        if abs(edge) < float(min_edge):
+            continue
+
+        seen.add(pred["id"])
+
+        conviction = (
+            "🔴 MUITO ALTA" if abs(edge) >= 25 and confianca >= 75 else
+            "🟠 ALTA" if abs(edge) >= 15 and confianca >= 60 else
+            "🟡 MÉDIA" if abs(edge) >= 8 and confianca >= 50 else
+            "🔵 BAIXA"
+        )
+
+        # Build MEC display
+        mec_display = []
+        for ator, dados in pred.get("mec", {}).items():
+            if isinstance(dados, dict) and "s" in dados:
+                mec_display.append({
+                    "ator": ator, "massa": dados["m"], "energia": dados["e"],
+                    "coordenacao": dados["c"], "mec_score": dados["s"],
+                    "cor": dados.get("cor","#888888"), "nota": dados.get("n",""),
+                })
+        mec_display.sort(key=lambda x: x["mec_score"], reverse=True)
+
+        analyses.append({
+            "market_question": q, "market_slug": slug,
+            "yes_price": yes_price, "no_price": no_price,
+            "polymarket_url": f"https://polymarket.com/event/{slug}",
+            "tema_jiang": pred["tema"],
+            "categoria": pred["categoria"], "subcategoria": pred.get("subcategoria",""),
+            "icone": pred.get("icone","📊"),
+            "status": pred.get("status","ATIVA"),
+            "confirmado": pred.get("confirmado", False),
+            "prob_jiang": prob, "prob_mercado": yes_price, "edge": edge,
+            "acao": acao, "conviction": conviction, "confianca_pct": confianca,
+            "pilar_dominante": ia.get("pilar","MEC"),
+            "jogadores": pred.get("jogadores",[]),
+            "estrutura": pred["estrutura"],
+            "mecanismo": pred.get("mecanismo",""),
+            "raciocinio_ia": ia.get("raciocinio",""),
+            "ponto_critico": ia.get("ponto_critico",""),
+            "mec_vencedor": ia.get("mec_vencedor",""),
+            "analogia": pred["analogia"],
+            "mec_analise": mec_display,
+            "timeline": pred.get("timeline",[]),
+            "gatilhos_sim": pred.get("gatilhos_sim",[]),
+            "gatilhos_nao": pred.get("gatilhos_nao",[]),
+            "prazo": pred["prazo"],
+            "citacao_jiang": pred.get("citacao",""),
+            "analisado_em": now.isoformat(),
+        })
+        time.sleep(0.25)
+
+    analyses.sort(key=lambda x: abs(x["edge"]), reverse=True)
+    top = analyses[:limit]
+
+    return {
+        "total_mercados_varridos": len(analyses),
+        "retornados": len(top),
+        "resumo": {
+            "comprar_yes": sum(1 for a in top if a["acao"] == "COMPRAR YES"),
+            "comprar_no": sum(1 for a in top if a["acao"] == "COMPRAR NO"),
+            "aguardar": sum(1 for a in top if a["acao"] == "AGUARDAR"),
+            "edge_medio": round(sum(abs(a["edge"]) for a in top) / max(len(top),1), 1),
+            "categorias": list({a["categoria"] for a in top}),
+            "confirmados_parciais": sum(1 for a in top if a["confirmado"]),
+        },
+        "sobre_jiang": JIANG_METHODOLOGY,
+        "top_oportunidades": top,
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/game-theory/predictions")
+def gt_predictions(categoria: str = Query(None), status: str = Query(None)):
+    preds = JIANG_PREDICTIONS
+    if categoria: preds = [p for p in preds if p["categoria"] == categoria.upper()]
+    if status: preds = [p for p in preds if p.get("status","").upper() == status.upper()]
+    return {
+        "total": len(preds),
+        "confirmados": sum(1 for p in JIANG_PREDICTIONS if p.get("confirmado")),
+        "em_andamento": sum(1 for p in JIANG_PREDICTIONS if p.get("status")=="EM_ANDAMENTO"),
+        "categorias": list({p["categoria"] for p in JIANG_PREDICTIONS}),
+        "metodologia": JIANG_METHODOLOGY,
+        "predictions": [{
+            "id":p["id"],"icone":p.get("icone","📊"),"tema":p["tema"],
+            "categoria":p["categoria"],"subcategoria":p.get("subcategoria",""),
+            "status":p.get("status","ATIVA"),"confirmado":p.get("confirmado",False),
+            "prob_jiang":p["prob_jiang"],"prob_mkt":p.get("prob_mkt",50),
+            "edge":p.get("edge",0),"direcao":p["direcao"],"confianca":p["confianca"],
+            "estrutura":p["estrutura"],"analogia":p["analogia"],"prazo":p["prazo"],
+            "timeline":p.get("timeline",[]),"citacao":p.get("citacao",""),
+        } for p in preds],
+    }
+
+
+@app.get("/game-theory/feed")
+def gt_feed():
+    content = _fetch_jiang_feed()
+    return {
+        "total": len(content),
+        "descricao": "Conteúdo mais recente do Prof. Jiang Xueqin — auto-atualizado",
+        "fontes": ["YouTube @PredictiveHistory","Reddit"],
+        "items": content,
+        "atualizado_em": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/game-theory/mec")
+def gt_mec():
+    return {
+        "formula": JIANG_METHODOLOGY["formula_mec"],
+        "lei": JIANG_METHODOLOGY["lei_mec"],
+        "aplicacoes": {
+            "geopolitica": "Irã (MEC 3750) vs EUA (MEC 1260) — Irã vence mesmo com menos Massa",
+            "eleicoes": "Trump 2016: baixa Massa, altíssima Energia+Coordenação vs Hillary (alta Massa, baixa Energia)",
+            "esportes": "Leicester City 2016: MEC superior ao Manchester City com 1/10 do orçamento",
+            "negocios": "Netflix vs Blockbuster: Massa menor, MEC 4x superior",
+            "mercados": "Asset com fundamentos + momentum + smart money coordenado supera o ruído",
+        },
+        "calcular_mec": "MEC = Massa × Energia × Coordenação ÷ 100 (normalizado 0-10000)",
+        "series_jiang": JIANG_METHODOLOGY["series_yt"],
+    }
+
+
+@app.get("/game-theory/{slug}")
+def gt_slug(slug: str, db: Session = Depends(get_db)):
+    market = db.query(Market).filter(Market.market_slug == slug).first()
+    if not market:
+        return {"error": "Mercado não encontrado", "slug": slug}
+
+    q = market.question or ""
+    matched = _match_gt(q, slug)
+
+    yes_price = no_price = 50.0
+    for t in market.tokens:
+        o = (t.outcome or "").upper()
+        if o == "YES": yes_price = round(t.price * 100, 1)
+        elif o == "NO": no_price = round(t.price * 100, 1)
+
+    if not matched:
+        return {"market_question":q,"slug":slug,"yes_price":yes_price,"jiang_match":False,
+                "polymarket_url":f"https://polymarket.com/event/{slug}",
+                "keywords_ativas":sorted(_GT_INDEX.keys())[:30]}
+
+    pred = matched[0]
+    ia = _gt_ai_analysis(q, yes_price, pred)
+
+    mec_display = [{"ator":k,"massa":v["m"],"energia":v["e"],"coordenacao":v["c"],"mec_score":v["s"],"cor":v.get("cor","#888888"),"nota":v.get("n","")}
+                   for k,v in pred.get("mec",{}).items() if isinstance(v,dict) and "s" in v]
+    mec_display.sort(key=lambda x: x["mec_score"], reverse=True)
+
+    return {
+        "market_question":q,"slug":slug,"yes_price":yes_price,"no_price":no_price,
+        "polymarket_url":f"https://polymarket.com/event/{slug}","jiang_match":True,
+        "tema_jiang":pred["tema"],"categoria":pred["categoria"],"icone":pred.get("icone","📊"),
+        "status":pred.get("status","ATIVA"),"confirmado":pred.get("confirmado",False),
+        "prob_jiang":ia.get("prob_ajustada",pred["prob_jiang"]),
+        "edge":ia.get("edge",0),"acao":ia.get("acao","AGUARDAR"),
+        "confianca_pct":round(ia.get("confianca",pred["confianca"])*100),
+        "pilar":ia.get("pilar","MEC"),
+        "jogadores":pred.get("jogadores",[]),"estrutura":pred["estrutura"],
+        "mecanismo":pred.get("mecanismo",""),
+        "raciocinio":ia.get("raciocinio",""),"ponto_critico":ia.get("ponto_critico",""),
+        "mec_vencedor":ia.get("mec_vencedor",""),"analogia":pred["analogia"],
+        "mec_analise":mec_display,"timeline":pred.get("timeline",[]),
+        "gatilhos_sim":pred.get("gatilhos_sim",[]),"gatilhos_nao":pred.get("gatilhos_nao",[]),
+        "prazo":pred["prazo"],"citacao":pred.get("citacao",""),
+        "outros_matches":[p["tema"] for p in matched[1:3]],
+        "analisado_em":datetime.utcnow().isoformat(),
+    }
