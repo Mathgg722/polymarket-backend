@@ -803,23 +803,47 @@ def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(
     if not markets:
         return {"total": 0, "analyses": [], "summary": "Sem mercados ativos."}
 
-    STOP = {"will","the","this","that","with","from","have","been","they","their","which","what","does","about","after","before","into","more","some"}
+    STOP = {"will","the","this","that","with","from","have","been","they","their","which","what","does","about","after","before","into","more","some","would","could","should","when","where","there"}
 
-    # 3) Match notícia × mercado
+    # Categorias de keywords para match semântico
+    TOPIC_KEYWORDS = {
+        "war": ["war","attack","strike","missile","bomb","military","troops","invasion","conflict","ceasefire"],
+        "election": ["election","vote","president","minister","candidate","poll","win","lose","party"],
+        "economy": ["inflation","recession","gdp","interest","rate","fed","economy","market","stock","trade"],
+        "crypto": ["bitcoin","btc","ethereum","crypto","blockchain","coinbase","binance","defi","token"],
+        "sports": ["nba","nfl","soccer","championship","world cup","playoffs","finals","super bowl"],
+    }
+
+    # 3) Match notícia × mercado — threshold mais baixo
     top_matches = []
-    for news in all_news[:30]:
+    seen_markets = set()
+    for news in all_news[:40]:
         content = (news["title"] + " " + news["description"]).lower()
         best_market = None
         best_overlap = 0
         for m in markets:
+            if m.id in seen_markets:
+                continue
             q = (m.question or "").lower()
-            words = [w for w in q.split() if len(w) > 4 and w not in STOP]
+            words = [w for w in q.split() if len(w) > 3 and w not in STOP]
+
+            # Match direto por palavras
             overlap = sum(1 for w in words if w in content)
             relevance = overlap / max(len(words), 1)
-            if overlap >= 2 and relevance > best_overlap:
+
+            # Boost por categoria temática
+            for cat_words in TOPIC_KEYWORDS.values():
+                news_has = any(kw in content for kw in cat_words)
+                market_has = any(kw in q for kw in cat_words)
+                if news_has and market_has:
+                    relevance += 0.15
+
+            if overlap >= 1 and relevance > best_overlap:
                 best_overlap = relevance
                 best_market = m
+
         if best_market and best_overlap > 0:
+            seen_markets.add(best_market.id)
             top_matches.append({"news": news, "market": best_market, "relevance": round(best_overlap*100,1)})
 
     top_matches.sort(key=lambda x: x["relevance"], reverse=True)
@@ -877,18 +901,27 @@ Responda SOMENTE com JSON válido (sem markdown):
 }}"""
 
         try:
+            if not ANTHROPIC_KEY:
+                raise Exception("ANTHROPIC_KEY não configurada")
             r = requests.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
                 json={"model": "claude-haiku-4-5-20251001", "max_tokens": 600,
                       "messages": [{"role": "user", "content": prompt}]},
-                timeout=20
+                timeout=25
             )
             if r.status_code == 200:
                 text = r.json().get("content",[{}])[0].get("text","{}").strip()
                 text = text.replace("```json","").replace("```","").strip()
+                # Extrai só o JSON se vier texto antes/depois
+                start = text.find("{")
+                end = text.rfind("}") + 1
+                if start >= 0 and end > start:
+                    text = text[start:end]
                 ia = json.loads(text)
+                print(f"[analysis] ✅ Claude OK: {ia.get('titulo_analise','?')[:40]}")
             else:
+                print(f"[analysis] Claude HTTP {r.status_code}: {r.text[:200]}")
                 raise Exception(f"HTTP {r.status_code}")
         except Exception as e:
             print(f"[analysis] Claude erro: {e}")
