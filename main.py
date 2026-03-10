@@ -3057,7 +3057,7 @@ def get_master_predictions(
         db.query(Market).join(Token)
         .filter(Token.price > 0.05, Token.price < 0.95)
         .filter((Market.end_date == None) | (Market.end_date > now))
-        .distinct().limit(200).all()
+        .distinct().limit(400).all()
     )
 
     market_stats = {
@@ -3121,15 +3121,15 @@ def get_master_predictions(
                 market_stats["total_analisados"] += 1
 
                 # 4. Filtrar só sinais com confiança suficiente
-                if analysis["confidence"] < 0.45:
+                if analysis["confidence"] < 0.30:
                     continue
-                if analysis["signal"] == "NEUTRAL":
+                if analysis["signal"] == "NEUTRAL" and abs(analysis.get("predicted_price", current*100) - current*100) < 3:
                     continue
 
                 predicted = analysis.get("predicted_price", current * 100)
                 edge = round(predicted - current * 100, 1)
 
-                if abs(edge) < 2:
+                if abs(edge) < 1:
                     continue
 
                 # 5. Score final MASTER
