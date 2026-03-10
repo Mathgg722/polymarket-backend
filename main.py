@@ -2737,6 +2737,7 @@ def get_game_theory_v4(
     markets = (
         db.query(Market).join(Token)
         .filter(Token.price > 0.03, Token.price < 0.97)
+        .filter((Market.end_date == None) | (Market.end_date > now))
         .distinct().limit(500).all()
     )
 
