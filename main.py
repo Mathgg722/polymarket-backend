@@ -265,7 +265,7 @@ def get_anomalies(db: Session = Depends(get_db)):
         c15m = round((cp - s15m.price) * 100, 2) if s15m else None
         c1h  = round((cp - s1h.price) * 100, 2) if s1h else None
 
-        if abs(c5m) < 3.0:
+        if abs(c5m) < 1.0:
             continue
 
         if abs(c5m) >= 20:
@@ -1287,7 +1287,7 @@ def get_inefficiencies(db: Session = Depends(get_db)):
         s1h = next((s for s in snaps if s.timestamp <= w1h), None)
         c5m = round((cp - s5m.price) * 100, 2) if s5m else 0
         c1h = round((cp - s1h.price) * 100, 2) if s1h else None
-        if abs(c5m) < 1.5:
+        if abs(c5m) < 0.5:
             continue
 
         all_changes = [abs(prices[i] - prices[i+1]) for i in range(min(len(prices)-1, 200))]
@@ -1308,7 +1308,7 @@ def get_inefficiencies(db: Session = Depends(get_db)):
         reversal_prob = round(reversals / max(total_sim, 1) * 100, 1)
 
         ineff_score = min(round((vol_ratio * 20) + (mispricing_score * 0.4) + (reversal_prob * 0.4), 1), 100)
-        if ineff_score < 15:
+        if ineff_score < 8:
             continue
 
         market = db.query(Market).filter(Market.id == token.market_id).first()
@@ -1510,7 +1510,7 @@ def signals_scan(
     min_move: float = 0.3,
     arb_over: float = 1.02,
     arb_under: float = 0.98,
-    cooldown_minutes: int = 8,
+    cooldown_minutes: int = 3,
     repeat_boost: float = 1.0,
     max_created: int = 150,
     db: Session = Depends(get_db),
@@ -1965,14 +1965,14 @@ def get_best(db: Session = Depends(get_db)):
         c15m = round((cp - s15m.price) * 100, 2)
         c1h  = round((cp - s1h.price) * 100, 2) if s1h else None
 
-        if abs(c5m) < 5.0:
+        if abs(c5m) < 2.0:
             continue
         # Tendência consistente
         if c5m > 0 and c15m < 0: continue
         if c5m < 0 and c15m > 0: continue
 
         score = min(abs(c5m) * 2 + abs(c15m) * 1.5 + abs(c1h or 0) + (15 if 0.40 <= cp <= 0.60 else 0), 100)
-        if score < 40:
+        if score < 25:
             continue
 
         market = db.query(Market).filter(Market.id == token.market_id).first()
@@ -2037,7 +2037,7 @@ def get_best_v2(db: Session = Depends(get_db)):
             continue
 
         c5m = round((cp - s5m.price) * 100, 2)
-        if abs(c5m) < 4.0:
+        if abs(c5m) < 1.5:
             continue
 
         market = db.query(Market).filter(Market.id == token.market_id).first()
@@ -2052,7 +2052,7 @@ def get_best_v2(db: Session = Depends(get_db)):
         ai = analysis["ai"]
         rec = ai.get("recomendacao", "EVITE")
 
-        if score_final < 35 or rec == "EVITE":
+        if score_final < 20 or rec == "EVITE":
             continue
 
         direcao = "YES" if c5m > 0 else "NO"
