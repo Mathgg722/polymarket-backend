@@ -2612,8 +2612,20 @@ def _mec_score(m, e, c):
     return round(m * e * c / 100)
 
 
+# Palavras que indicam mercado irrelevante para análise geopolítica/econômica
+_NOISE_PATTERNS = [
+    "jesus", "christ", "god", "alien", "ufo", "bigfoot", "unicorn",
+    "celebrity", "kardashian", "taylor swift", "kanye", "bieber",
+    "will smith", "oscars slap", "nicki minaj",
+]
+
 def _match_gt(question: str, slug: str) -> list:
     text = (question + " " + slug).lower()
+    
+    # Filtrar mercados claramente irrelevantes
+    if any(noise in text for noise in _NOISE_PATTERNS):
+        return []
+    
     scores: dict = {}
     for kw, ids in _GT_INDEX.items():
         if kw in text:
@@ -2621,7 +2633,22 @@ def _match_gt(question: str, slug: str) -> list:
                 scores[pid] = scores.get(pid, 0) + 1
     if not scores:
         return []
-    matched = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # Exige score mínimo de 2 para evitar matches por 1 palavra genérica
+    filtered = {pid: s for pid, s in scores.items() if s >= 2}
+    if not filtered:
+        # Se nenhum tem score 2+, pega só o melhor se tiver score 1 E keyword forte
+        best_pid = max(scores, key=lambda x: scores[x])
+        best_pred = _GT_MAP.get(best_pid)
+        if best_pred:
+            # Verifica se pelo menos 1 keyword do tema está no texto
+            core_kws = best_pred.get("keywords", [])[:5]
+            if any(kw in text for kw in core_kws):
+                filtered = {best_pid: scores[best_pid]}
+            else:
+                return []
+    
+    matched = sorted(filtered.items(), key=lambda x: x[1], reverse=True)
     return [_GT_MAP[pid] for pid, _ in matched if pid in _GT_MAP]
 
 
@@ -2724,7 +2751,7 @@ def _fetch_jiang_feed() -> list:
 def get_game_theory_v4(
     limit: int = Query(10, ge=1, le=25),
     categoria: str = Query(None, description="GEOPOLITICA|ECONOMIA|ESPORTES|ELEICOES|NEGOCIOS"),
-    min_edge: float = Query(5.0),
+    min_edge: float = Query(15.0),
     db: Session = Depends(get_db),
 ):
     """
