@@ -3260,13 +3260,14 @@ def _whale_alert_telegram(whale: dict) -> None:
 def get_whales(
     min_valor: float = Query(5000, ge=1, le=500000),
     limit: int = Query(20, ge=1, le=50),
-    filtrar_resolvendo: int = Query(1, description="1 = ignora mercados quase resolvidos (>90% ou <10%)"),
+    filtrar_resolvendo: int = Query(1, description="1 = ignora mercados quase resolvidos"),
     db: Session = Depends(get_db),
 ):
     """
     Detector de Baleias v1.
-    Agrega trades por carteira+mercado. Filtra mercados resolvendo.
-    Busca 1000 trades para capturar baleias maiores.
+    - Threshold: $5k por carteira por mercado
+    - Agrupa por MERCADO para mostrar quantas carteiras independentes apostaram junto
+    - Convicção aumenta quando múltiplas baleias entram na mesma direção
     """
     url = f"{DATA_API}/trades?limit=1000"
     try:
@@ -3278,14 +3279,13 @@ def get_whales(
         if not isinstance(trades_raw, list):
             trades_raw = trades_raw.get("data", [])
 
-        # Agrega por wallet+mercado
-        agg: dict = {}
+        # 1ª passagem — agrega por wallet+mercado
+        wallet_mercado: dict = {}
         for tx in trades_raw:
             size  = float(tx.get("size") or 0)
             price = float(tx.get("price") or 0)
             valor = size * price
 
-            # Filtra mercados resolvendo (preço >90% ou <10%)
             if filtrar_resolvendo and (price > 0.90 or price < 0.10):
                 continue
 
@@ -3295,49 +3295,102 @@ def get_whales(
                 continue
 
             key = f"{wallet}|{slug}"
-            if key not in agg:
-                agg[key] = {
+            if key not in wallet_mercado:
+                wallet_mercado[key] = {
                     "wallet_full": wallet,
-                    "wallet": wallet[:8] + "..." + wallet[-4:],
-                    "valor_usd": 0.0,
-                    "num_trades": 0,
-                    "mercado": tx.get("title") or "?",
                     "slug": slug,
+                    "mercado": tx.get("title") or "?",
                     "outcome": tx.get("outcome") or "?",
                     "side": tx.get("side") or "?",
+                    "valor_usd": 0.0,
+                    "num_trades": 0,
                     "preco_sum": 0.0,
-                    "ultimo_timestamp": tx.get("timestamp"),
+                    "timestamp": tx.get("timestamp"),
                 }
-            agg[key]["valor_usd"]  += valor
-            agg[key]["num_trades"] += 1
-            agg[key]["preco_sum"]  += price
+            wallet_mercado[key]["valor_usd"]  += valor
+            wallet_mercado[key]["num_trades"] += 1
+            wallet_mercado[key]["preco_sum"]  += price
 
-        whales = []
-        for key, data in agg.items():
+        # Filtra só carteiras acima do threshold
+        baleias_por_mercado: dict = {}
+        for key, data in wallet_mercado.items():
             data["valor_usd"] = round(data["valor_usd"], 2)
             data["preco_medio_pct"] = round(data["preco_sum"] / max(data["num_trades"], 1) * 100, 1)
-            del data["preco_sum"]
 
             if data["valor_usd"] < min_valor:
                 continue
 
-            wallet = data["wallet_full"]
-            data["score"] = _whale_score(wallet)
-            data["polymarket_url"] = _polymarket_url(data["slug"])
-            data["polymarket_wallet_url"] = f"https://polymarket.com/profile/{wallet}"
-            data["novo"] = key not in _WHALE_SEEN
-            whales.append(data)
+            slug = data["slug"]
+            if slug not in baleias_por_mercado:
+                baleias_por_mercado[slug] = {
+                    "mercado": data["mercado"],
+                    "slug": slug,
+                    "polymarket_url": _polymarket_url(slug),
+                    "total_volume_baleias": 0.0,
+                    "num_baleias": 0,
+                    "carteiras": [],
+                    "direcoes": {},
+                    "ultimo_timestamp": data["timestamp"],
+                }
 
-        whales.sort(key=lambda x: x["valor_usd"], reverse=True)
-        top = whales[:limit]
+            m = baleias_por_mercado[slug]
+            m["total_volume_baleias"] += data["valor_usd"]
+            m["num_baleias"] += 1
+
+            # Conta direções (YES/NO)
+            direcao = data["outcome"] or data["side"]
+            m["direcoes"][direcao] = m["direcoes"].get(direcao, 0) + data["valor_usd"]
+
+            m["carteiras"].append({
+                "wallet": data["wallet_full"][:8] + "..." + data["wallet_full"][-4:],
+                "wallet_full": data["wallet_full"],
+                "valor_usd": data["valor_usd"],
+                "outcome": data["outcome"],
+                "preco_medio_pct": data["preco_medio_pct"],
+                "num_trades": data["num_trades"],
+                "polymarket_wallet_url": f"https://polymarket.com/profile/{data['wallet_full']}",
+            })
+
+        # Monta resultado final ordenado por num_baleias e volume
+        resultado = []
+        for slug, m in baleias_por_mercado.items():
+            m["total_volume_baleias"] = round(m["total_volume_baleias"], 2)
+            m["carteiras"].sort(key=lambda x: x["valor_usd"], reverse=True)
+
+            # Direção dominante
+            if m["direcoes"]:
+                dir_dominante = max(m["direcoes"].items(), key=lambda x: x[1])
+                m["direcao_dominante"] = dir_dominante[0]
+                m["volume_direcao_dominante"] = round(dir_dominante[1], 2)
+                total_dir = sum(m["direcoes"].values())
+                m["consenso_pct"] = round(dir_dominante[1] / total_dir * 100, 1) if total_dir > 0 else 0
+            else:
+                m["direcao_dominante"] = "?"
+                m["consenso_pct"] = 0
+
+            # Conviction score
+            nb = m["num_baleias"]
+            consenso = m["consenso_pct"]
+            m["conviction"] = (
+                "🔴 MUITO ALTA" if nb >= 3 and consenso >= 80 else
+                "🟠 ALTA"       if nb >= 2 and consenso >= 70 else
+                "🟡 MÉDIA"      if nb >= 2 else
+                "⚪ ÚNICA"
+            )
+
+            resultado.append(m)
+
+        resultado.sort(key=lambda x: (x["num_baleias"], x["total_volume_baleias"]), reverse=True)
+        top = resultado[:limit]
 
         return {
             "status": "ok",
             "threshold_usd": min_valor,
-            "total_trades": len(trades_raw),
-            "total_encontradas": len(whales),
-            "retornadas": len(top),
-            "baleias": top,
+            "total_trades_analisados": len(trades_raw),
+            "mercados_com_baleias": len(resultado),
+            "retornados": len(top),
+            "nota": "num_baleias > 1 = múltiplas carteiras independentes apostando no mesmo mercado",
+            "mercados": top,
             "gerado_em": datetime.utcnow().isoformat(),
         }
 
@@ -3347,7 +3400,7 @@ def get_whales(
 
 @app.get("/whales/scan")
 def whale_scan(
-    min_valor: float = Query(10000, ge=1000),
+    min_valor: float = Query(5000, ge=1),
     alertar: int = Query(1, description="1 = envia Telegram para novas baleias"),
     db: Session = Depends(get_db),
 ):
