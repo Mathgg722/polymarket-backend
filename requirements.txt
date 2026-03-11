@@ -4,4 +4,6 @@ requests
 sqlalchemy
 psycopg2-binary
 anthropic>=0.34.0
-beautifulsoup4websockets
+beautifulsoup4
+
+websockets
