@@ -6154,3 +6154,564 @@ def contradictions_explain(par_id: str, db: Session = Depends(get_db)):
         "acao_sugerida": recomendacao["acao"],
         "gerado_em": now.isoformat(),
     }
+# ══════════════════════════════════════════════════════════════
+# MOTOR #26 — SCANNER DE TELEGRAM MILITAR
+#
+# Raspa canais públicos do Telegram via t.me/s/{canal}
+# Traduz + classifica via Claude Haiku
+# Cruza com mercados ativos do banco
+# Dispara Telegram antes do Reuters cobrir
+# Zero credencial — só requests + BeautifulSoup
+# ══════════════════════════════════════════════════════════════
+
+from bs4 import BeautifulSoup
+
+# ── Canais militares públicos monitorados ────────────────────
+MILITARY_CHANNELS = [
+    {"id": "militarylandnet",     "nome": "Military Land",      "regiao": "UKRAINE",  "lingua": "en"},
+    {"id": "ukrainewar",          "nome": "Ukraine War",        "regiao": "UKRAINE",  "lingua": "en"},
+    {"id": "nexta_tv",            "nome": "NEXTA",              "regiao": "UKRAINE",  "lingua": "en"},
+    {"id": "osintukraine",        "nome": "OSINT Ukraine",      "regiao": "UKRAINE",  "lingua": "en"},
+    {"id": "rybar",               "nome": "Rybar (RU)",         "regiao": "RUSSIA",   "lingua": "ru"},
+    {"id": "iranintl",            "nome": "Iran International", "regiao": "IRAN",     "lingua": "en"},
+    {"id": "IsraelWarRoom",       "nome": "Israel War Room",    "regiao": "ISRAEL",   "lingua": "en"},
+    {"id": "MiddleEastSpectator", "nome": "ME Spectator",       "regiao": "MIDEAST",  "lingua": "en"},
+]
+
+# ── Keywords de impacto por categoria ────────────────────────
+MILITARY_IMPACT_KEYWORDS = {
+    "ATAQUE": [
+        "attack", "strike", "airstrike", "missile", "rocket", "drone", "bomb",
+        "explosion", "blast", "fired", "launched", "hit", "destroyed",
+        "атака", "удар", "ракета", "взрыв", "уничтожен",
+    ],
+    "CEASEFIRE": [
+        "ceasefire", "truce", "negotiations", "peace talks", "agreement",
+        "withdraw", "deal", "diplomatic", "перемирие", "переговоры",
+    ],
+    "NUCLEAR": [
+        "nuclear", "uranium", "enrichment", "warhead", "atomic", "iaea",
+        "radiation", "dirty bomb", "ядерный", "уран",
+    ],
+    "TROOPS": [
+        "troops", "soldiers", "military", "forces", "army", "battalion",
+        "brigade", "offensive", "advance", "retreat", "frontline",
+        "войска", "наступление", "отступление", "фронт",
+    ],
+    "NAVAL": [
+        "ship", "vessel", "navy", "submarine", "carrier", "fleet",
+        "strait", "hormuz", "black sea", "mediterranean",
+        "корабль", "флот", "подводная лодка",
+    ],
+    "CASUALTIES": [
+        "killed", "dead", "wounded", "casualties", "civilian", "deaths",
+        "убит", "погиб", "ранен", "жертвы",
+    ],
+    "INFRASTRUCTURE": [
+        "power plant", "dam", "bridge", "railway", "pipeline", "refinery",
+        "airport", "port", "электростанция", "плотина", "мост",
+    ],
+}
+
+# Nível de impacto por categoria
+MILITARY_IMPACT_LEVELS = {
+    "NUCLEAR":       {"score": 100, "emoji": "☢️"},
+    "ATAQUE":        {"score": 80,  "emoji": "💥"},
+    "NAVAL":         {"score": 70,  "emoji": "⚓"},
+    "CEASEFIRE":     {"score": 65,  "emoji": "🕊️"},
+    "TROOPS":        {"score": 55,  "emoji": "⚔️"},
+    "CASUALTIES":    {"score": 50,  "emoji": "🩸"},
+    "INFRASTRUCTURE":{"score": 45,  "emoji": "🏗️"},
+}
+
+# Regiões e seus mercados relacionados
+REGION_KEYWORDS = {
+    "UKRAINE":  ["ukraine", "ukrainian", "zelensky", "kyiv", "russia", "ceasefire", "donbas", "nato"],
+    "RUSSIA":   ["russia", "russian", "putin", "ukraine", "ceasefire", "nato", "moscow"],
+    "IRAN":     ["iran", "iranian", "tehran", "irgc", "nuclear", "hormuz", "sanction", "attack"],
+    "ISRAEL":   ["israel", "israeli", "gaza", "hamas", "hezbollah", "idf", "netanyahu"],
+    "MIDEAST":  ["iran", "israel", "saudi", "oil", "opec", "hormuz", "gulf", "syria"],
+}
+
+# Cache de mensagens já processadas
+_MILITARY_SEEN: set = set()
+
+
+def _military_fetch_channel(channel_id: str, max_messages: int = 15) -> list:
+    """
+    Raspa mensagens públicas de um canal Telegram via t.me/s/{canal}.
+    Retorna lista de mensagens normalizadas.
+    """
+    messages = []
+    url = f"https://t.me/s/{channel_id}"
+
+    try:
+        resp = requests.get(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=12,
+        )
+
+        if resp.status_code != 200:
+            print(f"[military] {channel_id}: HTTP {resp.status_code}")
+            return []
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Cada mensagem está em .tgme_widget_message_wrap
+        message_divs = soup.find_all("div", class_="tgme_widget_message_wrap")
+
+        for div in message_divs[-max_messages:]:
+            try:
+                # Texto da mensagem
+                text_div = div.find("div", class_="tgme_widget_message_text")
+                if not text_div:
+                    continue
+                text = text_div.get_text(separator=" ", strip=True)
+                if not text or len(text) < 20:
+                    continue
+
+                # Data da mensagem
+                time_tag = div.find("time")
+                pub_date = time_tag.get("datetime", "") if time_tag else ""
+
+                # Link da mensagem
+                link_tag = div.find("a", class_="tgme_widget_message_date")
+                msg_url = link_tag.get("href", "") if link_tag else f"https://t.me/{channel_id}"
+
+                # ID único da mensagem
+                msg_id = msg_url.split("/")[-1] if msg_url else ""
+                uid = f"{channel_id}:{msg_id}"
+
+                messages.append({
+                    "uid": uid,
+                    "channel_id": channel_id,
+                    "text": text[:800],
+                    "url": msg_url,
+                    "published": pub_date,
+                })
+
+            except Exception as e:
+                print(f"[military] parse msg {channel_id}: {e}")
+                continue
+
+    except Exception as e:
+        print(f"[military] fetch {channel_id}: {e}")
+
+    return messages
+
+
+def _military_classify_impact(text: str) -> dict:
+    """
+    Classifica impacto de uma mensagem por keywords — sem chamada IA.
+    Rápido, zero custo.
+    """
+    text_lower = text.lower()
+
+    categorias_encontradas = []
+    keywords_encontradas = []
+    max_score = 0
+    max_categoria = "OUTROS"
+
+    for cat, keywords in MILITARY_IMPACT_KEYWORDS.items():
+        hits = [kw for kw in keywords if kw in text_lower]
+        if hits:
+            categorias_encontradas.append(cat)
+            keywords_encontradas.extend(hits)
+            cat_score = MILITARY_IMPACT_LEVELS.get(cat, {}).get("score", 30)
+            if cat_score > max_score:
+                max_score = cat_score
+                max_categoria = cat
+
+    if max_score == 0:
+        return {"score": 0, "nivel": "BAIXO", "categorias": [], "keywords": []}
+
+    nivel = (
+        "CRITICO" if max_score >= 90 else
+        "ALTO"    if max_score >= 65 else
+        "MEDIO"   if max_score >= 45 else
+        "BAIXO"
+    )
+
+    emoji = MILITARY_IMPACT_LEVELS.get(max_categoria, {}).get("emoji", "📢")
+
+    return {
+        "score": max_score,
+        "nivel": nivel,
+        "emoji": emoji,
+        "categoria_principal": max_categoria,
+        "categorias": list(set(categorias_encontradas)),
+        "keywords": list(set(keywords_encontradas))[:8],
+    }
+
+
+def _military_translate_classify(text: str, lingua: str, channel_nome: str) -> dict:
+    """
+    Usa Claude Haiku para:
+    1. Traduzir para português (se não for inglês)
+    2. Classificar impacto com contexto geopolítico
+    3. Extrair entidade principal (país, cidade, organização)
+    4. Gerar resumo em 1 linha
+    """
+    if not ANTHROPIC_KEY:
+        return {
+            "traducao": text[:300],
+            "resumo": text[:150],
+            "entidade": "Desconhecida",
+            "impacto_ia": "MEDIO",
+            "confianca": 0.5,
+            "acao_mercado": "MONITORAR",
+        }
+
+    lang_instruction = (
+        "O texto está em russo. Traduza para português do Brasil."
+        if lingua == "ru"
+        else "O texto está em inglês. Não precisa traduzir, só analise."
+        if lingua == "en"
+        else f"O texto pode estar em {lingua}. Traduza para português se necessário."
+    )
+
+    prompt = f"""Você é analista de inteligência militar e geopolítica especializado em prediction markets.
+
+{lang_instruction}
+
+MENSAGEM DO CANAL TELEGRAM "{channel_nome}":
+{text[:600]}
+
+Analise e responda SOMENTE com JSON válido sem markdown:
+{{
+  "traducao": "<texto traduzido para PT-BR, max 300 chars>",
+  "resumo": "<1 linha resumindo o evento em PT-BR, max 100 chars>",
+  "entidade_principal": "<país ou organização envolvida>",
+  "tipo_evento": "<ATAQUE|CEASEFIRE|NUCLEAR|TROOPS|NAVAL|CASUALTIES|INFRASTRUCTURE|POLITICO|OUTRO>",
+  "impacto_mercado": "<CRITICO|ALTO|MEDIO|BAIXO>",
+  "confianca": <0.0-1.0>,
+  "mercados_afetados": ["<keyword1>", "<keyword2>"],
+  "acao_sugerida": "<COMPRAR_YES|COMPRAR_NO|MONITORAR|AGUARDAR>"
+}}"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 400,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            raw = resp.json()["content"][0]["text"]
+            raw = raw.replace("```json", "").replace("```", "").strip()
+            return json.loads(raw)
+    except Exception as e:
+        print(f"[military_ai] erro: {e}")
+
+    # Fallback sem IA
+    return {
+        "traducao": text[:300],
+        "resumo": text[:100],
+        "entidade_principal": "Desconhecida",
+        "tipo_evento": "OUTRO",
+        "impacto_mercado": "MEDIO",
+        "confianca": 0.4,
+        "mercados_afetados": [],
+        "acao_sugerida": "MONITORAR",
+    }
+
+
+def _military_match_markets(keywords_ia: list, regiao: str, markets: list) -> list:
+    """Cruza keywords da mensagem com mercados ativos."""
+    region_kws = REGION_KEYWORDS.get(regiao, [])
+    all_kws = set(kw.lower() for kw in keywords_ia + region_kws)
+
+    matches = []
+    for m in markets:
+        q_lower = (m.question or "").lower()
+        hits = sum(1 for kw in all_kws if kw in q_lower)
+        if hits >= 2:
+            yes_price, _ = _get_yes_no_prices(m)
+            matches.append({
+                "market": m,
+                "yes_price": yes_price,
+                "hits": hits,
+            })
+
+    matches.sort(key=lambda x: x["hits"], reverse=True)
+    return matches[:4]
+
+
+def _military_telegram_alert(msg_data: dict, ia: dict, mercados: list) -> None:
+    """Envia alerta formatado no Telegram."""
+    nivel = ia.get("impacto_mercado", "MEDIO")
+    nivel_emoji = {"CRITICO": "🚨🚨🚨", "ALTO": "🚨", "MEDIO": "⚠️", "BAIXO": "ℹ️"}.get(nivel, "📢")
+    tipo_emoji = msg_data.get("impact", {}).get("emoji", "📢")
+
+    mercados_txt = ""
+    for m in mercados[:3]:
+        price = f"{m['yes_price']}%" if m.get("yes_price") else "?"
+        url = _polymarket_url(m["market"].market_slug)
+        mercados_txt += f"\n• <a href=\"{url}\">{m['market'].question[:65]}</a> @ {price}"
+
+    canal = msg_data.get("channel_nome", "?")
+    regiao = msg_data.get("regiao", "?")
+
+    msg = (
+        f"{nivel_emoji} <b>INTEL MILITAR — {regiao}</b> {tipo_emoji}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📡 Canal: <b>{canal}</b>\n"
+        f"📋 <b>{ia.get('resumo', '')[:120]}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌍 Entidade: {ia.get('entidade_principal', '?')}\n"
+        f"⚡ Tipo: {ia.get('tipo_evento', '?')} | Impacto: {nivel}\n"
+        f"📊 Confiança IA: {round(ia.get('confianca', 0) * 100)}%\n"
+    )
+
+    if mercados:
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n🎯 <b>Mercados afetados:</b>{mercados_txt}\n"
+
+    msg += (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <a href=\"{msg_data.get('url', '#')}\">Ver mensagem original</a>\n"
+        f"⏰ {datetime.utcnow().strftime('%H:%M:%S')} UTC"
+    )
+
+    _telegram_send(msg)
+
+
+@app.get("/military/scan")
+def military_scan(
+    min_impact: str = Query("MEDIO", description="BAIXO, MEDIO, ALTO, CRITICO"),
+    alertar: int = Query(1, description="1 = envia Telegram"),
+    usar_ia: int = Query(1, description="1 = traduz e classifica via Claude Haiku"),
+    canais: str = Query(None, description="IDs separados por vírgula. Default: todos"),
+    db: Session = Depends(get_db),
+):
+    """
+    Scanner de Telegram Militar — #26
+
+    Raspa canais militares públicos (Ukraine, Iran, Israel, Russia).
+    Classifica impacto por keywords + Claude Haiku (tradução + análise).
+    Cruza com mercados ativos do banco.
+    Dispara Telegram antes do Reuters cobrir.
+    """
+    now = datetime.utcnow()
+    impact_rank = {"BAIXO": 1, "MEDIO": 2, "ALTO": 3, "CRITICO": 4}
+    min_rank = impact_rank.get(min_impact.upper(), 2)
+
+    # Filtra canais se especificado
+    canais_list = MILITARY_CHANNELS
+    if canais:
+        ids_filtro = [c.strip() for c in canais.split(",")]
+        canais_list = [c for c in MILITARY_CHANNELS if c["id"] in ids_filtro]
+
+    # Mercados ativos do banco
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    alertas = []
+    stats = {
+        "canais_escaneados": 0,
+        "mensagens_coletadas": 0,
+        "mensagens_novas": 0,
+        "alertas_enviados": 0,
+        "erros": 0,
+    }
+
+    for channel in canais_list:
+        try:
+            messages = _military_fetch_channel(channel["id"], max_messages=10)
+            stats["canais_escaneados"] += 1
+            stats["mensagens_coletadas"] += len(messages)
+            time.sleep(0.5)  # respeita rate limit do Telegram
+
+            for msg in messages:
+                uid = msg["uid"]
+
+                # Já processou?
+                if uid in _MILITARY_SEEN:
+                    continue
+
+                # Classifica por keywords primeiro (rápido, sem custo)
+                impact = _military_classify_impact(msg["text"])
+
+                if impact["score"] == 0:
+                    _MILITARY_SEEN.add(uid)
+                    continue
+
+                nivel = impact.get("nivel", "BAIXO")
+                if impact_rank.get(nivel, 1) < min_rank:
+                    _MILITARY_SEEN.add(uid)
+                    continue
+
+                stats["mensagens_novas"] += 1
+
+                # Análise IA (tradução + classificação profunda)
+                ia = {}
+                if usar_ia:
+                    ia = _military_translate_classify(
+                        msg["text"],
+                        channel["lingua"],
+                        channel["nome"],
+                    )
+                    time.sleep(0.3)
+                else:
+                    ia = {
+                        "traducao": msg["text"][:300],
+                        "resumo": msg["text"][:100],
+                        "entidade_principal": channel["regiao"],
+                        "tipo_evento": impact.get("categoria_principal", "OUTRO"),
+                        "impacto_mercado": nivel,
+                        "confianca": 0.5,
+                        "mercados_afetados": impact.get("keywords", []),
+                        "acao_sugerida": "MONITORAR",
+                    }
+
+                # Cruza com mercados
+                keywords_ia = ia.get("mercados_afetados", []) + impact.get("keywords", [])
+                mercados_match = _military_match_markets(
+                    keywords_ia, channel["regiao"], markets
+                )
+
+                alerta = {
+                    "uid": uid,
+                    "canal": channel["nome"],
+                    "canal_id": channel["id"],
+                    "regiao": channel["regiao"],
+                    "lingua_original": channel["lingua"],
+                    "url": msg["url"],
+                    "publicado": msg["published"],
+                    "texto_original": msg["text"][:400],
+                    "traducao": ia.get("traducao", msg["text"][:300]),
+                    "resumo": ia.get("resumo", ""),
+                    "entidade_principal": ia.get("entidade_principal", "?"),
+                    "tipo_evento": ia.get("tipo_evento", impact.get("categoria_principal", "?")),
+                    "impacto": nivel,
+                    "impacto_score": impact["score"],
+                    "impacto_emoji": impact.get("emoji", "📢"),
+                    "confianca_ia": ia.get("confianca", 0.5),
+                    "keywords": impact.get("keywords", []),
+                    "acao_sugerida": ia.get("acao_sugerida", "MONITORAR"),
+                    "mercados_afetados": [
+                        {
+                            "question": m["market"].question,
+                            "slug": m["market"].market_slug,
+                            "yes_price": m.get("yes_price"),
+                            "polymarket_url": _polymarket_url(m["market"].market_slug),
+                        }
+                        for m in mercados_match
+                    ],
+                    "total_mercados": len(mercados_match),
+                    "detectado_em": now.isoformat(),
+                }
+                alertas.append(alerta)
+
+                # Telegram
+                if alertar:
+                    msg_data = {
+                        "channel_nome": channel["nome"],
+                        "regiao": channel["regiao"],
+                        "url": msg["url"],
+                        "impact": impact,
+                    }
+                    _military_telegram_alert(msg_data, ia, mercados_match)
+                    stats["alertas_enviados"] += 1
+
+                # Marca como visto após processar
+                _MILITARY_SEEN.add(uid)
+                if len(_MILITARY_SEEN) > 20000:
+                    for old_uid in list(_MILITARY_SEEN)[:3000]:
+                        _MILITARY_SEEN.discard(old_uid)
+
+        except Exception as e:
+            stats["erros"] += 1
+            print(f"[military] canal {channel['id']}: {e}")
+            continue
+
+    # Ordena por impacto
+    alertas.sort(key=lambda x: x["impacto_score"], reverse=True)
+
+    return {
+        "status": "ok",
+        "canais_monitorados": len(canais_list),
+        "stats": stats,
+        "min_impact": min_impact,
+        "usar_ia": bool(usar_ia),
+        "alertas": alertas,
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/military/channels")
+def military_channels():
+    """Lista todos os canais monitorados."""
+    return {
+        "total": len(MILITARY_CHANNELS),
+        "canais": [
+            {
+                "id": c["id"],
+                "nome": c["nome"],
+                "regiao": c["regiao"],
+                "lingua": c["lingua"],
+                "url_publica": f"https://t.me/s/{c['id']}",
+            }
+            for c in MILITARY_CHANNELS
+        ],
+        "regioes": list({c["regiao"] for c in MILITARY_CHANNELS}),
+    }
+
+
+@app.get("/military/test/{channel_id}")
+def military_test_channel(
+    channel_id: str,
+    usar_ia: int = Query(0, description="1 = usa Claude Haiku para traduzir"),
+):
+    """
+    Testa scraping de um canal específico sem alertar.
+    usar_ia=0 por default para economizar tokens no teste.
+    """
+    channel = next((c for c in MILITARY_CHANNELS if c["id"] == channel_id), None)
+    if not channel:
+        ids = [c["id"] for c in MILITARY_CHANNELS]
+        return {"error": "Canal não encontrado", "ids_disponiveis": ids}
+
+    messages = _military_fetch_channel(channel_id, max_messages=5)
+
+    resultado = []
+    for msg in messages:
+        impact = _military_classify_impact(msg["text"])
+        ia = {}
+        if usar_ia and impact["score"] > 0:
+            ia = _military_translate_classify(msg["text"], channel["lingua"], channel["nome"])
+
+        resultado.append({
+            "uid": msg["uid"],
+            "texto_original": msg["text"][:300],
+            "url": msg["url"],
+            "publicado": msg["published"],
+            "impacto_keywords": impact,
+            "analise_ia": ia if ia else "usar_ia=0 (sem custo de tokens)",
+        })
+
+    return {
+        "canal": channel["nome"],
+        "regiao": channel["regiao"],
+        "lingua": channel["lingua"],
+        "url": f"https://t.me/s/{channel_id}",
+        "mensagens_coletadas": len(messages),
+        "resultado": resultado,
+        "gerado_em": datetime.utcnow().isoformat(),
+    }
