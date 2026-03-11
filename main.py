@@ -4042,3 +4042,539 @@ def alerts_early(
         "alertas": alertas,
         "gerado_em": now.isoformat(),
     }
+# ══════════════════════════════════════════════════════════════
+# MOTOR 7 — CORRELAÇÃO ENTRE MERCADOS v1
+# Mineração de alpha: descobre pares de mercados que movem juntos.
+# Usa 860k+ snapshots do banco. Sem API externa.
+#
+# Tipos de correlação detectados:
+# - POSITIVA FORTE  (≥ 0.7): mercados que movem na mesma direção
+# - NEGATIVA FORTE  (≤ -0.7): mercados que movem em direções opostas
+# - LEAD/LAG: mercado A move N minutos antes do mercado B
+#
+# Uso prático:
+# - Se A sobe e B está correlacionado positivo → B vai subir (edge)
+# - Se A sobe e B está correlacionado negativo → B vai cair (edge)
+# - Lead/Lag: compra B quando A se move antes dele
+# ══════════════════════════════════════════════════════════════
+
+import statistics
+
+# Cache de correlações calculadas (TTL: 30 min por par)
+_CORR_CACHE: dict = {}
+_CORR_CACHE_TS: dict = {}
+_CORR_CACHE_TTL = 1800  # 30 minutos
+
+
+def _corr_get_prices(db: Session, token_id: str, limit: int = 200) -> list:
+    """Busca preços históricos normalizados de um token."""
+    snaps = (
+        db.query(Snapshot)
+        .filter(Snapshot.token_id == token_id)
+        .order_by(Snapshot.timestamp.desc())
+        .limit(limit).all()
+    )
+    # Retorna em ordem cronológica (mais antigo primeiro)
+    return [float(s.price) for s in reversed(snaps)]
+
+
+def _pearson_correlation(x: list, y: list) -> float:
+    """
+    Correlação de Pearson entre duas séries de preços.
+    Retorna valor entre -1.0 e 1.0.
+    """
+    n = min(len(x), len(y))
+    if n < 20:
+        return 0.0
+
+    x = x[-n:]
+    y = y[-n:]
+
+    try:
+        mean_x = sum(x) / n
+        mean_y = sum(y) / n
+
+        num = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(n))
+        den_x = sum((v - mean_x) ** 2 for v in x) ** 0.5
+        den_y = sum((v - mean_y) ** 2 for v in y) ** 0.5
+
+        denom = den_x * den_y
+        if denom < 1e-9:
+            return 0.0
+
+        return round(num / denom, 4)
+    except Exception:
+        return 0.0
+
+
+def _lead_lag_correlation(x: list, y: list, max_lag: int = 5) -> dict:
+    """
+    Testa se X lidera Y (ou vice-versa) por 1 a max_lag períodos.
+    Retorna: {"lag": int, "correlacao": float, "lider": "A" ou "B" ou "NENHUM"}
+    """
+    best_lag = 0
+    best_corr = 0.0
+    best_lider = "NENHUM"
+
+    n = min(len(x), len(y))
+    if n < 30:
+        return {"lag": 0, "correlacao": 0.0, "lider": "NENHUM"}
+
+    for lag in range(1, max_lag + 1):
+        # X lidera Y: correlação entre x[:-lag] e y[lag:]
+        if n > lag + 10:
+            corr_x_lidera = _pearson_correlation(x[:-lag], y[lag:])
+            corr_y_lidera = _pearson_correlation(y[:-lag], x[lag:])
+
+            if abs(corr_x_lidera) > abs(best_corr):
+                best_corr = corr_x_lidera
+                best_lag = lag
+                best_lider = "A"
+
+            if abs(corr_y_lidera) > abs(best_corr):
+                best_corr = corr_y_lidera
+                best_lag = lag
+                best_lider = "B"
+
+    return {
+        "lag_snapshots": best_lag,
+        "correlacao_lead_lag": round(best_corr, 4),
+        "lider": best_lider,
+    }
+
+
+def _corr_classify(corr: float) -> dict:
+    """Classifica correlação e retorna emoji + label."""
+    abs_c = abs(corr)
+    if corr >= 0.85:
+        return {"label": "MUITO FORTE POSITIVA", "emoji": "🟢🟢", "tipo": "POSITIVA"}
+    elif corr >= 0.70:
+        return {"label": "FORTE POSITIVA", "emoji": "🟢", "tipo": "POSITIVA"}
+    elif corr >= 0.50:
+        return {"label": "MODERADA POSITIVA", "emoji": "🔵", "tipo": "POSITIVA"}
+    elif corr <= -0.85:
+        return {"label": "MUITO FORTE NEGATIVA", "emoji": "🔴🔴", "tipo": "NEGATIVA"}
+    elif corr <= -0.70:
+        return {"label": "FORTE NEGATIVA", "emoji": "🔴", "tipo": "NEGATIVA"}
+    elif corr <= -0.50:
+        return {"label": "MODERADA NEGATIVA", "emoji": "🟠", "tipo": "NEGATIVA"}
+    else:
+        return {"label": "FRACA / SEM CORRELAÇÃO", "emoji": "⚪", "tipo": "NENHUMA"}
+
+
+@app.get("/correlations")
+def get_correlations(
+    min_corr: float = Query(0.65, ge=0.3, le=0.99, description="Correlação mínima absoluta para retornar"),
+    limit_markets: int = Query(80, ge=10, le=200, description="Quantos mercados analisar"),
+    include_lead_lag: int = Query(1, description="1 = detecta qual mercado lidera"),
+    db: Session = Depends(get_db),
+):
+    """
+    Motor de Correlação v1 — encontra pares de mercados correlacionados.
+    Usa snapshots históricos do banco (sem API externa).
+
+    Retorna:
+    - Pares com correlação positiva forte (movem juntos)
+    - Pares com correlação negativa forte (movem opostos)
+    - Análise lead/lag (qual mercado se move primeiro)
+    - Edge prático: se A se moveu, o que fazer em B?
+    """
+    now = datetime.utcnow()
+
+    # Busca tokens YES de mercados ativos com filtros
+    tokens_yes = (
+        db.query(Token)
+        .join(Market, Token.market_id == Market.id)
+        .filter(
+            Token.outcome == "YES",
+            Token.price > FILTER_MIN_PRICE,
+            Token.price < FILTER_MAX_PRICE,
+            (Market.end_date == None) | (Market.end_date > now),
+        )
+        .limit(limit_markets).all()
+    )
+
+    if len(tokens_yes) < 2:
+        return {"status": "insufficient_data", "pares": []}
+
+    # Carrega séries de preços para cada token
+    series: dict = {}  # token_id → {"prices": [...], "token": obj, "market": obj}
+    for token in tokens_yes:
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        volume = _get_market_volume(market)
+        if volume > 0 and volume < FILTER_MIN_VOLUME:
+            continue
+
+        prices = _corr_get_prices(db, token.token_id, limit=150)
+        if len(prices) < 30:
+            continue
+
+        series[token.token_id] = {
+            "prices": prices,
+            "token": token,
+            "market": market,
+        }
+
+    token_ids = list(series.keys())
+    n_tokens = len(token_ids)
+
+    if n_tokens < 2:
+        return {
+            "status": "insufficient_data",
+            "motivo": f"Apenas {n_tokens} tokens com dados suficientes (mínimo 2)",
+            "pares": [],
+        }
+
+    # Calcula correlações para todos os pares
+    pares = []
+    total_pares_calculados = 0
+
+    for i in range(n_tokens):
+        for j in range(i + 1, n_tokens):
+            tid_a = token_ids[i]
+            tid_b = token_ids[j]
+            data_a = series[tid_a]
+            data_b = series[tid_b]
+
+            market_a = data_a["market"]
+            market_b = data_b["market"]
+
+            # Não correlaciona tokens do mesmo mercado
+            if market_a.id == market_b.id:
+                continue
+
+            # Verifica cache
+            cache_key = f"{tid_a}:{tid_b}"
+            cache_age = (now - _CORR_CACHE_TS.get(cache_key, datetime.min)).total_seconds()
+            if cache_key in _CORR_CACHE and cache_age < _CORR_CACHE_TTL:
+                corr = _CORR_CACHE[cache_key]
+            else:
+                corr = _pearson_correlation(data_a["prices"], data_b["prices"])
+                _CORR_CACHE[cache_key] = corr
+                _CORR_CACHE_TS[cache_key] = now
+
+            total_pares_calculados += 1
+
+            # Filtra por correlação mínima
+            if abs(corr) < min_corr:
+                continue
+
+            classificacao = _corr_classify(corr)
+            if classificacao["tipo"] == "NENHUMA":
+                continue
+
+            # Lead/Lag (opcional — mais custoso)
+            lead_lag = None
+            if include_lead_lag:
+                lead_lag = _lead_lag_correlation(data_a["prices"], data_b["prices"])
+
+            # Preço atual de cada mercado
+            yes_a, _ = _get_yes_no_prices(market_a)
+            yes_b, _ = _get_yes_no_prices(market_b)
+
+            # Edge prático: o que fazer?
+            edge_prático = _corr_edge(
+                corr=corr,
+                price_a=data_a["token"].price,
+                price_b=data_b["token"].price,
+                prices_a=data_a["prices"],
+                prices_b=data_b["prices"],
+                lead_lag=lead_lag,
+            )
+
+            pares.append({
+                "mercado_a": {
+                    "question": market_a.question,
+                    "slug": market_a.market_slug,
+                    "yes_price": yes_a,
+                    "polymarket_url": _polymarket_url(market_a.market_slug),
+                    "volume": _get_market_volume(market_a),
+                    "snapshots": len(data_a["prices"]),
+                },
+                "mercado_b": {
+                    "question": market_b.question,
+                    "slug": market_b.market_slug,
+                    "yes_price": yes_b,
+                    "polymarket_url": _polymarket_url(market_b.market_slug),
+                    "volume": _get_market_volume(market_b),
+                    "snapshots": len(data_b["prices"]),
+                },
+                "correlacao": corr,
+                "correlacao_abs": abs(corr),
+                "classificacao": classificacao["label"],
+                "emoji": classificacao["emoji"],
+                "tipo": classificacao["tipo"],
+                "lead_lag": lead_lag,
+                "edge": edge_prático,
+                "detectado_em": now.isoformat(),
+            })
+
+    # Ordena por correlação absoluta
+    pares.sort(key=lambda x: x["correlacao_abs"], reverse=True)
+    pares_top = pares[:30]
+
+    # Resumo estatístico
+    positivos = [p for p in pares_top if p["tipo"] == "POSITIVA"]
+    negativos = [p for p in pares_top if p["tipo"] == "NEGATIVA"]
+    com_lead_lag = [p for p in pares_top if p.get("lead_lag") and p["lead_lag"]["lider"] != "NENHUM" and abs(p["lead_lag"]["correlacao_lead_lag"]) > min_corr]
+
+    return {
+        "status": "ok",
+        "tokens_analisados": n_tokens,
+        "pares_calculados": total_pares_calculados,
+        "pares_correlacionados": len(pares),
+        "retornados": len(pares_top),
+        "min_correlacao": min_corr,
+        "resumo": {
+            "pares_positivos": len(positivos),
+            "pares_negativos": len(negativos),
+            "pares_com_lead_lag": len(com_lead_lag),
+            "correlacao_media": round(sum(abs(p["correlacao"]) for p in pares_top) / max(len(pares_top), 1), 3),
+        },
+        "interpretacao": {
+            "positiva": "Mercados movem na MESMA direção. Se A sobe → B provavelmente sobe.",
+            "negativa": "Mercados movem em direções OPOSTAS. Se A sobe → B provavelmente cai.",
+            "lead_lag": "Mercado LIDER move antes. Quando lider se move → oportunidade no seguidor.",
+        },
+        "pares": pares_top,
+        "gerado_em": now.isoformat(),
+    }
+
+
+def _corr_edge(
+    corr: float,
+    price_a: float,
+    price_b: float,
+    prices_a: list,
+    prices_b: list,
+    lead_lag: dict,
+) -> dict:
+    """
+    Calcula edge prático de um par correlacionado.
+    Detecta se A se moveu recentemente e B ainda não reagiu (oportunidade).
+    """
+    if len(prices_a) < 10 or len(prices_b) < 10:
+        return {"acao": "AGUARDAR", "raciocinio": "Dados insuficientes", "confianca": 0}
+
+    # Movimento recente de A (últimos 5 snapshots)
+    move_a_recente = (prices_a[-1] - prices_a[-6]) * 100 if len(prices_a) >= 6 else 0
+    move_b_recente = (prices_b[-1] - prices_b[-6]) * 100 if len(prices_b) >= 6 else 0
+
+    abs_move_a = abs(move_a_recente)
+    abs_move_b = abs(move_b_recente)
+
+    # Divergência: A se moveu mas B não reagiu ainda
+    divergencia = abs_move_a > 3 and abs_move_b < 1.5
+
+    if not divergencia:
+        return {
+            "acao": "MONITORAR",
+            "raciocinio": f"A moveu {move_a_recente:+.1f}pts, B moveu {move_b_recente:+.1f}pts — sem divergência",
+            "confianca": 0,
+        }
+
+    # Direção esperada de B baseada na correlação
+    if corr > 0:
+        # Correlação positiva: B deve seguir A na mesma direção
+        direcao_b = "UP" if move_a_recente > 0 else "DOWN"
+        acao = "COMPRAR YES" if direcao_b == "UP" else "COMPRAR NO"
+        raciocinio = (
+            f"Correlação POSITIVA ({corr:.2f}). "
+            f"A moveu {move_a_recente:+.1f}pts mas B ainda não reagiu ({move_b_recente:+.1f}pts). "
+            f"Espera-se que B {'suba' if direcao_b == 'UP' else 'caia'} para se alinhar."
+        )
+    else:
+        # Correlação negativa: B deve seguir na direção oposta a A
+        direcao_b = "DOWN" if move_a_recente > 0 else "UP"
+        acao = "COMPRAR YES" if direcao_b == "UP" else "COMPRAR NO"
+        raciocinio = (
+            f"Correlação NEGATIVA ({corr:.2f}). "
+            f"A moveu {move_a_recente:+.1f}pts mas B ainda não reagiu ({move_b_recente:+.1f}pts). "
+            f"Correlação inversa sugere que B deve {'cair' if direcao_b == 'DOWN' else 'subir'}."
+        )
+
+    # Confiança baseada na força da correlação e magnitude do movimento de A
+    confianca = round(min(abs(corr) * 0.7 + min(abs_move_a / 20, 0.3), 0.95), 2)
+
+    # Boost se lead/lag confirma
+    if lead_lag and lead_lag.get("lider") == "A" and abs(lead_lag.get("correlacao_lead_lag", 0)) > 0.6:
+        confianca = min(confianca + 0.1, 0.95)
+        raciocinio += f" Lead/lag confirma: A lidera B por {lead_lag['lag_snapshots']} snapshots."
+
+    return {
+        "acao": acao,
+        "direcao_esperada_b": direcao_b,
+        "move_a_recente": round(move_a_recente, 2),
+        "move_b_recente": round(move_b_recente, 2),
+        "raciocinio": raciocinio,
+        "confianca": confianca,
+        "divergencia_detectada": True,
+    }
+
+
+@app.get("/correlations/{slug}")
+def get_market_correlations(
+    slug: str,
+    min_corr: float = Query(0.5, ge=0.3, le=0.99),
+    db: Session = Depends(get_db),
+):
+    """
+    Mostra todos os mercados correlacionados com um mercado específico.
+    Útil para: "o que mais está ligado a este mercado?"
+    """
+    now = datetime.utcnow()
+
+    # Busca o mercado alvo
+    target_market = db.query(Market).filter(Market.market_slug == slug).first()
+    if not target_market:
+        return {"error": "Mercado não encontrado", "slug": slug}
+
+    # Token YES do mercado alvo
+    target_token = db.query(Token).filter(
+        Token.market_id == target_market.id,
+        Token.outcome == "YES"
+    ).first()
+
+    if not target_token:
+        return {"error": "Token YES não encontrado", "slug": slug}
+
+    target_prices = _corr_get_prices(db, target_token.token_id, limit=150)
+    if len(target_prices) < 30:
+        return {"error": "Dados insuficientes para correlação", "slug": slug}
+
+    # Busca todos os outros tokens YES
+    other_tokens = (
+        db.query(Token)
+        .join(Market, Token.market_id == Market.id)
+        .filter(
+            Token.outcome == "YES",
+            Token.market_id != target_market.id,
+            Token.price > FILTER_MIN_PRICE,
+            Token.price < FILTER_MAX_PRICE,
+            (Market.end_date == None) | (Market.end_date > now),
+        )
+        .limit(150).all()
+    )
+
+    correlacoes = []
+    for token in other_tokens:
+        market = db.query(Market).filter(Market.id == token.market_id).first()
+        if not market:
+            continue
+
+        volume = _get_market_volume(market)
+        if volume > 0 and volume < FILTER_MIN_VOLUME:
+            continue
+
+        prices = _corr_get_prices(db, token.token_id, limit=150)
+        if len(prices) < 30:
+            continue
+
+        corr = _pearson_correlation(target_prices, prices)
+        if abs(corr) < min_corr:
+            continue
+
+        classificacao = _corr_classify(corr)
+        lead_lag = _lead_lag_correlation(target_prices, prices)
+        yes_price, _ = _get_yes_no_prices(market)
+
+        correlacoes.append({
+            "question": market.question,
+            "slug": market.market_slug,
+            "yes_price": yes_price,
+            "polymarket_url": _polymarket_url(market.market_slug),
+            "correlacao": corr,
+            "classificacao": classificacao["label"],
+            "emoji": classificacao["emoji"],
+            "tipo": classificacao["tipo"],
+            "lead_lag": lead_lag,
+        })
+
+    correlacoes.sort(key=lambda x: abs(x["correlacao"]), reverse=True)
+
+    yes_alvo, _ = _get_yes_no_prices(target_market)
+
+    return {
+        "mercado_alvo": {
+            "question": target_market.question,
+            "slug": slug,
+            "yes_price": yes_alvo,
+            "polymarket_url": _polymarket_url(slug),
+        },
+        "total_correlacionados": len(correlacoes),
+        "min_correlacao": min_corr,
+        "correlacoes": correlacoes[:20],
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/correlations/alert/divergencias")
+def correlations_divergencias(
+    min_corr: float = Query(0.70, ge=0.5, le=0.99),
+    min_move: float = Query(3.0, ge=1.0, description="Movimento mínimo do lider (%)"),
+    alertar: int = Query(0, description="1 = envia Telegram"),
+    db: Session = Depends(get_db),
+):
+    """
+    Detecta divergências ativas: mercado A se moveu, B correlacionado ainda não reagiu.
+    Estas são as oportunidades de maior alpha — o lag ainda não foi precificado.
+    """
+    now = datetime.utcnow()
+
+    # Reutiliza a lógica de /correlations mas filtra só os que têm edge ativo
+    result = get_correlations(
+        min_corr=min_corr,
+        limit_markets=100,
+        include_lead_lag=1,
+        db=db,
+    )
+
+    if result.get("status") != "ok":
+        return result
+
+    divergencias = [
+        p for p in result.get("pares", [])
+        if p.get("edge", {}).get("divergencia_detectada")
+        and abs(p["edge"].get("move_a_recente", 0)) >= min_move
+        and p["edge"].get("confianca", 0) >= 0.5
+    ]
+
+    divergencias.sort(key=lambda x: x["edge"]["confianca"], reverse=True)
+
+    # Alerta Telegram
+    if alertar and divergencias:
+        for div in divergencias[:5]:
+            edge = div["edge"]
+            corr_str = f"{div['correlacao']:+.2f}"
+            msg = (
+                f"🔗 <b>DIVERGÊNCIA CORRELAÇÃO</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 Correlação: {div['emoji']} {corr_str} ({div['classificacao']})\n"
+                f"\n"
+                f"🅰️ <b>Lider:</b> {div['mercado_a']['question'][:70]}\n"
+                f"   Moveu: {edge['move_a_recente']:+.1f}pts | Preço: {div['mercado_a']['yes_price']}%\n"
+                f"\n"
+                f"🅱️ <b>Seguidor:</b> {div['mercado_b']['question'][:70]}\n"
+                f"   Moveu: {edge['move_b_recente']:+.1f}pts | Preço: {div['mercado_b']['yes_price']}%\n"
+                f"\n"
+                f"🎯 <b>Ação:</b> {edge['acao']}\n"
+                f"📈 Confiança: {round(edge['confianca']*100)}%\n"
+                f"💡 {edge['raciocinio'][:150]}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔗 <a href=\"{div['mercado_b']['polymarket_url']}\">Abrir mercado B</a>\n"
+                f"⏰ {now.strftime('%H:%M:%S')} UTC"
+            )
+            _telegram_send(msg)
+
+    return {
+        "status": "ok",
+        "total_pares_analisados": result.get("pares_correlacionados", 0),
+        "divergencias_ativas": len(divergencias),
+        "min_correlacao": min_corr,
+        "min_move": min_move,
+        "divergencias": divergencias[:10],
+        "gerado_em": now.isoformat(),
+    }
