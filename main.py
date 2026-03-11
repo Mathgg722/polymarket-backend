@@ -966,11 +966,7 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] whale scan error: {e}")
 
-        early_resp = None
-        try:
-            early_resp = alerts_early(min_impact="ALTO", alertar=1, dry_run=0, db=db)
-        except Exception as e:
-            print(f"[cron] early alert error: {e}")
+        early_resp = {"status": "skipped_timeout"}
 
         corr_resp = None
         try:
@@ -994,16 +990,7 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] events error: {e}")
 
-        military_resp = None
-        try:
-            military_resp = military_scan(
-                min_impact="ALTO",
-                alertar=1,
-                usar_ia=0,
-                db=db,
-            )
-        except Exception as e:
-            print(f"[cron] military scan error: {e}")
+        military_resp = {"status": "skipped_timeout"}
 
         contra_resp = None
         try:
