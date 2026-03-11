@@ -6744,3 +6744,371 @@ def military_test_channel(
         "resultado": resultado,
         "gerado_em": datetime.utcnow().isoformat(),
     }
+# ══════════════════════════════════════════════════════════════
+# MOTOR #28 — AIS SHIP TRACKING
+#
+# Monitora navios em tempo real via aisstream.io WebSocket.
+# Foco em regiões estratégicas: Golfo Pérsico, Hormuz, Mar Vermelho.
+# Detecta: tankers, navios militares, anomalias de rota.
+# Cruza com mercados de petróleo/Irã/Israel no banco.
+# Dispara Telegram quando movimentação detectada.
+# ══════════════════════════════════════════════════════════════
+
+import asyncio
+import websockets
+
+AIS_API_KEY = os.environ.get("AIS_API_KEY", "552678ffa8a7503268db9e492883c1554ab7faf6")
+
+AIS_REGIONS = {
+    "HORMUZ": {
+        "nome": "Estreito de Hormuz",
+        "emoji": "🛢️",
+        "bbox": [[55.0, 25.5], [57.5, 27.5]],
+        "impacto": "CRITICO",
+        "keywords_mercado": ["iran", "oil", "crude", "hormuz", "petroleum"],
+        "descricao": "30% do petróleo mundial passa aqui. Fechamento = +50% no preço.",
+    },
+    "RED_SEA": {
+        "nome": "Mar Vermelho / Bab-el-Mandeb",
+        "emoji": "⚓",
+        "bbox": [[42.5, 11.5], [44.0, 13.0]],
+        "impacto": "ALTO",
+        "keywords_mercado": ["houthi", "red sea", "shipping", "oil", "israel"],
+        "descricao": "Rota crítica Europa-Ásia. Houthis atacam navios aqui.",
+    },
+    "PERSIAN_GULF": {
+        "nome": "Golfo Pérsico",
+        "emoji": "🌊",
+        "bbox": [[48.0, 23.0], [56.5, 27.5]],
+        "impacto": "ALTO",
+        "keywords_mercado": ["iran", "saudi", "oil", "gulf", "petroleum", "opec"],
+        "descricao": "Principal área de exportação de petróleo do Oriente Médio.",
+    },
+    "SUEZ": {
+        "nome": "Canal de Suez",
+        "emoji": "🚢",
+        "bbox": [[32.3, 29.5], [32.7, 31.5]],
+        "impacto": "MEDIO",
+        "keywords_mercado": ["egypt", "shipping", "oil", "trade", "suez"],
+        "descricao": "12% do comércio mundial. Bloqueio = choque logístico global.",
+    },
+    "BLACK_SEA": {
+        "nome": "Mar Negro",
+        "emoji": "🌑",
+        "bbox": [[28.0, 41.0], [37.0, 46.5]],
+        "impacto": "MEDIO",
+        "keywords_mercado": ["russia", "ukraine", "grain", "oil", "black sea"],
+        "descricao": "Exportações russas e ucranianas de grãos e petróleo.",
+    },
+}
+
+SHIP_TYPES = {
+    80: {"nome": "Tanker",    "emoji": "🛢️", "relevancia": "ALTA",    "descricao": "Carrega petróleo/derivados"},
+    70: {"nome": "Cargo",     "emoji": "📦", "relevancia": "MEDIA",   "descricao": "Carga geral"},
+    60: {"nome": "Passenger", "emoji": "🚢", "relevancia": "BAIXA",   "descricao": "Passageiros"},
+    35: {"nome": "Military",  "emoji": "⚔️", "relevancia": "CRITICA", "descricao": "Navio de guerra"},
+    31: {"nome": "Tug",       "emoji": "🔧", "relevancia": "BAIXA",   "descricao": "Rebocador"},
+}
+
+_AIS_SEEN: dict = {}
+_AIS_REGION_COUNTS: dict = {}
+_AIS_SNAPSHOT: list = []
+
+
+def _ais_get_ship_info(ship_type: int) -> dict:
+    if 80 <= ship_type <= 89:
+        return SHIP_TYPES[80]
+    if 70 <= ship_type <= 79:
+        return SHIP_TYPES[70]
+    if ship_type == 35:
+        return SHIP_TYPES[35]
+    return SHIP_TYPES.get(ship_type, {"nome": f"Tipo{ship_type}", "emoji": "🚢", "relevancia": "BAIXA", "descricao": "Desconhecido"})
+
+
+def _ais_detect_region(lat: float, lon: float) -> str | None:
+    for region_id, region in AIS_REGIONS.items():
+        bbox = region["bbox"]
+        min_lon, min_lat = bbox[0]
+        max_lon, max_lat = bbox[1]
+        if min_lon <= lon <= max_lon and min_lat <= lat <= max_lat:
+            return region_id
+    return None
+
+
+def _ais_match_markets(region_id: str, markets: list) -> list:
+    region = AIS_REGIONS.get(region_id, {})
+    keywords = region.get("keywords_mercado", [])
+    matches = []
+    for m in markets:
+        q_lower = (m.question or "").lower()
+        hits = sum(1 for kw in keywords if kw in q_lower)
+        if hits >= 2:
+            yes_price, _ = _get_yes_no_prices(m)
+            matches.append({
+                "question": m.question,
+                "slug": m.market_slug,
+                "yes_price": yes_price,
+                "polymarket_url": _polymarket_url(m.market_slug),
+            })
+    matches.sort(key=lambda x: x.get("yes_price") or 0, reverse=True)
+    return matches[:3]
+
+
+def _ais_telegram_alert(navio: dict, region_id: str, markets: list) -> None:
+    region = AIS_REGIONS[region_id]
+    ship_info = navio.get("ship_info", {})
+    relevancia = ship_info.get("relevancia", "MEDIA")
+    nivel_emoji = {"CRITICA": "🚨🚨", "ALTA": "🚨", "MEDIA": "⚠️", "BAIXA": "ℹ️"}.get(relevancia, "⚠️")
+    nome_navio = navio.get("name", "Desconhecido").strip() or "Sem nome"
+    mmsi = navio.get("mmsi", "?")
+    flag = navio.get("flag", "?")
+    speed = navio.get("speed", 0)
+    lat = navio.get("lat", 0)
+    lon = navio.get("lon", 0)
+    mercados_txt = ""
+    for m in markets[:3]:
+        price = f"{m['yes_price']}%" if m.get("yes_price") else "?"
+        mercados_txt += f"\n• <a href=\"{m['polymarket_url']}\">{m['question'][:65]}</a> @ {price}"
+    msg = (
+        f"{nivel_emoji} <b>NAVIO DETECTADO — {region['emoji']} {region['nome']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{ship_info.get('emoji','🚢')} <b>{nome_navio}</b> ({ship_info.get('nome','?')})\n"
+        f"🏳️ Bandeira: {flag} | MMSI: {mmsi}\n"
+        f"📍 Posição: {lat:.2f}°N, {lon:.2f}°E\n"
+        f"💨 Velocidade: {speed:.1f} nós\n"
+        f"⚠️ Relevância: {relevancia}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌍 {region['descricao']}\n"
+    )
+    if markets:
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n🎯 <b>Mercados afetados:</b>{mercados_txt}\n"
+    msg += (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <a href=\"https://www.marinetraffic.com/en/ais/details/ships/mmsi:{mmsi}\">Ver no MarineTraffic</a>\n"
+        f"⏰ {datetime.utcnow().strftime('%H:%M:%S')} UTC"
+    )
+    _telegram_send(msg)
+
+
+async def _ais_ws_collect(regions: list, timeout_sec: int = 15) -> list:
+    navios = []
+    uri = "wss://stream.aisstream.io/v0/stream"
+    bboxes = [AIS_REGIONS[r]["bbox"] for r in regions if r in AIS_REGIONS]
+    subscribe_msg = {
+        "APIKey": AIS_API_KEY,
+        "BoundingBoxes": bboxes,
+        "FilterMessageTypes": ["PositionReport"],
+    }
+    try:
+        async with websockets.connect(uri, ping_timeout=10) as ws:
+            await ws.send(json.dumps(subscribe_msg))
+            deadline = asyncio.get_event_loop().time() + timeout_sec
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                    msg = json.loads(raw)
+                    if msg.get("MessageType") != "PositionReport":
+                        continue
+                    meta = msg.get("MetaData", {})
+                    pos  = msg.get("Message", {}).get("PositionReport", {})
+                    mmsi = str(meta.get("MMSI", ""))
+                    lat  = float(meta.get("latitude", pos.get("Latitude", 0)))
+                    lon  = float(meta.get("longitude", pos.get("Longitude", 0)))
+                    if not mmsi or lat == 0:
+                        continue
+                    region_id = _ais_detect_region(lat, lon)
+                    if not region_id:
+                        continue
+                    ship_type = int(meta.get("ShipType", 0))
+                    navios.append({
+                        "mmsi": mmsi,
+                        "name": meta.get("ShipName", "").strip() or "Sem nome",
+                        "lat": round(lat, 4),
+                        "lon": round(lon, 4),
+                        "speed": round(float(pos.get("Sog", 0)), 1),
+                        "course": round(float(pos.get("Cog", 0)), 1),
+                        "ship_type": ship_type,
+                        "ship_info": _ais_get_ship_info(ship_type),
+                        "flag": meta.get("MMSI_Flag", "?"),
+                        "region_id": region_id,
+                        "region_nome": AIS_REGIONS[region_id]["nome"],
+                        "detectado_em": datetime.utcnow().isoformat(),
+                    })
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    print(f"[ais_ws] parse: {e}")
+    except Exception as e:
+        print(f"[ais_ws] connect: {e}")
+    return navios
+
+
+def _ais_run_async(regions: list, timeout_sec: int = 15) -> list:
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        result = loop.run_until_complete(_ais_ws_collect(regions, timeout_sec))
+        loop.close()
+        return result
+    except Exception as e:
+        print(f"[ais_run] erro: {e}")
+        return []
+
+
+@app.get("/ships/scan")
+def ships_scan(
+    regioes: str = Query("HORMUZ,PERSIAN_GULF,RED_SEA"),
+    min_relevancia: str = Query("MEDIA"),
+    alertar: int = Query(1),
+    timeout: int = Query(15, ge=5, le=45),
+    db: Session = Depends(get_db),
+):
+    """
+    AIS Ship Tracking — #28
+    Conecta ao aisstream.io e coleta posições de navios em regiões estratégicas.
+    Foco em tankers no Estreito de Hormuz, Mar Vermelho e Golfo Pérsico.
+    """
+    global _AIS_SNAPSHOT
+    now = datetime.utcnow()
+    relevancia_rank = {"BAIXA": 1, "MEDIA": 2, "ALTA": 3, "CRITICA": 4}
+    min_rank = relevancia_rank.get(min_relevancia.upper(), 2)
+
+    regioes_list = [r.strip().upper() for r in regioes.split(",") if r.strip().upper() in AIS_REGIONS]
+    if not regioes_list:
+        regioes_list = list(AIS_REGIONS.keys())
+
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    navios_raw = _ais_run_async(regioes_list, timeout_sec=timeout)
+
+    navios_dedup: dict = {}
+    for n in navios_raw:
+        navios_dedup[n["mmsi"]] = n
+    navios = list(navios_dedup.values())
+    _AIS_SNAPSHOT = navios[-200:]
+
+    for region_id in regioes_list:
+        rv = [n for n in navios if n["region_id"] == region_id]
+        _AIS_REGION_COUNTS[region_id] = {
+            "total": len(rv),
+            "tankers": sum(1 for n in rv if 80 <= n["ship_type"] <= 89),
+            "military": sum(1 for n in rv if n["ship_type"] == 35),
+            "ultima_atualizacao": now.isoformat(),
+        }
+
+    alertas = []
+    alertas_enviados = 0
+
+    for navio in navios:
+        ship_info = navio.get("ship_info", {})
+        rel = ship_info.get("relevancia", "BAIXA")
+        if relevancia_rank.get(rel, 1) < min_rank:
+            continue
+
+        mmsi = navio["mmsi"]
+        region_id = navio["region_id"]
+        cache_key = f"{mmsi}:{region_id}"
+        last_seen = _AIS_SEEN.get(cache_key, {})
+        last_ts = last_seen.get("timestamp")
+
+        if last_ts:
+            age = (now - datetime.fromisoformat(last_ts)).total_seconds()
+            if age < 1800:
+                alertas.append({**navio, "ja_alertado": True, "mercados_afetados": [], "total_mercados": 0})
+                continue
+
+        mercados_match = _ais_match_markets(region_id, markets)
+        alerta = {**navio, "mercados_afetados": mercados_match, "total_mercados": len(mercados_match), "ja_alertado": False}
+        alertas.append(alerta)
+
+        _AIS_SEEN[cache_key] = {"timestamp": now.isoformat(), "lat": navio["lat"], "lon": navio["lon"]}
+        if len(_AIS_SEEN) > 10000:
+            for k in list(_AIS_SEEN.keys())[:2000]:
+                del _AIS_SEEN[k]
+
+        if alertar:
+            _ais_telegram_alert(navio, region_id, mercados_match)
+            alertas_enviados += 1
+
+    rel_order = {"CRITICA": 4, "ALTA": 3, "MEDIA": 2, "BAIXA": 1}
+    alertas.sort(key=lambda x: rel_order.get(x.get("ship_info", {}).get("relevancia", "BAIXA"), 1), reverse=True)
+
+    stats_regioes = {
+        rid: {
+            "nome": AIS_REGIONS[rid]["nome"],
+            "emoji": AIS_REGIONS[rid]["emoji"],
+            "total_navios": len([n for n in navios if n["region_id"] == rid]),
+            "tankers": sum(1 for n in navios if n["region_id"] == rid and 80 <= n["ship_type"] <= 89),
+            "military": sum(1 for n in navios if n["region_id"] == rid and n["ship_type"] == 35),
+            "impacto": AIS_REGIONS[rid]["impacto"],
+        }
+        for rid in regioes_list
+    }
+
+    return {
+        "status": "ok",
+        "regioes_monitoradas": regioes_list,
+        "timeout_ws_segundos": timeout,
+        "total_navios_detectados": len(navios),
+        "total_alertas": len(alertas),
+        "alertas_enviados": alertas_enviados,
+        "stats_por_regiao": stats_regioes,
+        "navios": alertas[:50],
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/ships/regions")
+def ships_regions():
+    return {
+        "total_regioes": len(AIS_REGIONS),
+        "regioes": [
+            {
+                "id": rid,
+                "nome": r["nome"],
+                "emoji": r["emoji"],
+                "impacto": r["impacto"],
+                "descricao": r["descricao"],
+                "bbox": r["bbox"],
+                "keywords_mercado": r["keywords_mercado"],
+                "stats_atual": _AIS_REGION_COUNTS.get(rid, {"total": 0, "tankers": 0, "military": 0}),
+            }
+            for rid, r in AIS_REGIONS.items()
+        ],
+    }
+
+
+@app.get("/ships/snapshot")
+def ships_snapshot(
+    region: str = Query(None),
+    tipo: str = Query(None),
+):
+    navios = _AIS_SNAPSHOT
+    if region:
+        navios = [n for n in navios if n.get("region_id", "").upper() == region.upper()]
+    if tipo:
+        t = tipo.lower()
+        if t == "tanker":
+            navios = [n for n in navios if 80 <= n.get("ship_type", 0) <= 89]
+        elif t == "military":
+            navios = [n for n in navios if n.get("ship_type", 0) == 35]
+        elif t == "cargo":
+            navios = [n for n in navios if 70 <= n.get("ship_type", 0) <= 79]
+    return {
+        "status": "ok",
+        "total": len(navios),
+        "nota": "Snapshot do último /ships/scan. Use /ships/scan para dados frescos.",
+        "navios": navios[:100],
+        "gerado_em": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/ships/hormuz")
+def ships_hormuz(alertar: int = Query(1), db: Session = Depends(get_db)):
+    """Atalho: monitora APENAS o Estreito de Hormuz com alta prioridade."""
+    return ships_scan(regioes="HORMUZ", min_relevancia="ALTA", alertar=alertar, timeout=20, db=db)
