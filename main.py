@@ -986,6 +986,18 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] correlations error: {e}")
 
+        # Eventos agendados — avisa 24h antes
+        events_resp = None
+        try:
+            events_resp = get_events_upcoming(
+                horas=24,
+                alertar=1,
+                min_impacto="ALTO",
+                db=db,
+            )
+        except Exception as e:
+            print(f"[cron] events error: {e}")
+
         last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
         return {
             "status": "ok",
@@ -995,6 +1007,7 @@ def cron_tick(db: Session = Depends(get_db)):
             "whales": whale_resp if whale_resp else {"status": "error"},
             "early_alerts": early_resp if early_resp else {"status": "error"},
             "correlations": corr_resp if corr_resp else {"status": "error"},
+            "events": events_resp if events_resp else {"status": "error"},
         }
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -4742,7 +4755,7 @@ def _news_credibility_score(
         score_confirmacao = max(score_confirmacao, 15)
     elif tier_name == "TIER_2":
         score_confirmacao = max(score_confirmacao, 8)
-        
+
     # ── Componente 3: Sinais linguísticos (20pts) ────────────
     n_verified   = sum(1 for s in VERIFIED_SIGNALS if s in text)
     n_unverified = sum(1 for s in UNVERIFIED_SIGNALS if s in text)
