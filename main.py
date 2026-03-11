@@ -4588,3 +4588,340 @@ def correlations_divergencias(
         "divergencias": divergencias[:10],
         "gerado_em": now.isoformat(),
     } 
+
+# ══════════════════════════════════════════════════════════════
+# MOTOR #24 — CREDIBILIDADE DE NOTÍCIA
+# 
+# Lógica central:
+# - Toda notícia recebe um Score de Credibilidade (0-100)
+# - Score baseado em: fonte + confirmação cruzada + fact-check
+# - Notícia suspeita (score < 40) NÃO é descartada
+# - Em vez disso, cruza com detector de baleias:
+#   → Suspeita + Baleia detectada = ALERTA MÁXIMO (insider info?)
+#   → Suspeita + Sem baleia      = REBAIXADO (provável fake)
+# - Atua em todos os motores via _news_credibility_score()
+# ══════════════════════════════════════════════════════════════
+
+# ── Tier de fontes por credibilidade ──────────────────────────
+SOURCE_TIERS = {
+    # Tier 1 — Verificação editorial rigorosa
+    "TIER_1": {
+        "score": 95,
+        "fontes": [
+            "reuters", "associated press", "ap news", "bloomberg",
+            "bbc", "financial times", "ft.com", "wall street journal",
+            "wsj", "new york times", "nyt", "the economist",
+            "washington post", "le monde", "der spiegel", "guardian",
+        ],
+    },
+    # Tier 2 — Confiável mas com viés editorial
+    "TIER_2": {
+        "score": 75,
+        "fontes": [
+            "cnn", "nbc", "abc news", "cbs news", "politico",
+            "axios", "the hill", "marketwatch", "cnbc", "forbes",
+            "time", "newsweek", "al jazeera", "france 24",
+            "sky news", "dw", "npr", "pbs",
+        ],
+    },
+    # Tier 3 — Verificar antes de agir
+    "TIER_3": {
+        "score": 50,
+        "fontes": [
+            "fox news", "msnbc", "breitbart", "daily mail",
+            "new york post", "the sun", "daily mirror",
+            "zero hedge", "the intercept", "vice",
+        ],
+    },
+    # Tier 4 — Alta probabilidade de desinformação
+    "TIER_4": {
+        "score": 20,
+        "fontes": [
+            "infowars", "natural news", "epoch times", "oann",
+            "newsmax", "gateway pundit", "daily wire",
+        ],
+    },
+}
+
+# Palavras que indicam notícia não verificada
+UNVERIFIED_SIGNALS = [
+    "sources say", "reportedly", "rumor", "unconfirmed", "allegedly",
+    "claim", "suggests", "may have", "could be", "might be",
+    "anonymous source", "insider says", "leaked", "exclusive",
+    "breaking:", "developing story", "first reports",
+]
+
+# Palavras que indicam notícia verificada/oficial
+VERIFIED_SIGNALS = [
+    "confirmed", "official", "announced", "signed", "agreement",
+    "statement", "press conference", "official statement", "law passed",
+    "voted", "declared", "published", "released", "report",
+]
+
+# Cache de credibilidade (evita recalcular mesma notícia)
+_CRED_CACHE: dict = {}  # uid → {score, tier, detalhes}
+
+
+def _get_source_tier(source_name: str) -> tuple:
+    """Retorna (tier_name, score_base) da fonte."""
+    source_lower = (source_name or "").lower()
+    for tier_name, tier_data in SOURCE_TIERS.items():
+        if any(f in source_lower for f in tier_data["fontes"]):
+            return tier_name, tier_data["score"]
+    return "TIER_UNKNOWN", 45  # Fonte desconhecida = score moderado
+
+
+def _count_source_confirmations(title: str, articles: list) -> int:
+    """
+    Conta quantas fontes INDEPENDENTES confirmam a mesma notícia.
+    Usa sobreposição de palavras-chave no título.
+    """
+    if not articles or not title:
+        return 1
+
+    title_words = set(w.lower() for w in title.split() if len(w) > 4)
+    STOP = {"about", "after", "their", "which", "would", "could", "should", "there", "where", "while"}
+    title_words -= STOP
+
+    confirmacoes = 0
+    fontes_vistas = set()
+
+    for a in articles:
+        fonte = (a.get("source") or a.get("fonte") or "").lower()
+        if fonte in fontes_vistas:
+            continue  # Não conta mesma fonte duas vezes
+        fontes_vistas.add(fonte)
+
+        a_words = set(w.lower() for w in (a.get("title") or "").split() if len(w) > 4)
+        a_words -= STOP
+        overlap = len(title_words & a_words) / max(len(title_words), 1)
+
+        if overlap >= 0.4:  # 40% das palavras batem = mesma notícia
+            confirmacoes += 1
+
+    return max(confirmacoes, 1)
+
+
+def _news_credibility_score(
+    title: str,
+    description: str,
+    source: str,
+    all_articles: list = None,
+    slug_mercado: str = None,
+    db=None,
+) -> dict:
+    """
+    Calcula Score de Credibilidade de uma notícia (0-100).
+
+    Componentes:
+    - Tier da fonte       (40%): Reuters=95, CNN=75, Desconhecida=45
+    - Confirmações        (30%): Quantas fontes independentes confirmam
+    - Sinais de verificação(20%): Palavras "confirmed", "official" vs "rumor", "allegedly"
+    - Cruzamento baleia   (10%): Se slug tem baleia ativa, suspeita vira sinal
+
+    Retorna dict com score, classificação, e recomendação de uso.
+    """
+    uid = f"{source}:{title[:60]}"
+    if uid in _CRED_CACHE:
+        return _CRED_CACHE[uid]
+
+    text = (title + " " + (description or "")).lower()
+
+    # ── Componente 1: Tier da fonte (40pts) ──────────────────
+    tier_name, tier_score = _get_source_tier(source)
+    score_fonte = tier_score * 0.40
+
+    # ── Componente 2: Confirmações cruzadas (30pts) ──────────
+    n_confirmacoes = _count_source_confirmations(title, all_articles or [])
+    # 1 fonte = 0pts | 2 fontes = 15pts | 3+ fontes = 30pts
+    score_confirmacao = min((n_confirmacoes - 1) * 15, 30)
+
+    # ── Componente 3: Sinais linguísticos (20pts) ────────────
+    n_verified   = sum(1 for s in VERIFIED_SIGNALS if s in text)
+    n_unverified = sum(1 for s in UNVERIFIED_SIGNALS if s in text)
+    # Saldo positivo = mais verificada, negativo = mais rumor
+    saldo = n_verified - n_unverified
+    score_linguistico = max(0, min(10 + saldo * 3, 20))
+
+    # ── Componente 4: Cruzamento com baleias (10pts) ─────────
+    score_baleia = 0
+    tem_baleia = False
+    baleia_info = None
+
+    if slug_mercado and db:
+        try:
+            # Verifica se slug tem mercado com baleia detectada recentemente
+            # Usa o cache _WHALE_SEEN que já existe no sistema
+            if slug_mercado in _WHALE_SEEN:
+                tem_baleia = True
+                score_baleia = 10
+                baleia_info = "Baleia detectada neste mercado"
+        except Exception:
+            pass
+
+    # ── Score final ──────────────────────────────────────────
+    score_total = round(score_fonte + score_confirmacao + score_linguistico + score_baleia, 1)
+    score_total = max(5, min(score_total, 100))  # clamp 5-100
+
+    # ── Classificação ────────────────────────────────────────
+    if score_total >= 80:
+        nivel = "ALTA"
+        emoji = "✅"
+        usar = "CONFIAR"
+    elif score_total >= 60:
+        nivel = "MEDIA"
+        emoji = "🟡"
+        usar = "USAR_COM_CAUTELA"
+    elif score_total >= 40:
+        nivel = "BAIXA"
+        emoji = "🟠"
+        usar = "SUSPEITA"
+    else:
+        nivel = "MUITO_BAIXA"
+        emoji = "🚨"
+        usar = "NAO_CONFIAR"
+
+    # ── Lógica especial: Suspeita + Baleia = INSIDER? ────────
+    insider_signal = False
+    insider_msg = None
+
+    if score_total < 50 and tem_baleia:
+        insider_signal = True
+        insider_msg = (
+            f"⚠️ POSSÍVEL INSIDER: Notícia de baixa credibilidade ({score_total:.0f}/100) "
+            f"mas baleia ativa neste mercado. Alguém pode saber antes."
+        )
+        usar = "POSSIVEL_INSIDER"
+        emoji = "🐋⚠️"
+
+    resultado = {
+        "score": score_total,
+        "nivel": nivel,
+        "emoji": emoji,
+        "usar": usar,
+        "fonte": source,
+        "tier": tier_name,
+        "n_confirmacoes": n_confirmacoes,
+        "sinais_verificados": n_verified,
+        "sinais_rumor": n_unverified,
+        "tem_baleia_mercado": tem_baleia,
+        "baleia_info": baleia_info,
+        "insider_signal": insider_signal,
+        "insider_msg": insider_msg,
+        "detalhes": {
+            "score_fonte": round(score_fonte, 1),
+            "score_confirmacao": round(score_confirmacao, 1),
+            "score_linguistico": round(score_linguistico, 1),
+            "score_baleia": score_baleia,
+        },
+    }
+
+    _CRED_CACHE[uid] = resultado
+    if len(_CRED_CACHE) > 5000:
+        for k in list(_CRED_CACHE.keys())[:500]:
+            del _CRED_CACHE[k]
+
+    return resultado
+
+
+# ── Integração nos motores existentes ────────────────────────
+
+def _apply_credibility_to_analysis(analysis: dict, cred: dict) -> dict:
+    """
+    Ajusta score/confiança de qualquer análise baseado na credibilidade.
+    Regras:
+    - CONFIAR       → mantém score
+    - USAR_COM_CAUTELA → reduz confiança 10%
+    - SUSPEITA      → reduz confiança 25%
+    - POSSIVEL_INSIDER → AMPLIFICA confiança 15% (sinal raro e valioso)
+    - NAO_CONFIAR   → reduz confiança 40%
+    """
+    usar = cred.get("usar", "USAR_COM_CAUTELA")
+    original_conf = float(analysis.get("confianca", analysis.get("confidence", 0.5)))
+
+    multiplicadores = {
+        "CONFIAR":           1.00,
+        "USAR_COM_CAUTELA":  0.90,
+        "SUSPEITA":          0.75,
+        "POSSIVEL_INSIDER":  1.15,  # amplifica — insider é ouro
+        "NAO_CONFIAR":       0.60,
+    }
+
+    mult = multiplicadores.get(usar, 0.85)
+    nova_conf = round(min(original_conf * mult, 1.0), 3)
+
+    analysis["credibilidade"] = cred
+    analysis["confianca_original"] = original_conf
+    analysis["confianca_ajustada"] = nova_conf
+    analysis["confianca"] = nova_conf
+
+    if cred.get("insider_signal"):
+        analysis["insider_alert"] = cred["insider_msg"]
+
+    return analysis
+
+
+# ── Endpoint de diagnóstico ──────────────────────────────────
+
+@app.get("/credibility/check")
+def credibility_check(
+    title: str = Query(..., description="Título da notícia"),
+    source: str = Query("unknown", description="Nome da fonte"),
+    description: str = Query("", description="Descrição/texto da notícia"),
+    slug: str = Query(None, description="Slug do mercado relacionado"),
+    db: Session = Depends(get_db),
+):
+    """
+    Testa o score de credibilidade de qualquer notícia.
+    Útil para debug e para o frontend mostrar o score.
+    """
+    # Busca outras notícias sobre o mesmo tema para confirmação cruzada
+    articles = _fetch_news(title[:60], max_results=10) if title else []
+
+    cred = _news_credibility_score(
+        title=title,
+        description=description,
+        source=source,
+        all_articles=articles,
+        slug_mercado=slug,
+        db=db,
+    )
+
+    return {
+        "titulo": title,
+        "fonte": source,
+        "score_credibilidade": cred["score"],
+        "nivel": cred["nivel"],
+        "emoji": cred["emoji"],
+        "recomendacao": cred["usar"],
+        "insider_signal": cred["insider_signal"],
+        "insider_msg": cred.get("insider_msg"),
+        "detalhes": cred["detalhes"],
+        "n_confirmacoes_encontradas": cred["n_confirmacoes"],
+        "sinais_verificados": cred["sinais_verificados"],
+        "sinais_rumor": cred["sinais_rumor"],
+        "tier_fonte": cred["tier"],
+        "tem_baleia_no_mercado": cred["tem_baleia_mercado"],
+        "gerado_em": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/credibility/sources")
+def credibility_sources():
+    """Lista todas as fontes e seus tiers de credibilidade."""
+    return {
+        "total_fontes": sum(len(t["fontes"]) for t in SOURCE_TIERS.values()),
+        "tiers": {
+            name: {
+                "score_base": data["score"],
+                "total_fontes": len(data["fontes"]),
+                "fontes": data["fontes"],
+            }
+            for name, data in SOURCE_TIERS.items()
+        },
+        "logica_insider": {
+            "descricao": "Notícia suspeita (score<50) + baleia ativa no mercado = POSSÍVEL INSIDER INFO",
+            "acao": "Sinal AMPLIFICADO em vez de descartado",
+            "multiplicador_confianca": "x1.15",
+        },
+    }
