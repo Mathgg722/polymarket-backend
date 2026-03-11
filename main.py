@@ -4733,9 +4733,16 @@ def _news_credibility_score(
 
     # ── Componente 2: Confirmações cruzadas (30pts) ──────────
     n_confirmacoes = _count_source_confirmations(title, all_articles or [])
+
     # 1 fonte = 0pts | 2 fontes = 15pts | 3+ fontes = 30pts
     score_confirmacao = min((n_confirmacoes - 1) * 15, 30)
-
+    # Tier garante mínimo: TIER_1 = mín 15pts, TIER_2 = mín 8pts
+    # (Reuters sozinha não pode ter 0 de confirmação — ela JÁ é confirmação)
+    if tier_name == "TIER_1":
+        score_confirmacao = max(score_confirmacao, 15)
+    elif tier_name == "TIER_2":
+        score_confirmacao = max(score_confirmacao, 8)
+        
     # ── Componente 3: Sinais linguísticos (20pts) ────────────
     n_verified   = sum(1 for s in VERIFIED_SIGNALS if s in text)
     n_unverified = sum(1 for s in UNVERIFIED_SIGNALS if s in text)
