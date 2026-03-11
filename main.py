@@ -1372,7 +1372,7 @@ def get_inefficiencies(db: Session = Depends(get_db)):
 
         # Filtro de volume
         volume = _get_market_volume(market)
-        if volume < FILTER_MIN_VOLUME:
+        if volume > 0 and volume < FILTER_MIN_VOLUME:
             continue
 
         # Filtro de expiração
@@ -1929,10 +1929,16 @@ def get_game_theory_v4(
         q = market.question or ""
         slug = market.market_slug or ""
 
-        # Verifica volume
+        # Verifica volume (proxy: se zerado usa snap_count >= FILTER_MIN_SNAPS)
         volume = _get_market_volume(market)
-        if volume < FILTER_MIN_VOLUME:
+        if volume > 0 and volume < FILTER_MIN_VOLUME:
             continue
+        if volume == 0:
+            snap_count = db.query(func.count(Snapshot.id)).filter(
+                Snapshot.token_id == market.tokens[0].token_id
+            ).scalar() if market.tokens else 0
+            if snap_count < FILTER_MIN_SNAPS:
+                continue
 
         matched = _match_gt_v4(q, slug)
         if not matched:
@@ -2234,7 +2240,7 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
 
         try:
             volume = _get_market_volume(market)
-            if volume < FILTER_MIN_VOLUME:
+            if volume > 0 and volume < FILTER_MIN_VOLUME:
                 stats["total_filtrados"] += 1
                 continue
 
@@ -2387,7 +2393,7 @@ def backtest_v3(db: Session = Depends(get_db)):
             continue
 
         volume = _get_market_volume(market)
-        if volume < FILTER_MIN_VOLUME:
+        if volume > 0 and volume < FILTER_MIN_VOLUME:
             continue
 
         snaps = (
@@ -2527,7 +2533,7 @@ async def get_recomendacoes(
         )
         for market in markets_gt:
             volume = _get_market_volume(market)
-            if volume < FILTER_MIN_VOLUME:
+            if volume > 0 and volume < FILTER_MIN_VOLUME:
                 continue
 
             preds = _match_gt_v4(market.question, market.market_slug or "")
@@ -2586,7 +2592,7 @@ async def get_recomendacoes(
         )
         for market in markets_m:
             volume = _get_market_volume(market)
-            if volume < FILTER_MIN_VOLUME:
+            if volume > 0 and volume < FILTER_MIN_VOLUME:
                 continue
 
             token_prices = {}
@@ -2672,7 +2678,7 @@ async def get_recomendacoes(
             if not market:
                 continue
             volume = _get_market_volume(market)
-            if volume < FILTER_MIN_VOLUME:
+            if volume > 0 and volume < FILTER_MIN_VOLUME:
                 continue
             if (token.outcome or "").upper() != "YES":
                 continue
@@ -2860,7 +2866,7 @@ def get_best_v2(db: Session = Depends(get_db)):
             continue
 
         volume = _get_market_volume(market)
-        if volume < FILTER_MIN_VOLUME:
+        if volume > 0 and volume < FILTER_MIN_VOLUME:
             continue
 
         if market.end_date and market.end_date < now:
