@@ -3785,7 +3785,7 @@ def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(
         "analyses": analyses,
         "gerado_em": datetime.utcnow().isoformat(),
     }
- # ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # EARLY ALERT ENGINE — #21
 # Monitora RSS em tempo real, classifica impacto por IA,
 # cruza com mercados ativos e dispara Telegram ANTES do preço mover.
@@ -3992,13 +3992,7 @@ def alerts_early(
         }
         alertas.append(alerta)
 
-        # Marca como visto
-        _EARLY_ALERT_SEEN.add(article["uid"])
-        if len(_EARLY_ALERT_SEEN) > 10000:
-            for uid in list(_EARLY_ALERT_SEEN)[:2000]:
-                _EARLY_ALERT_SEEN.discard(uid)
-
-        # Envia Telegram
+        # Envia Telegram e só então marca como visto
         if alertar and not dry_run:
             nivel_emoji = {
                 "CRITICO": "🚨🚨🚨",
@@ -4028,6 +4022,12 @@ def alerts_early(
                 f"⏰ {now.strftime('%H:%M:%S')} UTC"
             )
             _telegram_send(msg)
+
+            # Marca como visto SÓ após enviar
+            _EARLY_ALERT_SEEN.add(article["uid"])
+            if len(_EARLY_ALERT_SEEN) > 10000:
+                for uid in list(_EARLY_ALERT_SEEN)[:2000]:
+                    _EARLY_ALERT_SEEN.discard(uid)
 
     # Ordena por impacto (CRITICO primeiro)
     alertas.sort(key=lambda x: x["impacto_score"], reverse=True)
