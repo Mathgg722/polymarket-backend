@@ -828,6 +828,78 @@ def debug_tokens(db: Session = Depends(get_db)):
     }
 
 
+@app.get("/debug/anomalies")
+def debug_anomalies(db: Session = Depends(get_db)):
+    """Diagnóstico: por que anomalias retorna vazio."""
+    now = datetime.utcnow()
+    w5m = now - timedelta(minutes=5)
+
+    total_tokens = db.query(Token).count()
+    tokens_in_range = db.query(Token).filter(
+        Token.price > FILTER_MIN_PRICE,
+        Token.price < FILTER_MAX_PRICE
+    ).count()
+
+    # Conta quantos têm snapshots suficientes
+    tokens_com_snaps = 0
+    tokens_com_movimento = 0
+    sample = []
+
+    tokens = db.query(Token).filter(
+        Token.price > FILTER_MIN_PRICE,
+        Token.price < FILTER_MAX_PRICE
+    ).limit(50).all()
+
+    for t in tokens:
+        snap_count = db.query(func.count(Snapshot.id)).filter(
+            Snapshot.token_id == t.token_id
+        ).scalar() or 0
+
+        market = db.query(Market).filter(Market.id == t.market_id).first()
+        volume = _get_market_volume(market) if market else 0
+
+        passou, motivo = _market_passes_filters(t.price, volume, snap_count, market.end_date if market else None)
+
+        if snap_count >= 20:
+            tokens_com_snaps += 1
+
+        s5m = (
+            db.query(Snapshot)
+            .filter(Snapshot.token_id == t.token_id, Snapshot.timestamp <= w5m)
+            .order_by(Snapshot.timestamp.desc()).first()
+        )
+        c5m = round((t.price - s5m.price) * 100, 2) if s5m else None
+
+        if c5m and abs(c5m) >= 3:
+            tokens_com_movimento += 1
+
+        if len(sample) < 10:
+            sample.append({
+                "token": t.token_id[:20],
+                "outcome": t.outcome,
+                "price_pct": round(t.price * 100, 1),
+                "snap_count": snap_count,
+                "volume": volume,
+                "passou_filtro": passou,
+                "motivo": motivo,
+                "c5m": c5m,
+                "market": market.question[:50] if market else "?",
+            })
+
+    return {
+        "total_tokens": total_tokens,
+        "tokens_em_range_10_90pct": tokens_in_range,
+        "tokens_com_20plus_snaps": tokens_com_snaps,
+        "tokens_com_movimento_3pct": tokens_com_movimento,
+        "filtro_min_price": FILTER_MIN_PRICE,
+        "filtro_max_price": FILTER_MAX_PRICE,
+        "filtro_min_volume": FILTER_MIN_VOLUME,
+        "filtro_min_snaps": FILTER_MIN_SNAPS,
+        "sample": sample,
+        "now": now.isoformat(),
+    }
+
+
 @app.get("/debug/clob_trades")
 def debug_clob_trades(limit: int = Query(5, ge=1, le=100)):
     url = f"{CLOB_API}/trades?limit={limit}"
