@@ -3401,18 +3401,18 @@ def get_whales(
 @app.get("/whales/scan")
 def whale_scan(
     min_valor: float = Query(5000, ge=1),
-    alertar: int = Query(1, description="1 = envia Telegram para novas baleias"),
+    alertar: int = Query(1, description="1 = envia Telegram para mercados novos com baleias"),
     db: Session = Depends(get_db),
 ):
     """
-    Scan de baleias — detecta novas e dispara Telegram.
-    Chamado automaticamente pelo cron_tick a cada 2 minutos.
+    Scan de baleias — detecta mercados novos com posições grandes e dispara Telegram.
+    Agrupa por mercado. Alerta quando num_baleias >= 2 (múltiplas carteiras).
     """
-    url = f"{DATA_API}/trades?limit=500"
+    url = f"{DATA_API}/trades?limit=1000"
     novas = []
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=12)
+        resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code != 200:
             return {"status": "unavailable"}
 
@@ -3420,64 +3420,120 @@ def whale_scan(
         if not isinstance(trades_raw, list):
             trades_raw = trades_raw.get("data", [])
 
+        # Agrega por wallet+mercado
+        wallet_mercado: dict = {}
         for tx in trades_raw:
-            size      = float(tx.get("size") or 0)
-            price     = float(tx.get("price") or 0)
-            valor_usd = round(size * price, 2)
+            size  = float(tx.get("size") or 0)
+            price = float(tx.get("price") or 0)
+            valor = size * price
 
-            if valor_usd < min_valor:
+            if price > 0.90 or price < 0.10:
                 continue
 
             wallet = tx.get("proxyWallet") or ""
-            if not wallet:
+            slug   = tx.get("slug") or tx.get("conditionId") or ""
+            if not wallet or not slug:
                 continue
 
-            trade_id = tx.get("transactionHash") or f"{wallet}-{tx.get('timestamp','')}"
-            if trade_id in _WHALE_SEEN:
+            key = f"{wallet}|{slug}"
+            if key not in wallet_mercado:
+                wallet_mercado[key] = {
+                    "wallet_full": wallet,
+                    "slug": slug,
+                    "mercado": tx.get("title") or "?",
+                    "outcome": tx.get("outcome") or "?",
+                    "valor_usd": 0.0,
+                    "preco_sum": 0.0,
+                    "num_trades": 0,
+                }
+            wallet_mercado[key]["valor_usd"]  += valor
+            wallet_mercado[key]["num_trades"] += 1
+            wallet_mercado[key]["preco_sum"]  += price
+
+        # Agrupa por mercado, só carteiras acima do threshold
+        baleias_por_mercado: dict = {}
+        for key, data in wallet_mercado.items():
+            if data["valor_usd"] < min_valor:
+                continue
+            slug = data["slug"]
+            if slug not in baleias_por_mercado:
+                baleias_por_mercado[slug] = {
+                    "mercado": data["mercado"],
+                    "slug": slug,
+                    "polymarket_url": _polymarket_url(slug),
+                    "total_volume_baleias": 0.0,
+                    "num_baleias": 0,
+                    "direcoes": {},
+                    "carteiras": [],
+                }
+            m = baleias_por_mercado[slug]
+            m["total_volume_baleias"] += data["valor_usd"]
+            m["num_baleias"] += 1
+            direcao = data["outcome"]
+            m["direcoes"][direcao] = m["direcoes"].get(direcao, 0) + data["valor_usd"]
+            m["carteiras"].append({
+                "wallet": data["wallet_full"][:8] + "..." + data["wallet_full"][-4:],
+                "valor_usd": round(data["valor_usd"], 2),
+                "outcome": data["outcome"],
+                "preco_medio_pct": round(data["preco_sum"] / max(data["num_trades"], 1) * 100, 1),
+            })
+
+        # Detecta mercados NOVOS (não vistos antes)
+        for slug, m in baleias_por_mercado.items():
+            m["total_volume_baleias"] = round(m["total_volume_baleias"], 2)
+
+            if m["direcoes"]:
+                dir_dom = max(m["direcoes"].items(), key=lambda x: x[1])
+                m["direcao_dominante"] = dir_dom[0]
+                total_dir = sum(m["direcoes"].values())
+                m["consenso_pct"] = round(dir_dom[1] / total_dir * 100, 1)
+            else:
+                m["direcao_dominante"] = "?"
+                m["consenso_pct"] = 0
+
+            nb = m["num_baleias"]
+            m["conviction"] = (
+                "🔴 MUITO ALTA" if nb >= 3 and m["consenso_pct"] >= 80 else
+                "🟠 ALTA"       if nb >= 2 and m["consenso_pct"] >= 70 else
+                "🟡 MÉDIA"      if nb >= 2 else
+                "⚪ ÚNICA"
+            )
+
+            if slug in _WHALE_SEEN:
                 continue
 
-            _WHALE_SEEN.add(trade_id)
+            _WHALE_SEEN.add(slug)
             if len(_WHALE_SEEN) > 5000:
                 for tid in list(_WHALE_SEEN)[:1000]:
                     _WHALE_SEEN.discard(tid)
 
-            score   = _whale_score(wallet)
-            outcome = tx.get("outcome") or tx.get("side") or "?"
-            slug    = tx.get("slug") or ""
+            novas.append(m)
 
-            whale = {
-                "trade_id": trade_id,
-                "wallet": wallet[:8] + "..." + wallet[-4:],
-                "wallet_full": wallet,
-                "valor_usd": valor_usd,
-                "shares": round(size, 2),
-                "preco_pct": round(price * 100, 1),
-                "outcome": outcome,
-                "side": tx.get("side", ""),
-                "mercado": tx.get("title") or "?",
-                "slug": slug,
-                "polymarket_url": _polymarket_url(slug),
-                "polymarket_wallet_url": f"https://polymarket.com/profile/{wallet}",
-                "timestamp": tx.get("timestamp"),
-                "score": score,
-                "market_info": {
-                    "question": tx.get("title") or "?",
-                    "slug": slug,
-                    "url": _polymarket_url(slug),
-                    "outcome": outcome,
-                },
-            }
-            novas.append(whale)
-
+            # Alerta Telegram
             if alertar:
-                _whale_alert_telegram(whale)
+                nb_str = str(nb)
+                vol_str = "${:,.0f}".format(m["total_volume_baleias"])
+                dir_str = m["direcao_dominante"] + " (" + str(m["consenso_pct"]) + "% consenso)"
+                msg_parts = [
+                    "<b>BALEIAS DETECTADAS</b>",
+                    "Mercado: " + m["mercado"][:80],
+                    "Volume total: " + vol_str,
+                    "Carteiras: " + nb_str + " independentes",
+                    "Direcao: " + dir_str,
+                    "Conviction: " + m["conviction"],
+                    "---",
+                ]
+                for c in m["carteiras"]:
+                    msg_parts.append(c["wallet"] + " $" + "{:,.0f}".format(c["valor_usd"]) + " " + c["outcome"])
+                msg_parts.append(m["polymarket_url"])
+                _telegram_send(chr(10).join(msg_parts))
 
         return {
             "status": "ok",
-            "novas_baleias": len(novas),
-            "threshold_usd": min_valor,
+            "min_valor": min_valor,
+            "novos_mercados_com_baleias": len(novas),
             "alertas_enviados": len(novas) if alertar else 0,
-            "baleias": novas,
+            "mercados": novas,
             "gerado_em": datetime.utcnow().isoformat(),
         }
 
