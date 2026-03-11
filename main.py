@@ -5493,3 +5493,664 @@ def events_test_alert(event_id: str, db: Session = Depends(get_db)):
         ],
         "telegram_enviado": True,
     }
+# ══════════════════════════════════════════════════════════════
+# MOTOR #27 — DETECTOR DE CONTRADIÇÃO ENTRE MERCADOS
+#
+# Lógica central:
+# Se mercado A diz 80% de ataque ao Irã, mas mercado de petróleo
+# diz só 30% de alta → contradição = um deles está errado → edge.
+#
+# Duas abordagens combinadas:
+# 1. PARES SEMÂNTICOS: pares definidos com relação esperada
+#    Ex: Iran_attack × Oil_spike → correlação POSITIVA esperada
+#    Se divergem muito → contradição detectada
+#
+# 2. AUTO-SCAN: varre todos os mercados do banco,
+#    agrupa por tema, detecta quando mercados do mesmo tema
+#    dão sinais opostos sem justificativa
+#
+# Output:
+# - Qual lado está "errado" (qual mercado o sistema acha que vai corrigir)
+# - Edge estimado
+# - Ação recomendada
+# - Alerta Telegram automático
+# ══════════════════════════════════════════════════════════════
+
+# ── Pares semânticos com relação esperada ────────────────────
+# relacao: "POSITIVA" = ambos devem subir/cair juntos
+#          "NEGATIVA" = um sobe, outro cai
+# threshold_contradicao: diferença mínima (pts) para ser contradição
+CONTRADICTION_PAIRS = [
+    # ── IRAN × PETRÓLEO ──────────────────────────────────────
+    {
+        "id": "iran_oil",
+        "tema": "Irã × Petróleo",
+        "descricao": "Ataque ao Irã → fechamento Estreito de Hormuz → petróleo explode",
+        "icone": "⚔️🛢️",
+        "relacao": "POSITIVA",
+        "threshold": 20,
+        "mercado_a": {
+            "nome": "Ataque ao Irã",
+            "keywords": ["iran", "attack", "strike", "war", "military", "iranian"],
+            "direcao_esperada": "UP",  # se ataque → sobe
+        },
+        "mercado_b": {
+            "nome": "Petróleo alto",
+            "keywords": ["oil", "crude", "brent", "wti", "petroleum", "barrel", "150", "120", "100"],
+            "direcao_esperada": "UP",  # se ataque → sobe
+        },
+        "logica": "Se prob. de ataque ao Irã é alta, petróleo DEVE ser alto também. Se não é → petróleo subavaliado.",
+        "acao_se_a_alto_b_baixo": "COMPRAR petróleo (B está subavaliado dado risco Iran)",
+        "acao_se_a_baixo_b_alto": "VENDER petróleo (B superavaliado dado baixo risco Iran)",
+    },
+    # ── RÚSSIA/UCRÂNIA × PETRÓLEO ────────────────────────────
+    {
+        "id": "russia_oil",
+        "tema": "Cessar-fogo Rússia × Petróleo",
+        "descricao": "Cessar-fogo → normalização → queda do petróleo",
+        "icone": "❄️🛢️",
+        "relacao": "NEGATIVA",
+        "threshold": 15,
+        "mercado_a": {
+            "nome": "Cessar-fogo Rússia-Ucrânia",
+            "keywords": ["russia", "ukraine", "ceasefire", "peace", "war end"],
+            "direcao_esperada": "UP",
+        },
+        "mercado_b": {
+            "nome": "Petróleo alto",
+            "keywords": ["oil", "crude", "brent", "petroleum", "barrel", "120", "150"],
+            "direcao_esperada": "DOWN",  # se cessar-fogo → petróleo CAI
+        },
+        "logica": "Se prob. de cessar-fogo sobe, expectativa de petróleo alto DEVE cair. Se ambos sobem → contradição.",
+        "acao_se_a_alto_b_alto": "VENDER petróleo (cessar-fogo tornaria petróleo alto improvável)",
+        "acao_se_a_baixo_b_baixo": "COMPRAR petróleo (sem paz = pressão de oferta continua)",
+    },
+    # ── FED CORTE × BITCOIN ───────────────────────────────────
+    {
+        "id": "fed_bitcoin",
+        "tema": "Fed Corte de Juros × Bitcoin",
+        "descricao": "Corte de juros → liquidez → Bitcoin sobe",
+        "icone": "🏦₿",
+        "relacao": "POSITIVA",
+        "threshold": 20,
+        "mercado_a": {
+            "nome": "Fed corta juros",
+            "keywords": ["fed", "rate cut", "interest rate", "fomc", "federal reserve", "pivot"],
+            "direcao_esperada": "UP",
+        },
+        "mercado_b": {
+            "nome": "Bitcoin alto",
+            "keywords": ["bitcoin", "btc", "crypto", "100k", "150k", "200k", "cryptocurrency"],
+            "direcao_esperada": "UP",
+        },
+        "logica": "Corte de juros Fed → liquidez → ativos de risco sobem → Bitcoin deve subir junto.",
+        "acao_se_a_alto_b_baixo": "COMPRAR Bitcoin (está subavaliado dado corte esperado)",
+        "acao_se_a_baixo_b_alto": "VENDER Bitcoin (superavaliado dado Fed hawkish)",
+    },
+    # ── TRUMP × CHINA TARIFAS ─────────────────────────────────
+    {
+        "id": "trump_china_trade",
+        "tema": "Trump × Guerra Comercial China",
+        "descricao": "Escalada tarifas → mercados emergentes sofrem",
+        "icone": "🤝🇨🇳",
+        "relacao": "NEGATIVA",
+        "threshold": 15,
+        "mercado_a": {
+            "nome": "Trump escala tarifas China",
+            "keywords": ["trump", "china", "tariff", "trade war", "import", "xi"],
+            "direcao_esperada": "UP",
+        },
+        "mercado_b": {
+            "nome": "Acordo comercial EUA-China",
+            "keywords": ["trade deal", "china deal", "trade agreement", "grand bargain", "xi trump deal"],
+            "direcao_esperada": "DOWN",  # mais tarifas = menos chance de acordo
+        },
+        "logica": "Alta prob. de escalada tarifária é NEGATIVA para acordo. Se ambos são altos → contradição.",
+        "acao_se_a_alto_b_alto": "VENDER acordo (escalada torna deal improvável)",
+        "acao_se_a_baixo_b_baixo": "COMPRAR acordo (baixa tensão favorece deal)",
+    },
+    # ── RECESSÃO EUA × S&P500 ─────────────────────────────────
+    {
+        "id": "recession_sp500",
+        "tema": "Recessão EUA × Mercado de Ações",
+        "descricao": "Recessão → queda S&P500 — se mercado não precifica, está errado",
+        "icone": "📉💹",
+        "relacao": "NEGATIVA",
+        "threshold": 20,
+        "mercado_a": {
+            "nome": "Recessão EUA",
+            "keywords": ["recession", "gdp", "economic downturn", "us economy crash", "depression"],
+            "direcao_esperada": "UP",
+        },
+        "mercado_b": {
+            "nome": "S&P500 alto / Mercado Bull",
+            "keywords": ["s&p", "sp500", "stock market", "dow jones", "nasdaq", "bull market", "ath"],
+            "direcao_esperada": "DOWN",  # recessão = stocks caem
+        },
+        "logica": "Alta prob. de recessão é incompatível com S&P500 em alta. Um está errado.",
+        "acao_se_a_alto_b_alto": "VENDER S&P bull (recessão tornaria isso impossível)",
+        "acao_se_a_baixo_b_baixo": "COMPRAR S&P bull (sem recessão = mercado pode subir)",
+    },
+    # ── ISRAEL × PETRÓLEO ─────────────────────────────────────
+    {
+        "id": "israel_oil",
+        "tema": "Conflito Israel × Petróleo",
+        "descricao": "Escalada Israel-Irã → risco Hormuz → petróleo",
+        "icone": "🇮🇱🛢️",
+        "relacao": "POSITIVA",
+        "threshold": 15,
+        "mercado_a": {
+            "nome": "Escalada conflito Israel",
+            "keywords": ["israel", "iran", "hezbollah", "hamas", "gaza", "idf", "attack", "war"],
+            "direcao_esperada": "UP",
+        },
+        "mercado_b": {
+            "nome": "Petróleo alto",
+            "keywords": ["oil", "crude", "brent", "petroleum", "barrel", "100", "120", "150"],
+            "direcao_esperada": "UP",
+        },
+        "logica": "Escalada Israel-Irã ameaça Hormuz → petróleo deve subir junto.",
+        "acao_se_a_alto_b_baixo": "COMPRAR petróleo (risco geopolítico não precificado)",
+        "acao_se_a_baixo_b_alto": "VENDER petróleo (sem escalada = risco geopolítico superavaliado)",
+    },
+    # ── ELEIÇÃO EUA 2028 × POLÍTICAS ─────────────────────────
+    {
+        "id": "election_policies",
+        "tema": "Eleição 2028 × Políticas Esperadas",
+        "descricao": "Favorito eleitoral deve refletir nas políticas esperadas",
+        "icone": "🗳️📋",
+        "relacao": "POSITIVA",
+        "threshold": 25,
+        "mercado_a": {
+            "nome": "Republicano vence 2028",
+            "keywords": ["republican", "2028", "president", "gop", "election", "nominee"],
+            "direcao_esperada": "UP",
+        },
+        "mercado_b": {
+            "nome": "Corte de impostos / desregulação",
+            "keywords": ["tax cut", "deregulation", "corporate tax", "business tax", "regulation"],
+            "direcao_esperada": "UP",  # republicano = corte de impostos
+        },
+        "logica": "Se republicano favorito, políticas pró-business devem ter prob. alta.",
+        "acao_se_a_alto_b_baixo": "COMPRAR corte impostos (subestimado dado favorito republicano)",
+        "acao_se_a_baixo_b_alto": "VENDER corte impostos (overpriced dado chance baixa republicano)",
+    },
+]
+
+# Cache de contradições já alertadas
+_CONTRA_SEEN: set = set()
+
+
+def _contra_find_market(keywords: list, markets: list, exclude_ids: set = None) -> tuple:
+    """
+    Encontra o mercado mais relevante para um conjunto de keywords.
+    Retorna (market, yes_price, score_hits).
+    """
+    exclude_ids = exclude_ids or set()
+    best_market = None
+    best_price = None
+    best_hits = 0
+
+    for m in markets:
+        if m.id in exclude_ids:
+            continue
+        q_lower = (m.question or "").lower()
+        slug_lower = (m.market_slug or "").lower()
+        combined = q_lower + " " + slug_lower
+
+        hits = sum(1 for kw in keywords if kw.lower() in combined)
+        if hits > best_hits:
+            best_hits = hits
+            best_market = m
+            yes_p, _ = _get_yes_no_prices(m)
+            best_price = yes_p
+
+    return best_market, best_price, best_hits
+
+
+def _contra_score(price_a: float, price_b: float, relacao: str, threshold: float) -> dict:
+    """
+    Calcula o score de contradição entre dois mercados.
+
+    Relação POSITIVA: ambos deveriam ter preços similares
+    Relação NEGATIVA: preços deveriam ser inversamente relacionados (somar ~100)
+
+    Retorna: {score, tipo, lado_errado, magnitude}
+    """
+    if price_a is None or price_b is None:
+        return {"score": 0, "tipo": "SEM_DADOS", "magnitude": 0}
+
+    if relacao == "POSITIVA":
+        # Se A=80% e B=30% → diferença de 50pts = CONTRADIÇÃO FORTE
+        diferenca = abs(price_a - price_b)
+        if diferenca < threshold:
+            return {"score": 0, "tipo": "CONSISTENTE", "magnitude": diferenca}
+
+        # Qual está errado? O de menor preço geralmente está subavaliado
+        # (assumindo que o mercado mais líquido / maior volume está certo)
+        lado_errado = "B_SUBAVALIADO" if price_a > price_b else "A_SUBAVALIADO"
+        score = min(round((diferenca - threshold) * 2, 1), 100)
+        return {
+            "score": score,
+            "tipo": "CONTRADICAO_POSITIVA",
+            "lado_errado": lado_errado,
+            "magnitude": round(diferenca, 1),
+        }
+
+    elif relacao == "NEGATIVA":
+        # Se A=80% e B=80% → soma 160% quando deveria ser ~100% = CONTRADIÇÃO
+        soma = price_a + price_b
+        desvio_de_100 = abs(soma - 100)
+        if desvio_de_100 < threshold:
+            return {"score": 0, "tipo": "CONSISTENTE", "magnitude": desvio_de_100}
+
+        # Se soma > 100: ambos muito altos → um vai cair
+        # Se soma < 100: ambos muito baixos → um vai subir
+        tipo = "CONTRADICAO_NEGATIVA_ALTA" if soma > 100 else "CONTRADICAO_NEGATIVA_BAIXA"
+        lado_errado = "AMBOS_ALTOS" if soma > 100 else "AMBOS_BAIXOS"
+        score = min(round((desvio_de_100 - threshold) * 2, 1), 100)
+        return {
+            "score": score,
+            "tipo": tipo,
+            "lado_errado": lado_errado,
+            "magnitude": round(desvio_de_100, 1),
+            "soma_precos": round(soma, 1),
+        }
+
+    return {"score": 0, "tipo": "DESCONHECIDO", "magnitude": 0}
+
+
+def _contra_recommend_action(par: dict, price_a: float, price_b: float, contra_result: dict) -> dict:
+    """Gera recomendação de ação baseada na contradição detectada."""
+    relacao = par["relacao"]
+    lado = contra_result.get("lado_errado", "")
+    tipo = contra_result.get("tipo", "")
+
+    if relacao == "POSITIVA":
+        if lado == "B_SUBAVALIADO":
+            acao = par.get("acao_se_a_alto_b_baixo", "COMPRAR mercado B")
+            mercado_alvo = "B"
+            direcao = "YES"
+        else:
+            acao = par.get("acao_se_a_baixo_b_alto", "COMPRAR mercado A")
+            mercado_alvo = "A"
+            direcao = "YES"
+    elif relacao == "NEGATIVA":
+        if "ALTA" in tipo:
+            acao = par.get("acao_se_a_alto_b_alto", "VENDER o de maior preço")
+            mercado_alvo = "B" if price_b > price_a else "A"
+            direcao = "NO"
+        else:
+            acao = par.get("acao_se_a_baixo_b_baixo", "COMPRAR o de maior potencial")
+            mercado_alvo = "A"
+            direcao = "YES"
+    else:
+        acao = "AGUARDAR"
+        mercado_alvo = "NENHUM"
+        direcao = "NEUTRO"
+
+    confianca = min(contra_result.get("score", 0) / 100, 0.92)
+
+    return {
+        "acao": acao,
+        "mercado_alvo": mercado_alvo,
+        "direcao": direcao,
+        "confianca": round(confianca, 2),
+        "confianca_pct": round(confianca * 100),
+        "nivel": (
+            "🔴 MUITO ALTA" if confianca >= 0.75 else
+            "🟠 ALTA"       if confianca >= 0.55 else
+            "🟡 MÉDIA"      if confianca >= 0.35 else
+            "⚪ BAIXA"
+        ),
+    }
+
+
+def _contra_telegram_alert(par: dict, market_a, market_b, price_a, price_b, contra, recomendacao) -> None:
+    """Envia alerta de contradição no Telegram."""
+    score = contra.get("score", 0)
+    magnitude = contra.get("magnitude", 0)
+    tipo = contra.get("tipo", "")
+
+    nivel_emoji = "🔴🔴" if score >= 75 else "🔴" if score >= 55 else "🟠" if score >= 35 else "🟡"
+
+    url_a = _polymarket_url(market_a.market_slug) if market_a else "#"
+    url_b = _polymarket_url(market_b.market_slug) if market_b else "#"
+
+    q_a = (market_a.question or "?")[:70] if market_a else "?"
+    q_b = (market_b.question or "?")[:70] if market_b else "?"
+
+    msg = (
+        f"{nivel_emoji} <b>CONTRADIÇÃO DETECTADA — {par['icone']} {par['tema']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 {par['logica']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🅰️ <a href=\"{url_a}\">{q_a}</a>\n"
+        f"   Preço YES: <b>{price_a}%</b>\n"
+        f"\n"
+        f"🅱️ <a href=\"{url_b}\">{q_b}</a>\n"
+        f"   Preço YES: <b>{price_b}%</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ Contradição: <b>{magnitude:.0f}pts</b> | Score: {score:.0f}/100\n"
+        f"🎯 <b>AÇÃO:</b> {recomendacao['acao']}\n"
+        f"📊 Confiança: {recomendacao['confianca_pct']}% {recomendacao['nivel']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ {datetime.utcnow().strftime('%H:%M:%S')} UTC"
+    )
+    _telegram_send(msg)
+
+
+@app.get("/contradictions")
+def get_contradictions(
+    min_score: float = Query(20.0, ge=5, le=100),
+    alertar: int = Query(0, description="1 = envia Telegram para contradições novas"),
+    db: Session = Depends(get_db),
+):
+    """
+    Detector de Contradição entre Mercados — #27.
+
+    Varre pares semânticos predefinidos (Iran×Oil, Fed×Bitcoin, etc.)
+    e detecta quando preços divergem de forma semanticamente incoerente.
+
+    Exemplo clássico:
+    - Iran attack = 75% → petróleo $150 deveria ser alto
+    - Mas petróleo $150 = 30% → CONTRADIÇÃO de 45pts
+    - Sistema sugere: COMPRAR petróleo (está subavaliado)
+    """
+    now = datetime.utcnow()
+
+    # Busca mercados ativos com filtros
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(600).all()
+    )
+
+    resultados = []
+    stats = {
+        "pares_analisados": 0,
+        "contradicoes_encontradas": 0,
+        "alertas_enviados": 0,
+    }
+
+    for par in CONTRADICTION_PAIRS:
+        stats["pares_analisados"] += 1
+
+        # Encontra mercado A
+        market_a, price_a, hits_a = _contra_find_market(
+            par["mercado_a"]["keywords"], markets
+        )
+
+        if not market_a or hits_a < 2:
+            continue
+
+        # Encontra mercado B (exclui A)
+        market_b, price_b, hits_b = _contra_find_market(
+            par["mercado_b"]["keywords"], markets,
+            exclude_ids={market_a.id}
+        )
+
+        if not market_b or hits_b < 2:
+            continue
+
+        if price_a is None or price_b is None:
+            continue
+
+        # Calcula contradição
+        contra = _contra_score(price_a, price_b, par["relacao"], par["threshold"])
+
+        if contra["score"] < min_score:
+            continue
+
+        if contra["tipo"] in ("CONSISTENTE", "SEM_DADOS", "DESCONHECIDO"):
+            continue
+
+        stats["contradicoes_encontradas"] += 1
+
+        # Gera recomendação
+        recomendacao = _contra_recommend_action(par, price_a, price_b, contra)
+
+        # Volume dos mercados
+        vol_a = _get_market_volume(market_a)
+        vol_b = _get_market_volume(market_b)
+
+        entry = {
+            "par_id": par["id"],
+            "tema": par["tema"],
+            "icone": par["icone"],
+            "descricao": par["descricao"],
+            "relacao_esperada": par["relacao"],
+            "logica": par["logica"],
+            "mercado_a": {
+                "question": market_a.question,
+                "slug": market_a.market_slug,
+                "yes_price": price_a,
+                "volume": vol_a,
+                "polymarket_url": _polymarket_url(market_a.market_slug),
+            },
+            "mercado_b": {
+                "question": market_b.question,
+                "slug": market_b.market_slug,
+                "yes_price": price_b,
+                "volume": vol_b,
+                "polymarket_url": _polymarket_url(market_b.market_slug),
+            },
+            "contradicao": {
+                "score": contra["score"],
+                "tipo": contra["tipo"],
+                "magnitude_pts": contra.get("magnitude", 0),
+                "lado_errado": contra.get("lado_errado", "?"),
+                "soma_precos": contra.get("soma_precos"),
+            },
+            "recomendacao": recomendacao,
+            "acao_sugerida": recomendacao["acao"],
+            "detectado_em": now.isoformat(),
+        }
+        resultados.append(entry)
+
+        # Telegram — só para contradições novas
+        cache_key = f"{par['id']}:{round(price_a)}:{round(price_b)}"
+        if alertar and cache_key not in _CONTRA_SEEN and contra["score"] >= 40:
+            _contra_telegram_alert(par, market_a, market_b, price_a, price_b, contra, recomendacao)
+            _CONTRA_SEEN.add(cache_key)
+            stats["alertas_enviados"] += 1
+            if len(_CONTRA_SEEN) > 2000:
+                for k in list(_CONTRA_SEEN)[:400]:
+                    _CONTRA_SEEN.discard(k)
+
+    # Ordena por score de contradição
+    resultados.sort(key=lambda x: x["contradicao"]["score"], reverse=True)
+
+    return {
+        "status": "ok",
+        "total_pares_definidos": len(CONTRADICTION_PAIRS),
+        "pares_analisados": stats["pares_analisados"],
+        "contradicoes_encontradas": stats["contradicoes_encontradas"],
+        "alertas_enviados": stats["alertas_enviados"],
+        "min_score": min_score,
+        "resumo": {
+            "score_max": max((r["contradicao"]["score"] for r in resultados), default=0),
+            "score_medio": round(
+                sum(r["contradicao"]["score"] for r in resultados) / max(len(resultados), 1), 1
+            ),
+            "alta_confianca": sum(1 for r in resultados if r["recomendacao"]["confianca"] >= 0.55),
+        },
+        "contradicoes": resultados,
+        "pares_monitorados": [
+            {"id": p["id"], "tema": p["tema"], "icone": p["icone"], "relacao": p["relacao"]}
+            for p in CONTRADICTION_PAIRS
+        ],
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/contradictions/auto")
+def get_contradictions_auto(
+    min_score: float = Query(25.0, ge=10, le=100),
+    db: Session = Depends(get_db),
+):
+    """
+    Auto-scanner de contradições — sem pares predefinidos.
+
+    Agrupa mercados por tema (usando CORR_THEMES já existente),
+    e dentro de cada tema detecta quando mercados dão sinais OPOSTOS
+    sem justificativa semântica.
+
+    Exemplo: dois mercados sobre "Iran attack" com preços opostos
+    (YES de um = 80%, YES do outro = 20%) → possivelmente descrevem
+    o mesmo evento de ângulos diferentes → contradição.
+    """
+    now = datetime.utcnow()
+
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    # Agrupa por tema
+    theme_markets: dict = {}
+    for m in markets:
+        themes = _corr_detect_theme(m.question or "", m.market_slug or "")
+        yes_price, _ = _get_yes_no_prices(m)
+        if yes_price is None:
+            continue
+        vol = _get_market_volume(m)
+        if vol > 0 and vol < FILTER_MIN_VOLUME:
+            continue
+        for theme in themes:
+            if theme == "OUTROS":
+                continue
+            if theme not in theme_markets:
+                theme_markets[theme] = []
+            theme_markets[theme].append({
+                "market": m,
+                "yes_price": yes_price,
+                "volume": vol,
+            })
+
+    contradicoes = []
+
+    for theme, mlist in theme_markets.items():
+        if len(mlist) < 2:
+            continue
+
+        # Detecta pares com preços muito divergentes dentro do mesmo tema
+        for i in range(len(mlist)):
+            for j in range(i + 1, len(mlist)):
+                ma = mlist[i]
+                mb = mlist[j]
+
+                pa = ma["yes_price"]
+                pb = mb["yes_price"]
+
+                # Não analisa se são o mesmo mercado
+                if ma["market"].id == mb["market"].id:
+                    continue
+
+                # Calcula divergência simples de preços
+                diferenca = abs(pa - pb)
+
+                # Só é interessante se divergência > 25pts e ambos têm preço significativo
+                if diferenca < 25 or pa < 15 or pb < 15:
+                    continue
+
+                # Score baseado na divergência e volume
+                score = min(round((diferenca - 25) * 1.5, 1), 100)
+                if score < min_score:
+                    continue
+
+                # Qual mercado está mais "errado"?
+                # O com menor preço é potencialmente subavaliado se o tema é positivo
+                subavaliado = "B" if pa > pb else "A"
+                mercado_comprar = mb["market"] if subavaliado == "B" else ma["market"]
+                price_comprar = pb if subavaliado == "B" else pa
+
+                contradicoes.append({
+                    "tema": theme,
+                    "tipo": "AUTO_DETECTADA",
+                    "mercado_a": {
+                        "question": ma["market"].question,
+                        "slug": ma["market"].market_slug,
+                        "yes_price": pa,
+                        "polymarket_url": _polymarket_url(ma["market"].market_slug),
+                    },
+                    "mercado_b": {
+                        "question": mb["market"].question,
+                        "slug": mb["market"].market_slug,
+                        "yes_price": pb,
+                        "polymarket_url": _polymarket_url(mb["market"].market_slug),
+                    },
+                    "divergencia_pts": round(diferenca, 1),
+                    "score": score,
+                    "potencial_subavaliado": subavaliado,
+                    "acao_sugerida": f"Investigar {mercado_comprar.question[:60]} @ {price_comprar}%",
+                    "detectado_em": now.isoformat(),
+                })
+
+    contradicoes.sort(key=lambda x: x["score"], reverse=True)
+
+    return {
+        "status": "ok",
+        "temas_analisados": len(theme_markets),
+        "total_contradicoes_auto": len(contradicoes),
+        "contradicoes": contradicoes[:20],
+        "nota": "Auto-scan sem pares predefinidos. Use /contradictions para análise semântica mais precisa.",
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/contradictions/explain/{par_id}")
+def contradictions_explain(par_id: str, db: Session = Depends(get_db)):
+    """Explica a lógica de um par específico com dados atuais do banco."""
+    par = next((p for p in CONTRADICTION_PAIRS if p["id"] == par_id), None)
+    if not par:
+        ids = [p["id"] for p in CONTRADICTION_PAIRS]
+        return {"error": "Par não encontrado", "ids_disponiveis": ids}
+
+    now = datetime.utcnow()
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(600).all()
+    )
+
+    market_a, price_a, hits_a = _contra_find_market(par["mercado_a"]["keywords"], markets)
+    market_b, price_b, hits_b = _contra_find_market(
+        par["mercado_b"]["keywords"], markets,
+        exclude_ids={market_a.id} if market_a else set()
+    )
+
+    contra = _contra_score(price_a or 50, price_b or 50, par["relacao"], par["threshold"])
+    recomendacao = _contra_recommend_action(par, price_a or 50, price_b or 50, contra)
+
+    return {
+        "par_id": par_id,
+        "tema": par["tema"],
+        "icone": par["icone"],
+        "descricao": par["descricao"],
+        "relacao_esperada": par["relacao"],
+        "logica": par["logica"],
+        "threshold_contradicao": par["threshold"],
+        "mercado_a_encontrado": {
+            "question": market_a.question if market_a else None,
+            "slug": market_a.market_slug if market_a else None,
+            "yes_price": price_a,
+            "hits_keywords": hits_a,
+            "polymarket_url": _polymarket_url(market_a.market_slug) if market_a else None,
+        },
+        "mercado_b_encontrado": {
+            "question": market_b.question if market_b else None,
+            "slug": market_b.market_slug if market_b else None,
+            "yes_price": price_b,
+            "hits_keywords": hits_b,
+            "polymarket_url": _polymarket_url(market_b.market_slug) if market_b else None,
+        },
+        "contradicao_atual": contra,
+        "recomendacao": recomendacao,
+        "acao_sugerida": recomendacao["acao"],
+        "gerado_em": now.isoformat(),
+    }
