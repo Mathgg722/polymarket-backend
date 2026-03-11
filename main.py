@@ -7112,3 +7112,54 @@ def ships_snapshot(
 def ships_hormuz(alertar: int = Query(1), db: Session = Depends(get_db)):
     """Atalho: monitora APENAS o Estreito de Hormuz com alta prioridade."""
     return ships_scan(regioes="HORMUZ", min_relevancia="ALTA", alertar=alertar, timeout=20, db=db)
+
+@app.get("/ships/debug")
+async def ships_debug():
+    """Debug raw do aisstream.io — mostra primeiras mensagens recebidas."""
+    import asyncio
+    import websockets
+    
+    uri = "wss://stream.aisstream.io/v0/stream"
+    msgs_recebidas = []
+    erro = None
+    conectou = False
+    
+    bboxes = [[[25.5, 55.0], [27.5, 57.5]]]  # Hormuz hardcoded
+    
+    subscribe_msg = {
+        "APIKey": AIS_API_KEY,
+        "BoundingBoxes": bboxes,
+        "FilterMessageTypes": ["PositionReport"],
+    }
+    
+    async def _collect():
+        nonlocal conectou, erro
+        try:
+            async with websockets.connect(uri, ping_timeout=10) as ws:
+                conectou = True
+                await ws.send(json.dumps(subscribe_msg))
+                deadline = asyncio.get_event_loop().time() + 20
+                while asyncio.get_event_loop().time() < deadline:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                        msgs_recebidas.append(raw[:500])
+                        if len(msgs_recebidas) >= 5:
+                            break
+                    except asyncio.TimeoutError:
+                        msgs_recebidas.append("[timeout 3s sem mensagem]")
+                        break
+        except Exception as e:
+            erro = str(e)
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(_collect())
+    loop.close()
+    
+    return {
+        "conectou": conectou,
+        "erro": erro,
+        "subscribe_enviado": subscribe_msg,
+        "msgs_recebidas": msgs_recebidas,
+        "total_msgs": len(msgs_recebidas),
+    }
