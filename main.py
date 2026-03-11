@@ -998,6 +998,29 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] events error: {e}")
 
+        # Scanner Telegram Militar — intel antes do Reuters
+        military_resp = None
+        try:
+            military_resp = military_scan(
+                min_impact="ALTO",
+                alertar=1,
+                usar_ia=0,
+                db=db,
+            )
+        except Exception as e:
+            print(f"[cron] military scan error: {e}")
+
+        # Detector de Contradições — pares semânticos
+        contra_resp = None
+        try:
+            contra_resp = get_contradictions(
+                min_score=30.0,
+                alertar=1,
+                db=db,
+            )
+        except Exception as e:
+            print(f"[cron] contradictions error: {e}")
+
         last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
         return {
             "status": "ok",
@@ -1008,6 +1031,8 @@ def cron_tick(db: Session = Depends(get_db)):
             "early_alerts": early_resp if early_resp else {"status": "error"},
             "correlations": corr_resp if corr_resp else {"status": "error"},
             "events": events_resp if events_resp else {"status": "error"},
+            "military": military_resp if military_resp else {"status": "error"},
+            "contradictions": contra_resp if contra_resp else {"status": "error"},
         }
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -6229,8 +6254,11 @@ REGION_KEYWORDS = {
     "UKRAINE":  ["ukraine", "ukrainian", "zelensky", "kyiv", "russia", "ceasefire", "donbas", "nato"],
     "RUSSIA":   ["russia", "russian", "putin", "ukraine", "ceasefire", "nato", "moscow"],
     "IRAN":     ["iran", "iranian", "tehran", "irgc", "nuclear", "hormuz", "sanction", "attack"],
-    "ISRAEL":   ["israel", "israeli", "gaza", "hamas", "hezbollah", "idf", "netanyahu"],
-    "MIDEAST":  ["iran", "israel", "saudi", "oil", "opec", "hormuz", "gulf", "syria"],
+    "ISRAEL":   ["israel", "israeli", "gaza", "hamas", "hezbollah", "idf", "netanyahu",
+                 "iran", "ballistic", "khamenei", "strike", "hormuz", "tehran", "irgc",
+                 "houthi", "lebanon", "beirut", "west bank"],
+    "MIDEAST":  ["iran", "israel", "saudi", "oil", "opec", "hormuz", "gulf", "syria",
+                 "ballistic", "houthi", "irgc", "khamenei", "tehran", "strike"],
 }
 
 # Cache de mensagens já processadas
