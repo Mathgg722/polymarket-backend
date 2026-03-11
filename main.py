@@ -6896,7 +6896,7 @@ async def _ais_ws_collect(regions: list, timeout_sec: int = 15) -> list:
     bboxes = [AIS_REGIONS[r]["bbox"] for r in regions if r in AIS_REGIONS]
     subscribe_msg = {
         "APIKey": AIS_API_KEY,
-        "BoundingBoxes": bboxes,
+        "BoundingBoxes": [[[bb[0][1], bb[0][0]], [bb[1][1], bb[1][0]]] for bb in bboxes],
         "FilterMessageTypes": ["PositionReport"],
     }
     try:
