@@ -4945,3 +4945,551 @@ def credibility_sources():
             "multiplicador_confianca": "x1.15",
         },
     }
+# ══════════════════════════════════════════════════════════════
+# MOTOR #25 — MODO EVENTO AGENDADO
+#
+# Lógica:
+# - Calendário de eventos conhecidos (Fed, eleições, julgamentos,
+#   sanções, reuniões OPEC, dados econômicos, etc.)
+# - Verifica eventos nas próximas N horas (default: 24h)
+# - Cruza evento com mercados ativos do banco por keywords
+# - Dispara Telegram ANTES do evento → usuário já está posicionado
+# - Cache para não re-alertar o mesmo evento
+# - Integrado no cron_tick
+# ══════════════════════════════════════════════════════════════
+
+# ── Categorias de eventos e seus emojis ──────────────────────
+EVENT_CATEGORIES = {
+    "FED":         {"emoji": "🏦", "cor": "#0a84ff"},
+    "ELEICAO":     {"emoji": "🗳️", "cor": "#30d158"},
+    "JULGAMENTO":  {"emoji": "⚖️", "cor": "#ff9f0a"},
+    "SANCAO":      {"emoji": "🚫", "cor": "#ff453a"},
+    "ECONOMIA":    {"emoji": "📊", "cor": "#5e5ce6"},
+    "GEOPOLITICA": {"emoji": "🌍", "cor": "#64d2ff"},
+    "OPEC":        {"emoji": "🛢️", "cor": "#ffd60a"},
+    "CRYPTO":      {"emoji": "₿",  "cor": "#ff9f0a"},
+    "ESPORTE":     {"emoji": "🏆", "cor": "#30d158"},
+    "OUTROS":      {"emoji": "📅", "cor": "#8e8e93"},
+}
+
+# ── Calendário de eventos 2025-2026 ──────────────────────────
+# Formato: datetime UTC, categoria, keywords para match de mercados
+SCHEDULED_EVENTS = [
+    # ── FED — FOMC Meetings 2026 ─────────────────────────────
+    {
+        "id": "fomc_jan_2026",
+        "titulo": "FOMC Meeting — Decisão de Juros (Jan 2026)",
+        "categoria": "FED",
+        "datetime_utc": "2026-01-29 19:00:00",
+        "descricao": "Federal Reserve anuncia decisão de taxa de juros. Mercado precifica 85% de manutenção.",
+        "keywords": ["fed", "interest rate", "federal reserve", "fomc", "rate cut", "rate hike", "inflation"],
+        "impacto_esperado": "ALTO",
+        "fonte": "federalreserve.gov",
+    },
+    {
+        "id": "fomc_mar_2026",
+        "titulo": "FOMC Meeting — Decisão de Juros (Mar 2026)",
+        "categoria": "FED",
+        "datetime_utc": "2026-03-18 18:00:00",
+        "descricao": "Fed decide sobre taxa de juros. Projeções econômicas (dot plot) também divulgadas.",
+        "keywords": ["fed", "interest rate", "federal reserve", "fomc", "rate cut", "rate hike", "inflation"],
+        "impacto_esperado": "ALTO",
+        "fonte": "federalreserve.gov",
+    },
+    {
+        "id": "fomc_mai_2026",
+        "titulo": "FOMC Meeting — Decisão de Juros (Mai 2026)",
+        "categoria": "FED",
+        "datetime_utc": "2026-05-06 18:00:00",
+        "descricao": "Reunião do FOMC. Ata completa divulgada 3 semanas depois.",
+        "keywords": ["fed", "interest rate", "federal reserve", "fomc", "rate cut", "rate hike"],
+        "impacto_esperado": "ALTO",
+        "fonte": "federalreserve.gov",
+    },
+    {
+        "id": "fomc_jun_2026",
+        "titulo": "FOMC Meeting — Decisão de Juros (Jun 2026)",
+        "categoria": "FED",
+        "datetime_utc": "2026-06-17 18:00:00",
+        "descricao": "Fed + dot plot + press conference Powell.",
+        "keywords": ["fed", "interest rate", "federal reserve", "fomc", "rate cut", "powell"],
+        "impacto_esperado": "ALTO",
+        "fonte": "federalreserve.gov",
+    },
+    {
+        "id": "fomc_jul_2026",
+        "titulo": "FOMC Meeting — Decisão de Juros (Jul 2026)",
+        "categoria": "FED",
+        "datetime_utc": "2026-07-29 18:00:00",
+        "descricao": "Reunião FOMC de julho. Mid-year review.",
+        "keywords": ["fed", "interest rate", "federal reserve", "fomc", "rate cut", "rate hike"],
+        "impacto_esperado": "ALTO",
+        "fonte": "federalreserve.gov",
+    },
+    {
+        "id": "fomc_sep_2026",
+        "titulo": "FOMC Meeting — Decisão de Juros (Set 2026)",
+        "categoria": "FED",
+        "datetime_utc": "2026-09-16 18:00:00",
+        "descricao": "Fed + projeções econômicas + dot plot.",
+        "keywords": ["fed", "interest rate", "federal reserve", "fomc", "rate cut", "rate hike"],
+        "impacto_esperado": "ALTO",
+        "fonte": "federalreserve.gov",
+    },
+
+    # ── DADOS ECONÔMICOS CHAVE ────────────────────────────────
+    {
+        "id": "cpi_mar_2026",
+        "titulo": "CPI USA — Inflação de Fevereiro (divulgado Mar 2026)",
+        "categoria": "ECONOMIA",
+        "datetime_utc": "2026-03-12 13:30:00",
+        "descricao": "Bureau of Labor Statistics divulga CPI. Dado mais importante para Fed.",
+        "keywords": ["inflation", "cpi", "consumer price", "fed", "interest rate", "economy"],
+        "impacto_esperado": "ALTO",
+        "fonte": "bls.gov",
+    },
+    {
+        "id": "jobs_mar_2026",
+        "titulo": "Non-Farm Payrolls — Empregos (Mar 2026)",
+        "categoria": "ECONOMIA",
+        "datetime_utc": "2026-03-06 13:30:00",
+        "descricao": "Relatório de emprego mensal dos EUA. Impacto direto em taxa de juros.",
+        "keywords": ["jobs", "employment", "payroll", "unemployment", "economy", "fed", "recession"],
+        "impacto_esperado": "ALTO",
+        "fonte": "bls.gov",
+    },
+    {
+        "id": "gdp_q1_2026",
+        "titulo": "PIB EUA Q1 2026 — Primeira Estimativa",
+        "categoria": "ECONOMIA",
+        "datetime_utc": "2026-04-29 12:30:00",
+        "descricao": "BEA divulga primeira estimativa do PIB Q1. Pode confirmar ou refutar recessão.",
+        "keywords": ["gdp", "recession", "economy", "growth", "us economy", "fed"],
+        "impacto_esperado": "ALTO",
+        "fonte": "bea.gov",
+    },
+
+    # ── GEOPOLÍTICA / SANÇÕES ─────────────────────────────────
+    {
+        "id": "iran_nuclear_deadline_2026",
+        "titulo": "Prazo Nuclear Iran — Negociações",
+        "categoria": "SANCAO",
+        "datetime_utc": "2026-04-15 12:00:00",
+        "descricao": "Prazo estimado para rodada de negociações nucleares Iran-EUA. Sucesso ou novas sanções.",
+        "keywords": ["iran", "nuclear", "sanctions", "uranium", "enrichment", "iaea", "deal"],
+        "impacto_esperado": "MUITO_ALTO",
+        "fonte": "estimativa_analitica",
+    },
+    {
+        "id": "russia_ceasefire_q2_2026",
+        "titulo": "Negociações Paz Rússia-Ucrânia — Q2 2026",
+        "categoria": "GEOPOLITICA",
+        "datetime_utc": "2026-05-01 00:00:00",
+        "descricao": "Prazo estimado para definição de negociações de cessar-fogo. Trump mediando.",
+        "keywords": ["russia", "ukraine", "ceasefire", "peace", "war", "zelensky", "putin", "nato"],
+        "impacto_esperado": "MUITO_ALTO",
+        "fonte": "estimativa_analitica",
+    },
+    {
+        "id": "china_tariff_review_2026",
+        "titulo": "Revisão Tarifas EUA-China",
+        "categoria": "GEOPOLITICA",
+        "datetime_utc": "2026-04-01 00:00:00",
+        "descricao": "Deadline para revisão de tarifas bilaterais. Grand Bargain Trump-Xi em jogo.",
+        "keywords": ["china", "tariff", "trade war", "trump", "xi", "trade deal", "import"],
+        "impacto_esperado": "ALTO",
+        "fonte": "estimativa_analitica",
+    },
+
+    # ── ELEIÇÕES ──────────────────────────────────────────────
+    {
+        "id": "midterms_2026_nov",
+        "titulo": "Midterm Elections EUA 2026",
+        "categoria": "ELEICAO",
+        "datetime_utc": "2026-11-03 12:00:00",
+        "descricao": "Eleições legislativas americanas. Controle da Câmara e Senado em jogo.",
+        "keywords": ["midterm", "election", "congress", "senate", "house", "democrat", "republican", "vote"],
+        "impacto_esperado": "MUITO_ALTO",
+        "fonte": "oficial",
+    },
+    {
+        "id": "germany_election_follow_2026",
+        "titulo": "Formação de Governo Alemanha",
+        "categoria": "ELEICAO",
+        "datetime_utc": "2026-03-31 00:00:00",
+        "descricao": "Prazo para formação de coalizão pós-eleição alemã. Merz como provável chanceler.",
+        "keywords": ["germany", "german", "election", "bundestag", "merz", "spd", "coalition", "chancellor"],
+        "impacto_esperado": "MEDIO",
+        "fonte": "oficial",
+    },
+
+    # ── JULGAMENTOS / DECISÕES LEGAIS ─────────────────────────
+    {
+        "id": "scotus_term_end_2026",
+        "titulo": "SCOTUS — Fim do Termo (Decisões Pendentes)",
+        "categoria": "JULGAMENTO",
+        "datetime_utc": "2026-06-30 14:00:00",
+        "descricao": "Suprema Corte divulga decisões do termo. Casos sobre IA, liberdade de expressão, imigração.",
+        "keywords": ["supreme court", "scotus", "ruling", "court decision", "justice", "constitution"],
+        "impacto_esperado": "ALTO",
+        "fonte": "supremecourt.gov",
+    },
+    {
+        "id": "trump_legal_2026",
+        "titulo": "Casos Legais Trump — Audiências 2026",
+        "categoria": "JULGAMENTO",
+        "datetime_utc": "2026-04-20 14:00:00",
+        "descricao": "Audiências em casos federais/estaduais. Potencial impacto político.",
+        "keywords": ["trump", "legal", "court", "indictment", "verdict", "criminal", "trial", "judge"],
+        "impacto_esperado": "ALTO",
+        "fonte": "estimativa_analitica",
+    },
+
+    # ── OPEC / ENERGIA ────────────────────────────────────────
+    {
+        "id": "opec_meeting_jun_2026",
+        "titulo": "Reunião OPEC+ — Produção de Petróleo",
+        "categoria": "OPEC",
+        "datetime_utc": "2026-06-01 10:00:00",
+        "descricao": "OPEC+ decide sobre níveis de produção. Preço do petróleo altamente sensível.",
+        "keywords": ["opec", "oil", "crude", "petroleum", "saudi", "production", "barrel", "energy"],
+        "impacto_esperado": "ALTO",
+        "fonte": "opec.org",
+    },
+
+    # ── CRYPTO ────────────────────────────────────────────────
+    {
+        "id": "bitcoin_etf_review_2026",
+        "titulo": "SEC — Revisão ETFs Bitcoin Spot",
+        "categoria": "CRYPTO",
+        "datetime_utc": "2026-04-15 16:00:00",
+        "descricao": "SEC revisa regras para novos ETFs cripto. Potencial expansão do mercado.",
+        "keywords": ["bitcoin", "btc", "crypto", "sec", "etf", "cryptocurrency", "regulation"],
+        "impacto_esperado": "ALTO",
+        "fonte": "sec.gov",
+    },
+]
+
+# Cache de alertas de eventos já enviados
+_EVENT_ALERT_SEEN: set = set()  # event_id já alertado
+
+
+def _event_match_markets(event: dict, markets: list) -> list:
+    """
+    Encontra mercados relacionados ao evento por sobreposição de keywords.
+    Usa as keywords do próprio evento (já curadas) + palavras do título.
+    """
+    event_words = set(kw.lower() for kw in event.get("keywords", []))
+
+    # Adiciona palavras do título do evento
+    title_words = set(w.lower() for w in event["titulo"].split() if len(w) > 3)
+    STOP = {"will", "the", "this", "that", "with", "from", "have", "been", "2026",
+            "2025", "reunião", "decisão", "dados", "divulga", "prazo"}
+    title_words -= STOP
+    all_event_words = event_words | title_words
+
+    matches = []
+    for m in markets:
+        q_lower = (m.question or "").lower()
+        slug_lower = (m.market_slug or "").lower()
+        combined = q_lower + " " + slug_lower
+
+        # Score: conta quantas keywords do evento aparecem no mercado
+        hits = sum(1 for kw in all_event_words if kw in combined)
+        if hits >= 2:
+            yes_price, _ = _get_yes_no_prices(m)
+            matches.append({
+                "market": m,
+                "hits": hits,
+                "yes_price": yes_price,
+            })
+
+    matches.sort(key=lambda x: x["hits"], reverse=True)
+    return matches[:5]  # top 5 mercados mais relevantes
+
+
+def _event_hours_until(event_dt_str: str) -> float:
+    """Retorna horas até o evento (negativo se já passou)."""
+    try:
+        event_dt = datetime.strptime(event_dt_str, "%Y-%m-%d %H:%M:%S")
+        delta = event_dt - datetime.utcnow()
+        return delta.total_seconds() / 3600
+    except Exception:
+        return -9999
+
+
+def _event_send_telegram(event: dict, mercados_afetados: list, horas: float) -> None:
+    """Formata e envia alerta de evento agendado no Telegram."""
+    cat = EVENT_CATEGORIES.get(event["categoria"], EVENT_CATEGORIES["OUTROS"])
+    emoji = cat["emoji"]
+
+    impacto_emoji = {
+        "MUITO_ALTO": "🔴🔴",
+        "ALTO": "🔴",
+        "MEDIO": "🟠",
+        "BAIXO": "🟡",
+    }.get(event.get("impacto_esperado", "MEDIO"), "🟠")
+
+    horas_txt = f"{horas:.0f}h" if horas >= 1 else f"{horas*60:.0f}min"
+
+    mercados_txt = ""
+    for m in mercados_afetados[:3]:
+        price_txt = f"{m['yes_price']}%" if m.get("yes_price") else "?"
+        url = _polymarket_url(m["market"].market_slug)
+        mercados_txt += f"\n• <a href=\"{url}\">{m['market'].question[:70]}</a> @ {price_txt}"
+
+    msg = (
+        f"{emoji} <b>EVENTO AGENDADO — {horas_txt} restantes</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{impacto_emoji} <b>{event['titulo']}</b>\n"
+        f"📋 {event.get('descricao', '')[:120]}\n"
+        f"⏰ {event['datetime_utc']} UTC\n"
+        f"📡 Fonte: {event.get('fonte', '?')}\n"
+    )
+
+    if mercados_afetados:
+        msg += (
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 <b>Mercados afetados ({len(mercados_afetados)}):</b>"
+            f"{mercados_txt}\n"
+        )
+
+    msg += (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏷️ Categoria: {event['categoria']} | Impacto: {event.get('impacto_esperado','?')}\n"
+        f"🔑 Keywords: {', '.join(event.get('keywords', [])[:5])}\n"
+        f"⏰ Detectado: {datetime.utcnow().strftime('%H:%M:%S')} UTC"
+    )
+
+    _telegram_send(msg)
+
+
+@app.get("/events/calendar")
+def get_events_calendar(
+    categoria: str = Query(None, description="Filtra por categoria: FED, ELEICAO, SANCAO, etc."),
+    apenas_futuros: int = Query(1, description="1 = só eventos futuros"),
+    db: Session = Depends(get_db),
+):
+    """
+    Calendário de eventos agendados com mercados afetados.
+    Retorna todos os eventos com status (FUTURO / HOJE / PASSADO).
+    """
+    now = datetime.utcnow()
+
+    # Mercados ativos para cruzar
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    resultado = []
+    for event in SCHEDULED_EVENTS:
+        # Filtro de categoria
+        if categoria and event["categoria"] != categoria.upper():
+            continue
+
+        horas = _event_hours_until(event["datetime_utc"])
+
+        # Filtro: só futuros
+        if apenas_futuros and horas < -24:
+            continue
+
+        # Status
+        if horas > 24:
+            status = "FUTURO"
+            status_emoji = "🔵"
+        elif horas > 0:
+            status = "HOJE"
+            status_emoji = "🟡"
+        elif horas > -24:
+            status = "OCORREU_HOJE"
+            status_emoji = "🟠"
+        else:
+            status = "PASSADO"
+            status_emoji = "⚫"
+
+        mercados_match = _event_match_markets(event, markets)
+
+        cat = EVENT_CATEGORIES.get(event["categoria"], EVENT_CATEGORIES["OUTROS"])
+
+        resultado.append({
+            "id": event["id"],
+            "titulo": event["titulo"],
+            "categoria": event["categoria"],
+            "emoji": cat["emoji"],
+            "datetime_utc": event["datetime_utc"],
+            "horas_restantes": round(horas, 1),
+            "status": status,
+            "status_emoji": status_emoji,
+            "descricao": event.get("descricao", ""),
+            "impacto_esperado": event.get("impacto_esperado", "MEDIO"),
+            "fonte": event.get("fonte", "?"),
+            "keywords": event.get("keywords", []),
+            "mercados_afetados": [
+                {
+                    "question": m["market"].question,
+                    "slug": m["market"].market_slug,
+                    "yes_price": m.get("yes_price"),
+                    "relevancia_hits": m["hits"],
+                    "polymarket_url": _polymarket_url(m["market"].market_slug),
+                }
+                for m in mercados_match
+            ],
+            "total_mercados": len(mercados_match),
+            "ja_alertado": event["id"] in _EVENT_ALERT_SEEN,
+        })
+
+    # Ordena: mais próximos primeiro
+    resultado.sort(key=lambda x: x["horas_restantes"] if x["horas_restantes"] >= 0 else 9999)
+
+    categorias_presentes = list({e["categoria"] for e in resultado})
+    proximos_24h = [e for e in resultado if 0 <= e["horas_restantes"] <= 24]
+
+    return {
+        "status": "ok",
+        "total_eventos": len(resultado),
+        "proximos_24h": len(proximos_24h),
+        "categorias": categorias_presentes,
+        "eventos": resultado,
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/events/upcoming")
+def get_events_upcoming(
+    horas: int = Query(24, ge=1, le=168, description="Janela em horas (default: 24h, max: 7 dias)"),
+    alertar: int = Query(0, description="1 = envia Telegram para eventos novos"),
+    min_impacto: str = Query("MEDIO", description="BAIXO, MEDIO, ALTO, MUITO_ALTO"),
+    db: Session = Depends(get_db),
+):
+    """
+    Eventos nas próximas N horas com mercados afetados.
+    Core do Motor #25 — chamado pelo cron_tick.
+    """
+    now = datetime.utcnow()
+    impacto_rank = {"BAIXO": 1, "MEDIO": 2, "ALTO": 3, "MUITO_ALTO": 4}
+    min_rank = impacto_rank.get(min_impacto.upper(), 2)
+
+    # Mercados ativos
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    proximos = []
+    alertas_enviados = 0
+
+    for event in SCHEDULED_EVENTS:
+        horas_ate = _event_hours_until(event["datetime_utc"])
+
+        # Só eventos na janela
+        if not (0 < horas_ate <= horas):
+            continue
+
+        # Filtro de impacto
+        ev_rank = impacto_rank.get(event.get("impacto_esperado", "MEDIO"), 2)
+        if ev_rank < min_rank:
+            continue
+
+        mercados_match = _event_match_markets(event, markets)
+        cat = EVENT_CATEGORIES.get(event["categoria"], EVENT_CATEGORIES["OUTROS"])
+
+        entry = {
+            "id": event["id"],
+            "titulo": event["titulo"],
+            "categoria": event["categoria"],
+            "emoji": cat["emoji"],
+            "datetime_utc": event["datetime_utc"],
+            "horas_restantes": round(horas_ate, 1),
+            "impacto_esperado": event.get("impacto_esperado", "MEDIO"),
+            "descricao": event.get("descricao", ""),
+            "mercados_afetados": [
+                {
+                    "question": m["market"].question,
+                    "slug": m["market"].market_slug,
+                    "yes_price": m.get("yes_price"),
+                    "polymarket_url": _polymarket_url(m["market"].market_slug),
+                }
+                for m in mercados_match
+            ],
+            "total_mercados": len(mercados_match),
+            "ja_alertado": event["id"] in _EVENT_ALERT_SEEN,
+        }
+        proximos.append(entry)
+
+        # Alerta Telegram (só uma vez por evento)
+        if alertar and event["id"] not in _EVENT_ALERT_SEEN:
+            _event_send_telegram(event, mercados_match, horas_ate)
+            _EVENT_ALERT_SEEN.add(event["id"])
+            alertas_enviados += 1
+
+            # Limpa cache se crescer muito
+            if len(_EVENT_ALERT_SEEN) > 1000:
+                for eid in list(_EVENT_ALERT_SEEN)[:200]:
+                    _EVENT_ALERT_SEEN.discard(eid)
+
+    proximos.sort(key=lambda x: x["horas_restantes"])
+
+    return {
+        "status": "ok",
+        "janela_horas": horas,
+        "min_impacto": min_impacto,
+        "total_proximos": len(proximos),
+        "alertas_enviados": alertas_enviados,
+        "eventos": proximos,
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.post("/events/alert/reset")
+def events_alert_reset():
+    """Reseta cache de alertas — força re-alertar todos os eventos."""
+    count = len(_EVENT_ALERT_SEEN)
+    _EVENT_ALERT_SEEN.clear()
+    return {
+        "status": "ok",
+        "alertas_removidos": count,
+        "mensagem": "Cache resetado. Próximo cron vai re-alertar todos os eventos.",
+    }
+
+
+@app.get("/events/test/{event_id}")
+def events_test_alert(event_id: str, db: Session = Depends(get_db)):
+    """Testa alerta de um evento específico pelo ID."""
+    event = next((e for e in SCHEDULED_EVENTS if e["id"] == event_id), None)
+    if not event:
+        ids_disponiveis = [e["id"] for e in SCHEDULED_EVENTS]
+        return {"error": "Evento não encontrado", "ids_disponiveis": ids_disponiveis}
+
+    now = datetime.utcnow()
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    mercados_match = _event_match_markets(event, markets)
+    horas = _event_hours_until(event["datetime_utc"])
+
+    _event_send_telegram(event, mercados_match, horas)
+
+    return {
+        "status": "ok",
+        "evento": event["titulo"],
+        "horas_restantes": round(horas, 1),
+        "mercados_encontrados": len(mercados_match),
+        "mercados": [
+            {
+                "question": m["market"].question,
+                "yes_price": m.get("yes_price"),
+                "hits": m["hits"],
+            }
+            for m in mercados_match
+        ],
+        "telegram_enviado": True,
+    }
