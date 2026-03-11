@@ -915,6 +915,33 @@ def debug_clob_trades(limit: int = Query(5, ge=1, le=100)):
         return {"ok": False, "url": url, "error": str(e)}
 
 
+@app.get("/debug/data_trades")
+def debug_data_trades():
+    """Debug — mostra resposta crua do data-api/trades para inspecionar campos."""
+    urls = [
+        f"{DATA_API}/trades?limit=5&sizeThreshold=1000",
+        f"{DATA_API}/trades?limit=5",
+        f"{GAMMA_API}/trades?limit=5",
+    ]
+    results = []
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+            results.append({
+                "url": url,
+                "status_code": resp.status_code,
+                "body_head": resp.text[:600],
+                "json_sample": data if not isinstance(data, list) else data[:2],
+            })
+        except Exception as e:
+            results.append({"url": url, "error": str(e)})
+    return {"results": results}
+
+
 # ──────────────────────────────────────────────────────────────
 # CRON TICK
 # ──────────────────────────────────────────────────────────────
