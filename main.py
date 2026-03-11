@@ -3239,7 +3239,7 @@ def get_whales(
     Detector de Baleias v1 — trades grandes no CLOB.
     Retorna apostas acima de min_valor com histórico da carteira.
     """
-    url = f"{CLOB_API}/trades?limit=200"
+    url = f"{DATA_API}/trades?limit=200&sizeThreshold=1000"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=12)
         if resp.status_code != 200:
@@ -3309,7 +3309,7 @@ def whale_scan(
     Scan de baleias — detecta novas e dispara Telegram.
     Deve ser chamado pelo worker a cada 2 minutos.
     """
-    url = f"{CLOB_API}/trades?limit=200"
+    url = f"{DATA_API}/trades?limit=200&sizeThreshold=1000"
     novas = []
 
     try:
