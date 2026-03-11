@@ -3334,9 +3334,9 @@ def whale_scan(
 ):
     """
     Scan de baleias — detecta novas e dispara Telegram.
-    Deve ser chamado pelo worker a cada 2 minutos.
+    Chamado automaticamente pelo cron_tick a cada 2 minutos.
     """
-    url = f"{DATA_API}/trades?limit=200&sizeThreshold=1000"
+    url = f"{DATA_API}/trades?limit=500"
     novas = []
 
     try:
@@ -3344,46 +3344,56 @@ def whale_scan(
         if resp.status_code != 200:
             return {"status": "unavailable"}
 
-        data = resp.json()
-        trades_raw = data if isinstance(data, list) else data.get("data", [])
+        trades_raw = resp.json()
+        if not isinstance(trades_raw, list):
+            trades_raw = trades_raw.get("data", [])
 
         for tx in trades_raw:
-            valor = float(tx.get("size") or tx.get("usdcSize") or 0)
-            if valor < min_valor:
+            size      = float(tx.get("size") or 0)
+            price     = float(tx.get("price") or 0)
+            valor_usd = round(size * price, 2)
+
+            if valor_usd < min_valor:
                 continue
 
-            wallet = tx.get("maker") or tx.get("owner") or ""
+            wallet = tx.get("proxyWallet") or ""
             if not wallet:
                 continue
 
-            trade_id = tx.get("id") or tx.get("tradeId") or f"{wallet}-{valor}-{tx.get('timestamp','')}"
+            trade_id = tx.get("transactionHash") or f"{wallet}-{tx.get('timestamp','')}"
             if trade_id in _WHALE_SEEN:
-                continue  # já alertado
+                continue
 
             _WHALE_SEEN.add(trade_id)
-            # Limpa cache se ficar muito grande
             if len(_WHALE_SEEN) > 5000:
-                oldest = list(_WHALE_SEEN)[:1000]
-                for tid in oldest:
+                for tid in list(_WHALE_SEEN)[:1000]:
                     _WHALE_SEEN.discard(tid)
 
-            token_id = tx.get("asset_id") or tx.get("tokenId") or ""
-            market_info = _whale_fetch_market_for_token(token_id, db)
-            score = _whale_score(wallet)
-            outcome = tx.get("outcome") or tx.get("side") or market_info.get("outcome", "?")
-            preco = tx.get("price")
+            score   = _whale_score(wallet)
+            outcome = tx.get("outcome") or tx.get("side") or "?"
+            slug    = tx.get("slug") or ""
 
             whale = {
                 "trade_id": trade_id,
                 "wallet": wallet[:8] + "..." + wallet[-4:],
                 "wallet_full": wallet,
-                "valor_usd": round(valor, 2),
+                "valor_usd": valor_usd,
+                "shares": round(size, 2),
+                "preco_pct": round(price * 100, 1),
                 "outcome": outcome,
-                "preco": preco,
-                "preco_pct": round(float(preco) * 100, 1) if preco else None,
-                "timestamp": tx.get("timestamp") or tx.get("matchedAt"),
-                "market_info": market_info,
+                "side": tx.get("side", ""),
+                "mercado": tx.get("title") or "?",
+                "slug": slug,
+                "polymarket_url": _polymarket_url(slug),
+                "polymarket_wallet_url": f"https://polymarket.com/profile/{wallet}",
+                "timestamp": tx.get("timestamp"),
                 "score": score,
+                "market_info": {
+                    "question": tx.get("title") or "?",
+                    "slug": slug,
+                    "url": _polymarket_url(slug),
+                    "outcome": outcome,
+                },
             }
             novas.append(whale)
 
