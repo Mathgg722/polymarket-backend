@@ -3258,66 +3258,86 @@ def _whale_alert_telegram(whale: dict) -> None:
 
 @app.get("/whales")
 def get_whales(
-    min_valor: float = Query(10000, ge=1000, le=500000),
+    min_valor: float = Query(100, ge=1, le=500000),
     limit: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
     """
-    Detector de Baleias v1 — trades grandes no CLOB.
-    Retorna apostas acima de min_valor com histórico da carteira.
+    Detector de Baleias v1.
+    Agrega trades por carteira+mercado. valor_usd = size * price.
     """
-    url = f"{DATA_API}/trades?limit=200&sizeThreshold=1000"
+    url = f"{DATA_API}/trades?limit=500"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=12)
         if resp.status_code != 200:
             return {"status": "unavailable", "status_code": resp.status_code}
 
-        data = resp.json()
-        trades_raw = data if isinstance(data, list) else data.get("data", [])
+        trades_raw = resp.json()
+        if not isinstance(trades_raw, list):
+            trades_raw = trades_raw.get("data", [])
+
+        # Agrega por wallet+mercado
+        agg: dict = {}
+        for tx in trades_raw:
+            size  = float(tx.get("size") or 0)
+            price = float(tx.get("price") or 0)
+            valor = size * price
+
+            wallet = tx.get("proxyWallet") or ""
+            slug   = tx.get("slug") or tx.get("conditionId") or ""
+            if not wallet or not slug:
+                continue
+
+            key = f"{wallet}|{slug}"
+            if key not in agg:
+                agg[key] = {
+                    "wallet_full": wallet,
+                    "wallet": wallet[:8] + "..." + wallet[-4:],
+                    "valor_usd": 0.0,
+                    "num_trades": 0,
+                    "mercado": tx.get("title") or "?",
+                    "slug": slug,
+                    "outcome": tx.get("outcome") or "?",
+                    "side": tx.get("side") or "?",
+                    "preco_sum": 0.0,
+                    "ultimo_timestamp": tx.get("timestamp"),
+                }
+            agg[key]["valor_usd"]  += valor
+            agg[key]["num_trades"] += 1
+            agg[key]["preco_sum"]  += price
 
         whales = []
-        for tx in trades_raw:
-            valor = float(tx.get("size") or tx.get("usdcSize") or 0)
-            if valor < min_valor:
+        for key, data in agg.items():
+            data["valor_usd"] = round(data["valor_usd"], 2)
+            data["preco_medio_pct"] = round(data["preco_sum"] / max(data["num_trades"], 1) * 100, 1)
+            del data["preco_sum"]
+
+            if data["valor_usd"] < min_valor:
                 continue
 
-            wallet = tx.get("maker") or tx.get("owner") or ""
-            if not wallet:
-                continue
+            wallet = data["wallet_full"]
+            data["score"] = _whale_score(wallet)
+            data["polymarket_url"] = _polymarket_url(data["slug"])
+            data["polymarket_wallet_url"] = f"https://polymarket.com/profile/{wallet}"
+            data["novo"] = key not in _WHALE_SEEN
+            whales.append(data)
 
-            token_id = tx.get("asset_id") or tx.get("tokenId") or ""
-            trade_id = tx.get("id") or tx.get("tradeId") or f"{wallet}-{valor}-{tx.get('timestamp','')}"
-
-            market_info = _whale_fetch_market_for_token(token_id, db)
-            score = _whale_score(wallet)
-            outcome = tx.get("outcome") or tx.get("side") or market_info.get("outcome", "?")
-            preco = tx.get("price")
-
-            whale = {
-                "trade_id": trade_id,
-                "wallet": wallet[:8] + "..." + wallet[-4:],
-                "wallet_full": wallet,
-                "valor_usd": round(valor, 2),
-                "outcome": outcome,
-                "preco": preco,
-                "preco_pct": round(float(preco) * 100, 1) if preco else None,
-                "timestamp": tx.get("timestamp") or tx.get("matchedAt"),
-                "market_info": market_info,
-                "score": score,
-                "polymarket_wallet_url": f"https://polymarket.com/profile/{wallet}",
-                "novo": trade_id not in _WHALE_SEEN,
-            }
-            whales.append(whale)
-
-        # Ordena por valor
         whales.sort(key=lambda x: x["valor_usd"], reverse=True)
         top = whales[:limit]
+
+        # Debug: top 5 valores individuais
+        sample = sorted(
+            [round(float(tx.get("size",0))*float(tx.get("price",0)),4) for tx in trades_raw[:100]],
+            reverse=True
+        )[:5]
 
         return {
             "status": "ok",
             "threshold_usd": min_valor,
+            "total_trades": len(trades_raw),
             "total_encontradas": len(whales),
             "retornadas": len(top),
+            "debug_top5_trade_values": sample,
             "baleias": top,
             "gerado_em": datetime.utcnow().isoformat(),
         }
