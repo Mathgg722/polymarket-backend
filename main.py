@@ -933,12 +933,20 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] scan error: {e}")
 
+        # Whale scan — detecta baleias e alerta Telegram
+        whale_resp = None
+        try:
+            whale_resp = whale_scan(min_valor=10000, alertar=1, db=db)
+        except Exception as e:
+            print(f"[cron] whale scan error: {e}")
+
         last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
         return {
             "status": "ok",
             "tick_now": datetime.utcnow().isoformat(),
             "last_snapshot_timestamp": last.timestamp.isoformat() if last and last.timestamp else None,
             "scan": scan_resp if scan_resp else {"status": "error"},
+            "whales": whale_resp if whale_resp else {"status": "error"},
         }
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -1540,7 +1548,7 @@ JIANG_PREDICTIONS = [
         # core_required: pelo menos 1 dessas DEVE estar no texto do mercado
         "core_required": ["iran", "iranian", "tehran", "irgc", "persia"],
         # keywords: contribuem para o score de match
-        "keywords": ["iran", "iranian", "tehran", "irgc", "nuclear", "war", "military", "strike", "attack", "conflict", "troops", "invasion", "bomb", "sanctions", "regime", "fall", "collapse", "revolution", "leadership", "change", "overthrow"],
+        "keywords": ["iran", "iranian", "tehran", "irgc", "nuclear", "war", "military", "strike", "attack", "conflict", "troops", "invasion", "bomb", "sanctions"],
         "status": "EM_ANDAMENTO",
         "confirmado": True,
         "prob_jiang": 78,
@@ -1571,7 +1579,7 @@ JIANG_PREDICTIONS = [
         "categoria": "GEOPOLITICA",
         "icone": "🕊️",
         "core_required": ["iran", "iranian", "tehran"],
-        "keywords": ["iran", "ceasefire", "peace", "deal", "withdraw", "negotiations", "nuclear", "agreement", "talks", "diplomacy", "iranian", "regime", "fall", "collapse", "leadership", "change"],
+        "keywords": ["iran", "ceasefire", "peace", "deal", "withdraw", "negotiations", "nuclear", "agreement", "talks", "diplomacy", "iranian"],
         "status": "ATIVA",
         "confirmado": False,
         "prob_jiang": 62,
@@ -1595,6 +1603,37 @@ JIANG_PREDICTIONS = [
         "gatilhos_nao": ["Israel sabota negociações", "Ataque iraniano em solo americano"],
         "citacao": "Trump brokering a ceasefire between Iran and Israel — Sea & Job Mar 2026",
         "timeline": [{"d": "2026-03", "p": 62, "e": "Conflito ativo, pressão para saída"}],
+    },
+    {
+        "id": "iran_regime_collapse",
+        "tema": "Queda do Regime Iraniano é improvável no curto prazo",
+        "categoria": "GEOPOLITICA",
+        "icone": "🇮🇷",
+        "core_required": ["iran", "iranian", "regime"],
+        "keywords": ["iran", "iranian", "regime", "fall", "collapse", "overthrow", "revolution", "leadership", "change", "government"],
+        "status": "ATIVA",
+        "confirmado": False,
+        "prob_jiang": 18,
+        "prob_mkt": 25,
+        "edge": -7,
+        "direcao": "NO",
+        "confianca": 0.75,
+        "prazo": "curto prazo",
+        "estrutura": "PROBLEMA_COORDENACAO_OPOSICAO",
+        "mecanismo": "Guerra externa UNIFICA população em torno do regime. Oposição interna fragmentada. IRGC coordenado e leal. Queda no curto prazo é improvável.",
+        "analogia": "Assad sobreviveu 13 anos de guerra civil com suporte externo",
+        "mec": {
+            "regime": {"m": 72, "e": 88, "c": 90, "s": 5701, "cor": "#00d26a", "n": "IRGC coordenado, guerra unifica"},
+            "oposicao": {"m": 35, "e": 55, "c": 18, "s": 346, "cor": "#ff4d4d", "n": "Fragmentada, sem suporte externo coordenado"},
+        },
+        "jogadores": [
+            {"n": "IRGC", "t": "GUARDIAO_REGIME", "incentivo": "Sobrevivência institucional — perdem tudo se regime cai."},
+            {"n": "Oposição", "t": "COALIZAO_DESCOORDENADA", "incentivo": "Dividida entre reformistas, monarquistas e separatistas."},
+        ],
+        "gatilhos_sim": ["Derrota militar humilhante sem precedente", "Colapso econômico total + corte do IRGC"],
+        "gatilhos_nao": ["Guerra externa (unifica)", "Suporte russo/chinês ao regime"],
+        "citacao": "War unifies populations behind their governments — historical pattern, Jiang 2026",
+        "timeline": [{"d": "2026-03", "p": 18, "e": "Conflito ativo — regime se consolida"}],
     },
     {
         "id": "ukraine_frozen",
@@ -3099,6 +3138,284 @@ def get_wallet_detail(address: str):
     except Exception as e:
         print(f"[wallet] erro: {e}")
     return {"status": "unavailable", "polymarket_url": f"https://polymarket.com/profile/{address}"}
+
+
+# ══════════════════════════════════════════════════════════════
+# DETECTOR DE BALEIAS v1
+# Monitora trades grandes (>$10k) no CLOB em tempo real.
+# Rastreia histórico de acerto de cada carteira.
+# Dispara alerta Telegram automaticamente.
+# ══════════════════════════════════════════════════════════════
+
+WHALE_THRESHOLD = 10_000   # USD — aposta acima disso = baleia
+WHALE_CACHE: dict = {}     # {wallet: {"acertos": int, "total": int, "trades": []}}
+_WHALE_SEEN: set = set()   # trade_ids já alertados (evita duplicatas)
+
+
+def _whale_score(wallet: str) -> dict:
+    """Retorna histórico de acerto da carteira (in-memory)."""
+    data = WHALE_CACHE.get(wallet, {"acertos": 0, "total": 0, "trades": []})
+    total = data["total"]
+    acertos = data["acertos"]
+    win_rate = round(acertos / total * 100, 1) if total > 0 else None
+    return {
+        "total_apostas": total,
+        "acertos": acertos,
+        "win_rate_pct": win_rate,
+        "classificacao": (
+            "🔴 SHARP — acerta muito" if win_rate and win_rate >= 65 else
+            "🟠 ACIMA DA MÉDIA" if win_rate and win_rate >= 55 else
+            "🟡 MÉDIA" if win_rate and win_rate >= 45 else
+            "⚪ SEM HISTÓRICO" if win_rate is None else
+            "⚫ HISTÓRICO FRACO"
+        ),
+        "ultimas_apostas": data["trades"][-5:],
+    }
+
+
+def _whale_fetch_market_for_token(token_id: str, db: Session) -> dict:
+    """Busca mercado relacionado a um token_id."""
+    try:
+        token = db.query(Token).filter(Token.token_id == token_id).first()
+        if token:
+            market = db.query(Market).filter(Market.id == token.market_id).first()
+            if market:
+                return {
+                    "question": market.question,
+                    "slug": market.market_slug,
+                    "url": _polymarket_url(market.market_slug),
+                    "yes_price": None,
+                    "outcome": token.outcome,
+                }
+    except Exception:
+        pass
+    return {"question": "Mercado desconhecido", "slug": "", "url": "", "outcome": "?"}
+
+
+def _whale_alert_telegram(whale: dict) -> None:
+    """Envia alerta formatado no Telegram."""
+    score = whale.get("score", {})
+    win_rate = score.get("win_rate_pct")
+    classificacao = score.get("classificacao", "⚪ SEM HISTÓRICO")
+    win_txt = f"{win_rate}%" if win_rate is not None else "sem histórico"
+
+    market_info = whale.get("market_info", {})
+    question = (market_info.get("question") or "?")[:80]
+    outcome = whale.get("outcome", "?")
+    preco = whale.get("preco")
+    preco_txt = f"{round(float(preco)*100, 1)}%" if preco else "?"
+
+    wallet = whale.get("wallet_full", "")
+    wallet_short = wallet[:8] + "..." + wallet[-4:] if wallet else "?"
+    valor = whale.get("valor_usd", 0)
+
+    sinal_icon = "🟢" if str(outcome).upper() in ("YES", "BUY") else "🔴" if str(outcome).upper() in ("NO", "SELL") else "⚡"
+
+    msg = (
+        f"🐋 <b>BALEIA DETECTADA — ${valor:,.0f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>Mercado:</b> {question}\n"
+        f"{sinal_icon} <b>Direção:</b> {outcome} @ {preco_txt}\n"
+        f"💰 <b>Valor:</b> ${valor:,.0f} USD\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Carteira:</b> <code>{wallet_short}</code>\n"
+        f"📊 <b>Histórico:</b> {win_txt} de acerto ({score.get('total_apostas', 0)} apostas)\n"
+        f"🏆 {classificacao}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <a href=\"{market_info.get('url', '')}\">Ver mercado</a> | "
+        f"<a href=\"https://polymarket.com/profile/{wallet}\">Ver carteira</a>\n"
+        f"⏰ {datetime.utcnow().strftime('%H:%M:%S')} UTC"
+    )
+    _telegram_send(msg)
+
+
+@app.get("/whales")
+def get_whales(
+    min_valor: float = Query(10000, ge=1000, le=500000),
+    limit: int = Query(20, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
+    """
+    Detector de Baleias v1 — trades grandes no CLOB.
+    Retorna apostas acima de min_valor com histórico da carteira.
+    """
+    url = f"{CLOB_API}/trades?limit=200"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=12)
+        if resp.status_code != 200:
+            return {"status": "unavailable", "status_code": resp.status_code}
+
+        data = resp.json()
+        trades_raw = data if isinstance(data, list) else data.get("data", [])
+
+        whales = []
+        for tx in trades_raw:
+            valor = float(tx.get("size") or tx.get("usdcSize") or 0)
+            if valor < min_valor:
+                continue
+
+            wallet = tx.get("maker") or tx.get("owner") or ""
+            if not wallet:
+                continue
+
+            token_id = tx.get("asset_id") or tx.get("tokenId") or ""
+            trade_id = tx.get("id") or tx.get("tradeId") or f"{wallet}-{valor}-{tx.get('timestamp','')}"
+
+            market_info = _whale_fetch_market_for_token(token_id, db)
+            score = _whale_score(wallet)
+            outcome = tx.get("outcome") or tx.get("side") or market_info.get("outcome", "?")
+            preco = tx.get("price")
+
+            whale = {
+                "trade_id": trade_id,
+                "wallet": wallet[:8] + "..." + wallet[-4:],
+                "wallet_full": wallet,
+                "valor_usd": round(valor, 2),
+                "outcome": outcome,
+                "preco": preco,
+                "preco_pct": round(float(preco) * 100, 1) if preco else None,
+                "timestamp": tx.get("timestamp") or tx.get("matchedAt"),
+                "market_info": market_info,
+                "score": score,
+                "polymarket_wallet_url": f"https://polymarket.com/profile/{wallet}",
+                "novo": trade_id not in _WHALE_SEEN,
+            }
+            whales.append(whale)
+
+        # Ordena por valor
+        whales.sort(key=lambda x: x["valor_usd"], reverse=True)
+        top = whales[:limit]
+
+        return {
+            "status": "ok",
+            "threshold_usd": min_valor,
+            "total_encontradas": len(whales),
+            "retornadas": len(top),
+            "baleias": top,
+            "gerado_em": datetime.utcnow().isoformat(),
+        }
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/whales/scan")
+def whale_scan(
+    min_valor: float = Query(10000, ge=1000),
+    alertar: int = Query(1, description="1 = envia Telegram para novas baleias"),
+    db: Session = Depends(get_db),
+):
+    """
+    Scan de baleias — detecta novas e dispara Telegram.
+    Deve ser chamado pelo worker a cada 2 minutos.
+    """
+    url = f"{CLOB_API}/trades?limit=200"
+    novas = []
+
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=12)
+        if resp.status_code != 200:
+            return {"status": "unavailable"}
+
+        data = resp.json()
+        trades_raw = data if isinstance(data, list) else data.get("data", [])
+
+        for tx in trades_raw:
+            valor = float(tx.get("size") or tx.get("usdcSize") or 0)
+            if valor < min_valor:
+                continue
+
+            wallet = tx.get("maker") or tx.get("owner") or ""
+            if not wallet:
+                continue
+
+            trade_id = tx.get("id") or tx.get("tradeId") or f"{wallet}-{valor}-{tx.get('timestamp','')}"
+            if trade_id in _WHALE_SEEN:
+                continue  # já alertado
+
+            _WHALE_SEEN.add(trade_id)
+            # Limpa cache se ficar muito grande
+            if len(_WHALE_SEEN) > 5000:
+                oldest = list(_WHALE_SEEN)[:1000]
+                for tid in oldest:
+                    _WHALE_SEEN.discard(tid)
+
+            token_id = tx.get("asset_id") or tx.get("tokenId") or ""
+            market_info = _whale_fetch_market_for_token(token_id, db)
+            score = _whale_score(wallet)
+            outcome = tx.get("outcome") or tx.get("side") or market_info.get("outcome", "?")
+            preco = tx.get("price")
+
+            whale = {
+                "trade_id": trade_id,
+                "wallet": wallet[:8] + "..." + wallet[-4:],
+                "wallet_full": wallet,
+                "valor_usd": round(valor, 2),
+                "outcome": outcome,
+                "preco": preco,
+                "preco_pct": round(float(preco) * 100, 1) if preco else None,
+                "timestamp": tx.get("timestamp") or tx.get("matchedAt"),
+                "market_info": market_info,
+                "score": score,
+            }
+            novas.append(whale)
+
+            if alertar:
+                _whale_alert_telegram(whale)
+
+        return {
+            "status": "ok",
+            "novas_baleias": len(novas),
+            "threshold_usd": min_valor,
+            "alertas_enviados": len(novas) if alertar else 0,
+            "baleias": novas,
+            "gerado_em": datetime.utcnow().isoformat(),
+        }
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/whales/wallet/{address}")
+def whale_wallet_detail(address: str, db: Session = Depends(get_db)):
+    """
+    Detalhe de uma carteira baleia — histórico + posições atuais.
+    """
+    score = _whale_score(address)
+
+    # Tenta buscar posições abertas
+    positions = []
+    try:
+        resp = requests.get(
+            f"{DATA_API}/positions?user={address}&sizeThreshold=100&limit=50",
+            headers=HEADERS, timeout=8
+        )
+        if resp.status_code == 200:
+            items = resp.json()
+            items = items if isinstance(items, list) else items.get("data", [])
+            for p in items:
+                valor = float(p.get("currentValue") or p.get("size") or 0)
+                positions.append({
+                    "mercado": (p.get("title") or p.get("market") or p.get("question") or "?")[:80],
+                    "outcome": p.get("outcome"),
+                    "valor_usd": round(valor, 2),
+                    "preco_medio": p.get("avgPrice") or p.get("curPrice"),
+                    "pnl": p.get("cashPnl") or p.get("pnl"),
+                })
+            positions.sort(key=lambda x: x["valor_usd"], reverse=True)
+    except Exception as e:
+        print(f"[whale_wallet] erro posições: {e}")
+
+    return {
+        "status": "ok",
+        "wallet": address[:8] + "..." + address[-4:],
+        "wallet_full": address,
+        "polymarket_url": f"https://polymarket.com/profile/{address}",
+        "historico": score,
+        "posicoes_abertas": positions[:20],
+        "total_exposto_usd": round(sum(p["valor_usd"] for p in positions), 2),
+        "consultado_em": datetime.utcnow().isoformat(),
+    }
 
 
 # ══════════════════════════════════════════════════════════════
