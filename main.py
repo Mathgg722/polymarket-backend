@@ -3785,3 +3785,260 @@ def get_news_analysis(limit: int = Query(8, ge=1, le=20), db: Session = Depends(
         "analyses": analyses,
         "gerado_em": datetime.utcnow().isoformat(),
     }
+ # ══════════════════════════════════════════════════════════════
+# EARLY ALERT ENGINE — #21
+# Monitora RSS em tempo real, classifica impacto por IA,
+# cruza com mercados ativos e dispara Telegram ANTES do preço mover.
+# ══════════════════════════════════════════════════════════════
+
+# Fontes RSS de alta velocidade — eventos antes da CNN cobrir
+EARLY_ALERT_RSS_SOURCES = [
+    # Geopolítica
+    {"url": "https://feeds.bbci.co.uk/news/world/rss.xml",                "nome": "BBC World",       "categoria": "GEOPOLITICA"},
+    {"url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",     "nome": "NYT World",       "categoria": "GEOPOLITICA"},
+    {"url": "https://feeds.reuters.com/Reuters/worldNews",                 "nome": "Reuters World",   "categoria": "GEOPOLITICA"},
+    {"url": "https://feeds.reuters.com/reuters/politicsNews",              "nome": "Reuters Politics","categoria": "POLITICA"},
+    # Economia / Mercados
+    {"url": "https://feeds.bloomberg.com/markets/news.rss",                "nome": "Bloomberg Markets","categoria": "ECONOMIA"},
+    {"url": "https://feeds.marketwatch.com/marketwatch/topstories/",       "nome": "MarketWatch",     "categoria": "ECONOMIA"},
+    # Conflitos / Defesa
+    {"url": "https://news.google.com/rss/search?q=war+military+attack&hl=en&gl=US&ceid=US:en", "nome": "Google War", "categoria": "CONFLITO"},
+    {"url": "https://news.google.com/rss/search?q=ukraine+russia+ceasefire&hl=en&gl=US&ceid=US:en", "nome": "Google Ukraine", "categoria": "CONFLITO"},
+]
+
+# Palavras-chave de alto impacto por categoria
+IMPACT_KEYWORDS = {
+    "GUERRA": ["attack", "war", "military", "invasion", "strike", "missile", "troops", "bomb", "killed", "airstrike", "troops deployed", "ceasefire", "casualties"],
+    "NUCLEAR": ["nuclear", "uranium", "enrichment", "warhead", "atomic", "iaea", "npt", "bomb"],
+    "ECONOMIA": ["fed", "interest rate", "inflation", "recession", "gdp", "unemployment", "market crash", "bank failure", "default", "treasury"],
+    "ELEICAO": ["election", "vote", "poll", "candidate", "president", "prime minister", "resign", "impeach", "coup"],
+    "GEOPOLITICA": ["sanction", "diplomacy", "treaty", "alliance", "nato", "united nations", "veto", "resolution"],
+    "MERCADO": ["polymarket", "prediction market", "kalshi", "market", "odds", "probability"],
+}
+
+# Níveis de impacto
+IMPACT_LEVELS = {
+    "CRITICO":  {"score": 90, "keywords": ["nuclear", "invasion", "coup", "default", "assassination", "war declared"]},
+    "ALTO":     {"score": 70, "keywords": ["attack", "airstrike", "ceasefire", "election result", "rate decision", "market crash"]},
+    "MEDIO":    {"score": 50, "keywords": ["sanction", "resign", "military", "bomb", "protest", "arrested"]},
+    "BAIXO":    {"score": 25, "keywords": ["meeting", "statement", "poll", "report", "interview"]},
+}
+
+# Cache de notícias já alertadas (evita duplicatas)
+_EARLY_ALERT_SEEN: set = set()
+
+
+def _early_fetch_rss(source: dict, timeout: int = 8) -> list:
+    """Busca RSS de uma fonte e retorna itens normalizados."""
+    articles = []
+    try:
+        resp = requests.get(source["url"], headers=HEADERS, timeout=timeout)
+        if resp.status_code != 200:
+            return []
+        root = ET.fromstring(resp.content)
+        for item in root.findall(".//item")[:10]:
+            title = (item.findtext("title") or "").strip()
+            desc  = (item.findtext("description") or "").strip()
+            link  = (item.findtext("link") or "").strip()
+            pub   = (item.findtext("pubDate") or "").strip()
+            if not title or not link:
+                continue
+            articles.append({
+                "title": title,
+                "description": desc[:300],
+                "url": link,
+                "published": pub,
+                "fonte": source["nome"],
+                "categoria": source["categoria"],
+                "uid": f"{source['nome']}:{title[:60]}",
+            })
+    except Exception as e:
+        print(f"[early_rss] {source['nome']}: {e}")
+    return articles
+
+
+def _early_classify_impact(title: str, description: str) -> dict:
+    """
+    Classifica o impacto de uma notícia sem chamar IA — só keywords.
+    Retorna: nivel (CRITICO/ALTO/MEDIO/BAIXO), score, categoria, keywords_encontradas
+    """
+    text = (title + " " + description).lower()
+
+    # Nível de impacto
+    nivel = "BAIXO"
+    score = 0
+    for lvl, data in IMPACT_LEVELS.items():
+        if any(kw in text for kw in data["keywords"]):
+            if data["score"] > score:
+                score = data["score"]
+                nivel = lvl
+
+    # Categoria
+    categorias_encontradas = []
+    keywords_encontradas = []
+    for cat, kws in IMPACT_KEYWORDS.items():
+        found = [kw for kw in kws if kw in text]
+        if found:
+            categorias_encontradas.append(cat)
+            keywords_encontradas.extend(found)
+
+    return {
+        "nivel": nivel,
+        "score": score,
+        "categorias": categorias_encontradas,
+        "keywords": list(set(keywords_encontradas))[:8],
+    }
+
+
+def _early_match_markets(article_text: str, markets: list) -> list:
+    """
+    Encontra mercados relacionados à notícia por sobreposição de palavras.
+    Retorna lista de mercados ordenados por relevância.
+    """
+    text_words = set(w.lower() for w in article_text.split() if len(w) > 3)
+    STOP = {"will","the","this","that","with","from","have","been","they","their","which","what","does","about","after","before","into","more","some","would","could","should","when","where","there","says","said","according","report","also","other"}
+    text_words -= STOP
+
+    matches = []
+    for m in markets:
+        q_words = set(w.lower() for w in (m.question or "").split() if len(w) > 3)
+        q_words -= STOP
+        overlap = len(text_words & q_words)
+        if overlap >= 2:
+            matches.append({"market": m, "overlap": overlap})
+
+    matches.sort(key=lambda x: x["overlap"], reverse=True)
+    return [x["market"] for x in matches[:3]]
+
+
+@app.get("/alerts/early")
+def alerts_early(
+    min_impact: str = Query("ALTO", description="Nível mínimo: BAIXO, MEDIO, ALTO, CRITICO"),
+    alertar: int = Query(1, description="1 = envia Telegram"),
+    dry_run: int = Query(0, description="1 = não envia, só mostra"),
+    db: Session = Depends(get_db),
+):
+    """
+    Early Alert Engine — #21
+    Escaneia 8 fontes RSS simultaneamente.
+    Classifica impacto por keywords.
+    Cruza com mercados ativos do banco.
+    Dispara Telegram antes do preço mover.
+    """
+    now = datetime.utcnow()
+    niveis_ordem = {"BAIXO": 1, "MEDIO": 2, "ALTO": 3, "CRITICO": 4}
+    min_score = IMPACT_LEVELS.get(min_impact.upper(), IMPACT_LEVELS["ALTO"])["score"]
+
+    # Busca mercados ativos com filtros
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    # Coleta RSS de todas as fontes
+    all_articles = []
+    for source in EARLY_ALERT_RSS_SOURCES:
+        articles = _early_fetch_rss(source)
+        all_articles.extend(articles)
+        time.sleep(0.1)  # respeita rate limit
+
+    # Deduplica por UID
+    seen_uids: set = set()
+    unique_articles = []
+    for a in all_articles:
+        if a["uid"] not in seen_uids:
+            seen_uids.add(a["uid"])
+            unique_articles.append(a)
+
+    # Classifica impacto e filtra
+    alertas = []
+    for article in unique_articles:
+        # Já foi alertado antes?
+        if article["uid"] in _EARLY_ALERT_SEEN:
+            continue
+
+        # Classifica impacto
+        impact = _early_classify_impact(article["title"], article["description"])
+        if impact["score"] < min_score:
+            continue
+
+        # Encontra mercados relacionados
+        article_text = article["title"] + " " + article["description"]
+        mercados_relacionados = _early_match_markets(article_text, markets)
+
+        alerta = {
+            "titulo": article["title"],
+            "fonte": article["fonte"],
+            "categoria_fonte": article["categoria"],
+            "url": article["url"],
+            "publicado": article["published"],
+            "impacto": impact["nivel"],
+            "impacto_score": impact["score"],
+            "categorias": impact["categorias"],
+            "keywords": impact["keywords"],
+            "mercados_afetados": [
+                {
+                    "question": m.question,
+                    "slug": m.market_slug,
+                    "yes_price": _get_yes_no_prices(m)[0],
+                    "polymarket_url": _polymarket_url(m.market_slug),
+                }
+                for m in mercados_relacionados
+            ],
+            "total_mercados": len(mercados_relacionados),
+            "detectado_em": now.isoformat(),
+        }
+        alertas.append(alerta)
+
+        # Marca como visto
+        _EARLY_ALERT_SEEN.add(article["uid"])
+        if len(_EARLY_ALERT_SEEN) > 10000:
+            for uid in list(_EARLY_ALERT_SEEN)[:2000]:
+                _EARLY_ALERT_SEEN.discard(uid)
+
+        # Envia Telegram
+        if alertar and not dry_run:
+            nivel_emoji = {
+                "CRITICO": "🚨🚨🚨",
+                "ALTO": "🚨",
+                "MEDIO": "⚠️",
+                "BAIXO": "ℹ️",
+            }.get(impact["nivel"], "📰")
+
+            mercados_txt = ""
+            for m_info in alerta["mercados_afetados"][:3]:
+                price_txt = f"{m_info['yes_price']}%" if m_info["yes_price"] else "?"
+                mercados_txt += f"\n• <a href=\"{m_info['polymarket_url']}\">{m_info['question'][:70]}</a> @ {price_txt}"
+
+            msg = (
+                f"{nivel_emoji} <b>EARLY ALERT — {impact['nivel']}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📰 <b>{article['title'][:120]}</b>\n"
+                f"📡 Fonte: {article['fonte']} | Score: {impact['score']}\n"
+                f"🏷️ {', '.join(impact['categorias'][:3]) or 'Geral'}\n"
+                f"🔑 Keywords: {', '.join(impact['keywords'][:5])}\n"
+            )
+            if mercados_relacionados:
+                msg += f"━━━━━━━━━━━━━━━━━━━━━━\n🎯 <b>Mercados afetados ({len(mercados_relacionados)}):</b>{mercados_txt}\n"
+            msg += (
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔗 <a href=\"{article['url']}\">Ler notícia completa</a>\n"
+                f"⏰ {now.strftime('%H:%M:%S')} UTC"
+            )
+            _telegram_send(msg)
+
+    # Ordena por impacto (CRITICO primeiro)
+    alertas.sort(key=lambda x: x["impacto_score"], reverse=True)
+
+    return {
+        "status": "ok",
+        "total_fontes_escaneadas": len(EARLY_ALERT_RSS_SOURCES),
+        "total_artigos_coletados": len(unique_articles),
+        "alertas_gerados": len(alertas),
+        "alertas_enviados": len(alertas) if (alertar and not dry_run) else 0,
+        "min_impact": min_impact,
+        "alertas": alertas,
+        "gerado_em": now.isoformat(),
+    }
