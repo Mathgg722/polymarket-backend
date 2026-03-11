@@ -1021,6 +1021,14 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] contradictions error: {e}")
 
+        # RSS Naval — movimentação em Hormuz, Mar Vermelho, Golfo Pérsico
+        naval_resp = None
+        try:
+            import asyncio
+            naval_resp = asyncio.run(naval_scan(alertar=1, db=db))
+        except Exception as e:
+            print(f"[cron] naval scan error: {e}")
+
         last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
         return {
             "status": "ok",
@@ -1033,9 +1041,8 @@ def cron_tick(db: Session = Depends(get_db)):
             "events": events_resp if events_resp else {"status": "error"},
             "military": military_resp if military_resp else {"status": "error"},
             "contradictions": contra_resp if contra_resp else {"status": "error"},
+            "naval": naval_resp if naval_resp else {"status": "error"},
         }
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
 
 # ══════════════════════════════════════════════════════════════
 # MOTOR 1 — SINAIS v4
