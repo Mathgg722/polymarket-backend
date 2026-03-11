@@ -1002,12 +1002,7 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] contradictions error: {e}")
 
-        naval_resp = None
-        try:
-            import asyncio
-            naval_resp = asyncio.run(naval_scan(alertar=1, db=db))
-        except Exception as e:
-            print(f"[cron] naval scan error: {e}")
+        naval_resp = {"status": "skipped_timeout"}
 
         last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
         return {
