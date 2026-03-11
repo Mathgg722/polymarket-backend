@@ -7152,3 +7152,91 @@ async def ships_debug():
         "msgs_recebidas": msgs_recebidas,
         "total_msgs": len(msgs_recebidas),
     }
+# ============================================================
+# MOTOR #28 — RSS NAVAL (Hormuz, Mar Vermelho, Golfo Pérsico)
+# ============================================================
+
+NAVAL_RSS_FEEDS = [
+    {"url": "https://news.google.com/rss/search?q=hormuz+tanker+oil&hl=en-US&gl=US&ceid=US:en", "regiao": "HORMUZ", "impacto": "CRITICO"},
+    {"url": "https://news.google.com/rss/search?q=red+sea+ship+attack+houthi&hl=en-US&gl=US&ceid=US:en", "regiao": "RED_SEA", "impacto": "ALTO"},
+    {"url": "https://news.google.com/rss/search?q=persian+gulf+vessel+iran&hl=en-US&gl=US&ceid=US:en", "regiao": "PERSIAN_GULF", "impacto": "ALTO"},
+    {"url": "https://news.google.com/rss/search?q=suez+canal+ship+blocked&hl=en-US&gl=US&ceid=US:en", "regiao": "SUEZ", "impacto": "MEDIO"},
+    {"url": "https://news.google.com/rss/search?q=black+sea+vessel+ukraine&hl=en-US&gl=US&ceid=US:en", "regiao": "BLACK_SEA", "impacto": "MEDIO"},
+]
+
+NAVAL_KEYWORDS_ALTO = [
+    "attack", "attacked", "seized", "seized", "blocked", "closure", "closed",
+    "missile", "drone", "explosion", "fire", "sinking", "hostage", "detained",
+    "military", "warship", "naval", "sanctions", "embargo", "iran", "irgc",
+    "houthi", "strike", "threat", "warning", "escalation",
+]
+
+NAVAL_KEYWORDS_MEDIO = [
+    "tanker", "oil", "cargo", "vessel", "ship", "strait", "passage",
+    "reroute", "divert", "delay", "insurance", "risk",
+]
+
+_naval_cache: dict = {}
+
+async def _naval_fetch_feed(feed: dict) -> list:
+    import hashlib
+    import feedparser
+    alertas = []
+    try:
+        parsed = feedparser.parse(feed["url"])
+        for entry in parsed.entries[:10]:
+            titulo = entry.get("title", "")
+            link = entry.get("link", "")
+            published = entry.get("published", "")
+            texto = (titulo + " " + entry.get("summary", "")).lower()
+            h = hashlib.md5(link.encode()).hexdigest()[:12]
+            if h in _naval_cache:
+                continue
+            _naval_cache[h] = True
+            score_alto = sum(1 for k in NAVAL_KEYWORDS_ALTO if k in texto)
+            score_medio = sum(1 for k in NAVAL_KEYWORDS_MEDIO if k in texto)
+            if score_alto >= 1 or score_medio >= 2:
+                nivel = "CRITICO" if score_alto >= 2 else feed["impacto"]
+                alertas.append({
+                    "regiao": feed["regiao"],
+                    "titulo": titulo,
+                    "link": link,
+                    "published": published,
+                    "nivel": nivel,
+                    "score_alto": score_alto,
+                    "score_medio": score_medio,
+                })
+    except Exception as e:
+        pass
+    return alertas
+
+async def naval_scan(alertar: int = 0, db=None) -> dict:
+    tasks = [_naval_fetch_feed(f) for f in NAVAL_RSS_FEEDS]
+    resultados = await asyncio.gather(*tasks)
+    todos = []
+    for r in resultados:
+        todos.extend(r)
+    todos.sort(key=lambda x: x["score_alto"] + x["score_medio"], reverse=True)
+    alertas_enviados = 0
+    if alertar and db:
+        for item in todos[:5]:
+            emoji = "🛢️" if item["regiao"] == "HORMUZ" else "⚓"
+            msg = (
+                f"{emoji} <b>NAVAL ALERT — {item['regiao']}</b>\n"
+                f"📰 {item['titulo']}\n"
+                f"⚠️ Nível: {item['nivel']}\n"
+                f"🔗 {item['link']}"
+            )
+            _telegram_send(msg)
+            alertas_enviados += 1
+    return {
+        "status": "ok",
+        "total_alertas": len(todos),
+        "alertas_enviados": alertas_enviados,
+        "alertas": todos[:20],
+        "gerado_em": datetime.utcnow().isoformat(),
+    }
+
+@app.get("/naval/scan")
+async def naval_scan_endpoint(alertar: int = Query(0), db: Session = Depends(get_db)):
+    return await naval_scan(alertar=alertar, db=db)
