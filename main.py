@@ -1540,7 +1540,7 @@ JIANG_PREDICTIONS = [
         # core_required: pelo menos 1 dessas DEVE estar no texto do mercado
         "core_required": ["iran", "iranian", "tehran", "irgc", "persia"],
         # keywords: contribuem para o score de match
-        "keywords": ["iran", "iranian", "tehran", "irgc", "nuclear", "war", "military", "strike", "attack", "conflict", "troops", "invasion", "bomb", "sanctions"],
+        "keywords": ["iran", "iranian", "tehran", "irgc", "nuclear", "war", "military", "strike", "attack", "conflict", "troops", "invasion", "bomb", "sanctions", "regime", "fall", "collapse", "revolution", "leadership", "change", "overthrow"],
         "status": "EM_ANDAMENTO",
         "confirmado": True,
         "prob_jiang": 78,
@@ -1571,7 +1571,7 @@ JIANG_PREDICTIONS = [
         "categoria": "GEOPOLITICA",
         "icone": "🕊️",
         "core_required": ["iran", "iranian", "tehran"],
-        "keywords": ["iran", "ceasefire", "peace", "deal", "withdraw", "negotiations", "nuclear", "agreement", "talks", "diplomacy", "iranian"],
+        "keywords": ["iran", "ceasefire", "peace", "deal", "withdraw", "negotiations", "nuclear", "agreement", "talks", "diplomacy", "iranian", "regime", "fall", "collapse", "leadership", "change"],
         "status": "ATIVA",
         "confirmado": False,
         "prob_jiang": 62,
@@ -1903,7 +1903,7 @@ Responda SOMENTE com JSON válido sem markdown:
 def get_game_theory_v4(
     limit: int = Query(10, ge=1, le=25),
     categoria: str = Query(None),
-    min_edge: float = Query(10.0),
+    min_edge: float = Query(5.0),
     db: Session = Depends(get_db),
 ):
     """
