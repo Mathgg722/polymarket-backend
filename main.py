@@ -840,15 +840,14 @@ def debug_anomalies(db: Session = Depends(get_db)):
         Token.price < FILTER_MAX_PRICE
     ).count()
 
-    # Conta quantos têm snapshots suficientes
-    tokens_com_snaps = 0
-    tokens_com_movimento = 0
-    sample = []
+    passou_count = 0
+    sample_passou = []
+    sample_falhou = []
 
     tokens = db.query(Token).filter(
         Token.price > FILTER_MIN_PRICE,
         Token.price < FILTER_MAX_PRICE
-    ).limit(50).all()
+    ).all()
 
     for t in tokens:
         snap_count = db.query(func.count(Snapshot.id)).filter(
@@ -860,9 +859,6 @@ def debug_anomalies(db: Session = Depends(get_db)):
 
         passou, motivo = _market_passes_filters(t.price, volume, snap_count, market.end_date if market else None)
 
-        if snap_count >= 20:
-            tokens_com_snaps += 1
-
         s5m = (
             db.query(Snapshot)
             .filter(Snapshot.token_id == t.token_id, Snapshot.timestamp <= w5m)
@@ -870,32 +866,36 @@ def debug_anomalies(db: Session = Depends(get_db)):
         )
         c5m = round((t.price - s5m.price) * 100, 2) if s5m else None
 
-        if c5m and abs(c5m) >= 3:
-            tokens_com_movimento += 1
+        info = {
+            "token": t.token_id[:20],
+            "outcome": t.outcome,
+            "price_pct": round(t.price * 100, 1),
+            "snap_count": snap_count,
+            "volume": volume,
+            "passou_filtro": passou,
+            "motivo": motivo,
+            "c5m": c5m,
+            "market": market.question[:60] if market else "?",
+        }
 
-        if len(sample) < 10:
-            sample.append({
-                "token": t.token_id[:20],
-                "outcome": t.outcome,
-                "price_pct": round(t.price * 100, 1),
-                "snap_count": snap_count,
-                "volume": volume,
-                "passou_filtro": passou,
-                "motivo": motivo,
-                "c5m": c5m,
-                "market": market.question[:50] if market else "?",
-            })
+        if passou:
+            passou_count += 1
+            if len(sample_passou) < 10:
+                sample_passou.append(info)
+        else:
+            if len(sample_falhou) < 5:
+                sample_falhou.append(info)
 
     return {
         "total_tokens": total_tokens,
         "tokens_em_range_10_90pct": tokens_in_range,
-        "tokens_com_20plus_snaps": tokens_com_snaps,
-        "tokens_com_movimento_3pct": tokens_com_movimento,
+        "tokens_passaram_filtro": passou_count,
         "filtro_min_price": FILTER_MIN_PRICE,
         "filtro_max_price": FILTER_MAX_PRICE,
         "filtro_min_volume": FILTER_MIN_VOLUME,
         "filtro_min_snaps": FILTER_MIN_SNAPS,
-        "sample": sample,
+        "tokens_que_passaram": sample_passou,
+        "tokens_que_falharam": sample_falhou,
         "now": now.isoformat(),
     }
 
