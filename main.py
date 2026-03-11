@@ -93,28 +93,22 @@ def _clean_slug(slug: str) -> str:
 def _market_passes_filters(token_price: float, market_volume: float, snap_count: int, end_date=None) -> tuple:
     """
     Verifica se um mercado/token passa pelos filtros universais.
-    Retorna (passou: bool, motivo: str)
+    Quando volume=0 (campo recem adicionado), usa snap_count>=50 como proxy.
     """
     now = datetime.utcnow()
-
-    # Filtro 1: preço fora da zona de interesse
     if token_price < FILTER_MIN_PRICE:
-        return False, f"preço {round(token_price*100,1)}% abaixo do mínimo de {FILTER_MIN_PRICE*100}%"
+        return False, f"preco abaixo do minimo"
     if token_price > FILTER_MAX_PRICE:
-        return False, f"preço {round(token_price*100,1)}% acima do máximo de {FILTER_MAX_PRICE*100}%"
-
-    # Filtro 2: volume insuficiente
-    if market_volume < FILTER_MIN_VOLUME:
-        return False, f"volume ${market_volume:.0f} abaixo do mínimo de ${FILTER_MIN_VOLUME}"
-
-    # Filtro 3: dados insuficientes
+        return False, f"preco acima do maximo"
+    # Filtro volume: se zerado usa snapshots como proxy
+    if market_volume > 0 and market_volume < FILTER_MIN_VOLUME:
+        return False, f"volume insuficiente"
+    if market_volume == 0 and snap_count < 50:
+        return False, f"sem volume e poucos snapshots"
     if snap_count < FILTER_MIN_SNAPS:
-        return False, f"apenas {snap_count} snapshots, mínimo é {FILTER_MIN_SNAPS}"
-
-    # Filtro 4: mercado expirado
+        return False, f"snapshots insuficientes"
     if end_date and end_date < now:
         return False, "mercado expirado"
-
     return True, "ok"
 
 
@@ -306,10 +300,16 @@ def refresh_markets(db: Session = Depends(get_db)):
                     except Exception:
                         pass
 
-            # Volume — salva agora
+            # Volume — tenta todos os campos possíveis da API Polymarket
             volume = 0.0
             try:
-                volume = float(m.get("volume", 0) or m.get("volumeNum", 0) or 0)
+                volume = float(
+                    m.get("volume24hr") or
+                    m.get("volume") or
+                    m.get("volumeNum") or
+                    m.get("volume24Hour") or
+                    0
+                )
             except Exception:
                 pass
 
