@@ -967,6 +967,25 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] whale scan error: {e}")
 
+        # Early alerts — RSS antes do preço mover
+        early_resp = None
+        try:
+            early_resp = alerts_early(min_impact="ALTO", alertar=1, dry_run=0, db=db)
+        except Exception as e:
+            print(f"[cron] early alert error: {e}")
+
+        # Correlações — divergências entre pares temáticos
+        corr_resp = None
+        try:
+            corr_resp = correlations_divergencias(
+                min_corr=0.70,
+                min_move=3.0,
+                alertar=1,
+                db=db,
+            )
+        except Exception as e:
+            print(f"[cron] correlations error: {e}")
+
         last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
         return {
             "status": "ok",
@@ -974,6 +993,8 @@ def cron_tick(db: Session = Depends(get_db)):
             "last_snapshot_timestamp": last.timestamp.isoformat() if last and last.timestamp else None,
             "scan": scan_resp if scan_resp else {"status": "error"},
             "whales": whale_resp if whale_resp else {"status": "error"},
+            "early_alerts": early_resp if early_resp else {"status": "error"},
+            "correlations": corr_resp if corr_resp else {"status": "error"},
         }
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -4566,4 +4587,4 @@ def correlations_divergencias(
         "min_move": min_move,
         "divergencias": divergencias[:10],
         "gerado_em": now.isoformat(),
-    }
+    } 
