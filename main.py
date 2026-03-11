@@ -3258,17 +3258,19 @@ def _whale_alert_telegram(whale: dict) -> None:
 
 @app.get("/whales")
 def get_whales(
-    min_valor: float = Query(100, ge=1, le=500000),
+    min_valor: float = Query(5000, ge=1, le=500000),
     limit: int = Query(20, ge=1, le=50),
+    filtrar_resolvendo: int = Query(1, description="1 = ignora mercados quase resolvidos (>90% ou <10%)"),
     db: Session = Depends(get_db),
 ):
     """
     Detector de Baleias v1.
-    Agrega trades por carteira+mercado. valor_usd = size * price.
+    Agrega trades por carteira+mercado. Filtra mercados resolvendo.
+    Busca 1000 trades para capturar baleias maiores.
     """
-    url = f"{DATA_API}/trades?limit=500"
+    url = f"{DATA_API}/trades?limit=1000"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=12)
+        resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code != 200:
             return {"status": "unavailable", "status_code": resp.status_code}
 
@@ -3282,6 +3284,10 @@ def get_whales(
             size  = float(tx.get("size") or 0)
             price = float(tx.get("price") or 0)
             valor = size * price
+
+            # Filtra mercados resolvendo (preço >90% ou <10%)
+            if filtrar_resolvendo and (price > 0.90 or price < 0.10):
+                continue
 
             wallet = tx.get("proxyWallet") or ""
             slug   = tx.get("slug") or tx.get("conditionId") or ""
@@ -3325,19 +3331,12 @@ def get_whales(
         whales.sort(key=lambda x: x["valor_usd"], reverse=True)
         top = whales[:limit]
 
-        # Debug: top 5 valores individuais
-        sample = sorted(
-            [round(float(tx.get("size",0))*float(tx.get("price",0)),4) for tx in trades_raw[:100]],
-            reverse=True
-        )[:5]
-
         return {
             "status": "ok",
             "threshold_usd": min_valor,
             "total_trades": len(trades_raw),
             "total_encontradas": len(whales),
             "retornadas": len(top),
-            "debug_top5_trade_values": sample,
             "baleias": top,
             "gerado_em": datetime.utcnow().isoformat(),
         }
