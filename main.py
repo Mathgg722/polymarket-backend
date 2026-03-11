@@ -960,21 +960,18 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] scan error: {e}")
 
-        # Whale scan — detecta baleias e alerta Telegram
         whale_resp = None
         try:
             whale_resp = whale_scan(min_valor=10000, alertar=1, db=db)
         except Exception as e:
             print(f"[cron] whale scan error: {e}")
 
-        # Early alerts — RSS antes do preço mover
         early_resp = None
         try:
             early_resp = alerts_early(min_impact="ALTO", alertar=1, dry_run=0, db=db)
         except Exception as e:
             print(f"[cron] early alert error: {e}")
 
-        # Correlações — divergências entre pares temáticos
         corr_resp = None
         try:
             corr_resp = correlations_divergencias(
@@ -986,7 +983,6 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] correlations error: {e}")
 
-        # Eventos agendados — avisa 24h antes
         events_resp = None
         try:
             events_resp = get_events_upcoming(
@@ -998,7 +994,6 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] events error: {e}")
 
-        # Scanner Telegram Militar — intel antes do Reuters
         military_resp = None
         try:
             military_resp = military_scan(
@@ -1010,7 +1005,6 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] military scan error: {e}")
 
-        # Detector de Contradições — pares semânticos
         contra_resp = None
         try:
             contra_resp = get_contradictions(
@@ -1021,7 +1015,6 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] contradictions error: {e}")
 
-        # RSS Naval — movimentação em Hormuz, Mar Vermelho, Golfo Pérsico
         naval_resp = None
         try:
             import asyncio
@@ -1043,6 +1036,8 @@ def cron_tick(db: Session = Depends(get_db)):
             "contradictions": contra_resp if contra_resp else {"status": "error"},
             "naval": naval_resp if naval_resp else {"status": "error"},
         }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 # ══════════════════════════════════════════════════════════════
 # MOTOR 1 — SINAIS v4
