@@ -6195,7 +6195,7 @@ from bs4 import BeautifulSoup
 MILITARY_CHANNELS = [
     {"id": "militarylandnet",     "nome": "Military Land",      "regiao": "UKRAINE",  "lingua": "en"},
     {"id": "ukrainewar",          "nome": "Ukraine War",        "regiao": "UKRAINE",  "lingua": "en"},
-    {"id": "nexta_tv",            "nome": "NEXTA",              "regiao": "UKRAINE",  "lingua": "en"},
+    {"id": "nexta_tv",            "nome": "NEXTA",              "regiao": "UKRAINE",  "lingua": "ru"},
     {"id": "osintukraine",        "nome": "OSINT Ukraine",      "regiao": "UKRAINE",  "lingua": "en"},
     {"id": "rybar",               "nome": "Rybar (RU)",         "regiao": "RUSSIA",   "lingua": "ru"},
     {"id": "iranintl",            "nome": "Iran International", "regiao": "IRAN",     "lingua": "en"},
@@ -6252,7 +6252,8 @@ MILITARY_IMPACT_LEVELS = {
 # Regiões e seus mercados relacionados
 REGION_KEYWORDS = {
     "UKRAINE":  ["ukraine", "ukrainian", "zelensky", "kyiv", "russia", "ceasefire", "donbas", "nato"],
-    "RUSSIA":   ["russia", "russian", "putin", "ukraine", "ceasefire", "nato", "moscow"],
+    "RUSSIA":   ["russia", "russian", "putin", "ukraine", "ceasefire", "nato", "moscow",
+              "iran", "oil", "hormuz", "middle east", "oriente", "neft"],
     "IRAN":     ["iran", "iranian", "tehran", "irgc", "nuclear", "hormuz", "sanction", "attack"],
     "ISRAEL":   ["israel", "israeli", "gaza", "hamas", "hezbollah", "idf", "netanyahu",
                  "iran", "ballistic", "khamenei", "strike", "hormuz", "tehran", "irgc",
