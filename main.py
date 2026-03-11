@@ -103,7 +103,7 @@ def _market_passes_filters(token_price: float, market_volume: float, snap_count:
     # Filtro volume: se zerado usa snapshots como proxy
     if market_volume > 0 and market_volume < FILTER_MIN_VOLUME:
         return False, f"volume insuficiente"
-    if market_volume == 0 and snap_count < 50:
+    if market_volume == 0 and snap_count < FILTER_MIN_SNAPS:
         return False, f"sem volume e poucos snapshots"
     if snap_count < FILTER_MIN_SNAPS:
         return False, f"snapshots insuficientes"
@@ -272,8 +272,8 @@ def refresh_markets(db: Session = Depends(get_db)):
 
     try:
         resp = requests.get(
-            f"{GAMMA_API}/markets?limit=200&active=true&order=volume24hr&ascending=false",
-            timeout=15
+            f"{GAMMA_API}/markets?limit=500&active=true&order=volume24hr&ascending=false",
+            timeout=20
         )
         markets_raw = resp.json()
         if isinstance(markets_raw, dict):
