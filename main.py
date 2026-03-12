@@ -1009,19 +1009,26 @@ def cron_alerts(db: Session = Depends(get_db)):
             loop.close()
         except Exception as e:
             print(f"[cron/alerts] naval: {e}")
-        
-        politicians_resp = None
+
+        politicians = None
         try:
-            politicians_resp = politicians_scan(min_impact="ALTO", alertar=1, usar_ia=1, db=db)
+            politicians = politicians_scan(min_impact="ALTO", alertar=1, usar_ia=0, db=db)
         except Exception as e:
             print(f"[cron/alerts] politicians: {e}")
+
+        press = None
+        try:
+            press = press_scan(min_score=20, alertar=1, usar_ia=0, db=db)
+        except Exception as e:
+            print(f"[cron/alerts] press: {e}")
 
         return {
             "status": "ok",
             "early_alerts": early if early else {"status": "error"},
             "military": military if military else {"status": "error"},
             "naval": naval if naval else {"status": "error"},
-            "politicians": politicians_resp if politicians_resp else {"status": "error"},
+            "politicians": politicians if politicians else {"status": "error"},
+            "press": press if press else {"status": "error"},
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
