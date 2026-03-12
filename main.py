@@ -4,6 +4,7 @@
 # Reescrito do zero com motores limpos
 # ============================================================
 
+from fastapi.responses import JSONResponse, HTMLResponse  # o que já tiver
 import os
 import json
 import time
@@ -12,7 +13,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Depends, Query
+from fastapi import FastAPI, Depends, Query , Request
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text, func, desc
@@ -8269,203 +8270,167 @@ def smart_money_wallets(
     }
 
 # ══════════════════════════════════════════════════════════════
-# MOTOR #33 — IA DEBATEDORA (Devil's Advocate)
-# Você explica sua tese de aposta → IA tenta destruir
-# Se a tese sobreviver ao debate → aposta forte
+# MOTOR #34 — DETECTOR DE MERCADO MANIPULADO
+# Sinais: poucos traders + volume alto + concentração de posições + variação de odds suspeita
+# Resultado: avisa para NÃO entrar ou para entrar CONTRA
 # ══════════════════════════════════════════════════════════════
 
-@app.post("/debate/tese")
-def debate_tese(
-    tese: str = Query(..., description="Sua tese de aposta. Ex: 'Vou comprar YES em Iran strike porque...'"),
-    mercado: str = Query(None, description="Slug ou nome do mercado (opcional)"),
-    rounds: int = Query(2, description="Número de rounds de debate (1-3)"),
-    db: Session = Depends(get_db),
-):
+def detectar_manipulacao(
+    num_traders: int,
+    volume_total: float,
+    top_trader_percentual: float,   # % do volume concentrado no top trader (0-100)
+    odds_variacao_24h: float,        # variação % das odds nas últimas 24h (ex: 0.35 = 35%)
+) -> dict:
     """
-    Motor #33 — IA Debatedora
-    Você explica sua tese → IA tenta destruir → avalia se sobreviveu.
-    Quanto mais rounds sobreviver, mais forte a aposta.
+    Analisa sinais de manipulação em um mercado Polymarket.
+
+    Parâmetros:
+    - num_traders: número de traders únicos no mercado
+    - volume_total: volume total em USD
+    - top_trader_percentual: % do volume que o maior trader representa
+    - odds_variacao_24h: variação das odds nas últimas 24h (0.0 a 1.0)
+
+    Retorna dict com score, sinais detectados e recomendação.
     """
-    if not ANTHROPIC_KEY:
-        return {"status": "error", "error": "ANTHROPIC_KEY não configurada"}
+    sinais = []
+    score = 0  # 0 a 100 — quanto maior, mais suspeito
 
-    rounds = max(1, min(3, rounds))
-    now = datetime.utcnow()
-
-    # Busca contexto do mercado se fornecido
-    market_context = ""
-    market_info = None
-    if mercado:
-        market_obj = db.query(Market).filter(
-            (Market.market_slug == mercado) | (Market.question.ilike(f"%{mercado}%"))
-        ).first()
-        if market_obj:
-            yes_price, no_price = _get_yes_no_prices(market_obj)
-            market_info = {
-                "question": market_obj.question,
-                "yes_price": yes_price,
-                "no_price": no_price,
-                "url": _polymarket_url(market_obj.market_slug),
-            }
-            market_context = f"\nMERCADO: {market_obj.question}\nPreço YES atual: {yes_price}% | NO: {no_price}%"
-
-    debate_rounds = []
-    tese_atual = tese
-    tese_sobreviveu = True
-    score_final = 100
-
-    for round_num in range(1, rounds + 1):
-        # Round de ataque — IA tenta destruir a tese
-        prompt_ataque = f"""Você é um analista financeiro cético e agressivo especializado em prediction markets.
-
-TESE DO USUÁRIO: {tese_atual}
-{market_context}
-ROUND: {round_num}/{rounds}
-
-Sua missão: destruir completamente esta tese. Encontre:
-1. Falhas lógicas
-2. Dados que contradizem
-3. Riscos ignorados
-4. Vieses cognitivos do apostador
-5. Cenários alternativos mais prováveis
-
-Seja brutal e específico. Não seja gentil.
-
-Responda SOMENTE com JSON válido:
-{{"ataque":"<seu argumento devastador, max 200 chars>","pontos_fracos":["<ponto1>","<ponto2>","<ponto3>"],"risco_ignorado":"<maior risco que o apostador ignorou>","probabilidade_real_estimada":<0-100>,"score_destruicao":<0-100, quanto você destruiu a tese>}}"""
-
-        try:
-            resp_ataque = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 500,
-                      "messages": [{"role": "user", "content": prompt_ataque}]},
-                timeout=20,
-            )
-            ataque_raw = resp_ataque.json()["content"][0]["text"].replace("```json","").replace("```","").strip()
-            ataque = json.loads(ataque_raw)
-        except Exception as e:
-            print(f"[debate] ataque round {round_num}: {e}")
-            ataque = {
-                "ataque": "Erro ao gerar contra-argumento",
-                "pontos_fracos": [],
-                "risco_ignorado": "",
-                "probabilidade_real_estimada": 50,
-                "score_destruicao": 30,
-            }
-
-        score_destruicao = ataque.get("score_destruicao", 30)
-        score_final -= int(score_destruicao * 0.4)
-
-        # Defesa — IA avalia se a tese pode se defender
-        prompt_defesa = f"""Você é um árbitro imparcial de debates sobre prediction markets.
-
-TESE ORIGINAL: {tese}
-ATAQUE: {ataque.get('ataque', '')}
-PONTOS FRACOS APONTADOS: {ataque.get('pontos_fracos', [])}
-{market_context}
-
-Avalie: a tese original ainda se sustenta após este ataque?
-Gere a melhor defesa possível para a tese.
-
-Responda SOMENTE com JSON válido:
-{{"defesa":"<melhor argumento de defesa, max 200 chars>","tese_sobreviveu":<true/false>,"percentual_sobrevivencia":<0-100>,"veredicto":"FORTE|MODERADA|FRACA|DESTRUIDA","ajuste_recomendado":"<como melhorar a tese ou null>"}}"""
-
-        try:
-            resp_defesa = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 400,
-                      "messages": [{"role": "user", "content": prompt_defesa}]},
-                timeout=20,
-            )
-            defesa_raw = resp_defesa.json()["content"][0]["text"].replace("```json","").replace("```","").strip()
-            defesa = json.loads(defesa_raw)
-        except Exception as e:
-            print(f"[debate] defesa round {round_num}: {e}")
-            defesa = {
-                "defesa": "Erro ao gerar defesa",
-                "tese_sobreviveu": True,
-                "percentual_sobrevivencia": 50,
-                "veredicto": "MODERADA",
-                "ajuste_recomendado": None,
-            }
-
-        if not defesa.get("tese_sobreviveu", True):
-            tese_sobreviveu = False
-
-        debate_rounds.append({
-            "round": round_num,
-            "ataque": ataque,
-            "defesa": defesa,
+    # --- SINAL 1: Poucos traders com volume alto ---
+    volume_por_trader = volume_total / max(num_traders, 1)
+    if num_traders < 10 and volume_total > 5000:
+        sinais.append({
+            "sinal": "POUCOS_TRADERS_VOLUME_ALTO",
+            "descricao": f"{num_traders} traders, volume ${volume_total:,.0f} — concentração perigosa",
+            "peso": 35
         })
+        score += 35
+    elif num_traders < 25 and volume_total > 10000:
+        sinais.append({
+            "sinal": "POUCOS_TRADERS_VOLUME_MODERADO",
+            "descricao": f"{num_traders} traders, volume ${volume_total:,.0f} — atenção",
+            "peso": 20
+        })
+        score += 20
 
-        # Próximo round parte da defesa
-        if defesa.get("defesa"):
-            tese_atual = f"{tese} [Defesa: {defesa['defesa']}]"
+    # --- SINAL 2: Concentração de posições (top trader %) ---
+    if top_trader_percentual >= 60:
+        sinais.append({
+            "sinal": "CONCENTRACAO_EXTREMA",
+            "descricao": f"Top trader controla {top_trader_percentual:.1f}% do volume — whale dominando",
+            "peso": 35
+        })
+        score += 35
+    elif top_trader_percentual >= 35:
+        sinais.append({
+            "sinal": "CONCENTRACAO_ALTA",
+            "descricao": f"Top trader controla {top_trader_percentual:.1f}% do volume — atenção",
+            "peso": 20
+        })
+        score += 20
 
-    # Avaliação final
-    score_final = max(0, min(100, score_final))
+    # --- SINAL 3: Variação de odds suspeita nas últimas 24h ---
+    variacao_pct = odds_variacao_24h * 100
+    if variacao_pct >= 40:
+        sinais.append({
+            "sinal": "ODDS_VARIACAO_EXTREMA",
+            "descricao": f"Odds variaram {variacao_pct:.1f}% em 24h — movimento artificial provável",
+            "peso": 30
+        })
+        score += 30
+    elif variacao_pct >= 20:
+        sinais.append({
+            "sinal": "ODDS_VARIACAO_SUSPEITA",
+            "descricao": f"Odds variaram {variacao_pct:.1f}% em 24h — monitorar",
+            "peso": 15
+        })
+        score += 15
 
-    if score_final >= 75:
-        veredicto_final = "FORTE"
-        acao = "APOSTAR"
-        emoji = "💪🟢"
-    elif score_final >= 50:
-        veredicto_final = "MODERADA"
-        acao = "APOSTAR_COM_CAUTELA"
-        emoji = "⚠️🟡"
-    elif score_final >= 25:
-        veredicto_final = "FRACA"
-        acao = "REVISAR_TESE"
-        emoji = "🔴⚠️"
+    # --- CLASSIFICAÇÃO FINAL ---
+    score = min(score, 100)
+
+    if score >= 70:
+        nivel = "CRITICO"
+        recomendacao = "NÃO ENTRAR — mercado com sinais fortes de manipulação"
+        entrar_contra = True
+    elif score >= 40:
+        nivel = "SUSPEITO"
+        recomendacao = "CUIDADO — considere entrar CONTRA a tendência dominante"
+        entrar_contra = True
+    elif score >= 20:
+        nivel = "ATENCAO"
+        recomendacao = "MONITORAR — sinais leves, não entrar com posição grande"
+        entrar_contra = False
     else:
-        veredicto_final = "DESTRUIDA"
-        acao = "NAO_APOSTAR"
-        emoji = "💀🔴"
-
-    # Prompt de síntese final
-    prompt_sintese = f"""Você é o árbitro final de um debate sobre prediction markets.
-
-TESE: {tese}
-{market_context}
-ROUNDS DEBATIDOS: {rounds}
-SCORE DE SOBREVIVÊNCIA: {score_final}/100
-VEREDICTO: {veredicto_final}
-
-Resuma em 1 parágrafo curto (max 150 chars) o veredicto final e a recomendação principal.
-Responda SOMENTE com JSON: {{"sintese":"<resumo final>","recomendacao_tamanho_aposta":"PEQUENA|MEDIA|GRANDE|ZERO","stop_loss_sugerido":<percentual 0-100 ou null>}}"""
-
-    try:
-        resp_sintese = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 200,
-                  "messages": [{"role": "user", "content": prompt_sintese}]},
-            timeout=15,
-        )
-        sintese_raw = resp_sintese.json()["content"][0]["text"].replace("```json","").replace("```","").strip()
-        sintese = json.loads(sintese_raw)
-    except Exception as e:
-        print(f"[debate] sintese: {e}")
-        sintese = {
-            "sintese": f"Tese {veredicto_final.lower()} após {rounds} rounds de debate.",
-            "recomendacao_tamanho_aposta": "MEDIA" if score_final >= 50 else "ZERO",
-            "stop_loss_sugerido": 30,
-        }
+        nivel = "NORMAL"
+        recomendacao = "Mercado parece orgânico — pode operar normalmente"
+        entrar_contra = False
 
     return {
-        "status": "ok",
-        "tese_original": tese,
-        "mercado": market_info,
-        "rounds_debatidos": rounds,
-        "debate": debate_rounds,
-        "score_sobrevivencia": score_final,
-        "veredicto_final": veredicto_final,
-        "acao": acao,
-        "emoji": emoji,
-        "sintese": sintese.get("sintese", ""),
-        "recomendacao_tamanho_aposta": sintese.get("recomendacao_tamanho_aposta", "MEDIA"),
-        "stop_loss_sugerido": sintese.get("stop_loss_sugerido"),
-        "gerado_em": now.isoformat(),
+        "score_manipulacao": score,
+        "nivel": nivel,
+        "recomendacao": recomendacao,
+        "entrar_contra": entrar_contra,
+        "sinais_detectados": sinais,
+        "metricas": {
+            "num_traders": num_traders,
+            "volume_total_usd": volume_total,
+            "volume_por_trader_usd": round(volume_por_trader, 2),
+            "top_trader_percentual": top_trader_percentual,
+            "odds_variacao_24h_pct": round(variacao_pct, 2)
+        }
     }
+
+
+@app.post("/detectar-manipulacao")
+async def endpoint_detectar_manipulacao(request: Request):
+    """
+    Endpoint dedicado para detecção de manipulação de mercado.
+
+    Body JSON:
+    {
+        "num_traders": 8,
+        "volume_total": 15000,
+        "top_trader_percentual": 65,
+        "odds_variacao_24h": 0.45
+    }
+    """
+    try:
+        body = await request.json()
+
+        num_traders = body.get("num_traders")
+        volume_total = body.get("volume_total")
+        top_trader_percentual = body.get("top_trader_percentual")
+        odds_variacao_24h = body.get("odds_variacao_24h")
+
+        # Validação
+        campos_obrigatorios = {
+            "num_traders": num_traders,
+            "volume_total": volume_total,
+            "top_trader_percentual": top_trader_percentual,
+            "odds_variacao_24h": odds_variacao_24h
+        }
+        faltando = [k for k, v in campos_obrigatorios.items() if v is None]
+        if faltando:
+            return JSONResponse(
+                status_code=400,
+                content={"erro": f"Campos obrigatórios faltando: {faltando}"}
+            )
+
+        resultado = detectar_manipulacao(
+            num_traders=int(num_traders),
+            volume_total=float(volume_total),
+            top_trader_percentual=float(top_trader_percentual),
+            odds_variacao_24h=float(odds_variacao_24h)
+        )
+
+        return JSONResponse(content={
+            "motor": "MOTOR_34_DETECTOR_MANIPULACAO",
+            "resultado": resultado
+        })
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"erro": str(e)}
+        )
+    
