@@ -10803,5 +10803,6 @@ async def endpoint_mapear_manual(body: MapearManualRequest):
             "resultado": mapeamento
         })
     except Exception as e:
-        return JSONResponse(status_code=500, content={"erro": str(e)})
+        return {"mercado_encontrado": False, "match_score": 0, "erro_debug": str(e)}
+    
     
