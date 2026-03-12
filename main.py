@@ -10792,17 +10792,16 @@ class MapearManualRequest(BaseModel):
 
 @app.post("/pipeline-jiang/mapear-manual")
 async def endpoint_mapear_manual(body: MapearManualRequest):
-    """
-    Mapeia uma previsão manual para mercados Polymarket usando Claude.
-    Body: { "evento_previsto": "Trump wins 2024", "direcao": "YES", "confianca_pct": 80, "prazo": "Nov 2024" }
-    """
     try:
-        mapeamento = await mapear_para_polymarket(body.dict())
+        # Debug: ver o que a API Polymarket retorna
+        mercados = await buscar_mercados_polymarket_api(body.evento_previsto)
+        mapeamento = await mapear_para_polymarket(body.dict(), mercados)
         return JSONResponse(content={
             "motor": "MOTOR_51_MAPEAMENTO_SEMANTICO",
-            "resultado": mapeamento
+            "resultado": mapeamento,
+            "debug_mercados_encontrados": len(mercados),
+            "debug_primeiro_mercado": mercados[0].get("question", "") if mercados else "NENHUM"
         })
     except Exception as e:
-        return {"mercado_encontrado": False, "match_score": 0, "erro_debug": str(e)}
-    
+        return JSONResponse(status_code=500, content={"erro": str(e)})
     
