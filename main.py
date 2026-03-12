@@ -10488,7 +10488,7 @@ async def buscar_mercados_polymarket_api(query: str) -> list[dict]:
 async def extrair_previsoes_haiku(texto: str, fonte: str, titulo: str) -> list[dict]:
     try:
         import google.generativeai as genai
-        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+        genai.configure(api_key=os.environ.get("GEMINI_KEY"))
         model = genai.GenerativeModel("gemini-1.5-flash")
         prompt = f"""Você é um extrator de previsões do Professor Jiang (Predictive History).
 Analise o texto e extraia TODAS as previsões específicas mencionadas.
@@ -10510,7 +10510,7 @@ Se não houver previsões: {{"previsoes": []}}"""
 async def mapear_para_polymarket(previsao: dict, mercados_disponiveis: list[dict] = None) -> dict:
     try:
         import google.generativeai as genai
-        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+        genai.configure(api_key=os.environ.get("GEMINI_KEY"))
         model = genai.GenerativeModel("gemini-1.5-flash")
 
         if not mercados_disponiveis:
