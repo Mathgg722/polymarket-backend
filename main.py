@@ -11184,4 +11184,562 @@ async def endpoint_geo_map(body: GeoMapRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
+
+# ══════════════════════════════════════════════════════════════
+# MOTORES #56, #57, #58, #59, #60 — INTELIGÊNCIA AVANÇADA
+# #56 Polymarket Seismograph
+# #57 Cognitive Bias Detector
+# #58 Narrative Velocity
+# #59 Cross-Market Contagion
+# #60 Dead Cat Bounce em Odds
+# ══════════════════════════════════════════════════════════════
+
+# ─── MOTOR #56 — POLYMARKET SEISMOGRAPH ──────────────────────
+
+def detectar_epicentro(mercados_com_historico: list[dict]) -> dict:
+    """
+    Detecta qual mercado moveu primeiro e quais vão mover em cascata.
+    mercados_com_historico: [
+        {"id": "m1", "titulo": "...", "movimentos": [
+            {"timestamp": "2024-03-01T14:00:00Z", "variacao_pct": 5.2},
+            ...
+        ]}
+    ]
+    """
+    if not mercados_com_historico:
+        return {"erro": "Nenhum mercado fornecido"}
+
+    # Encontrar epicentro — mercado que moveu primeiro e mais forte
+    epicentro = None
+    maior_velocidade = 0
+    ondas = []
+
+    for mercado in mercados_com_historico:
+        movimentos = mercado.get("movimentos", [])
+        if not movimentos:
+            continue
+
+        # Calcular velocidade de movimento
+        variacoes = [abs(m.get("variacao_pct", 0)) for m in movimentos]
+        velocidade_max = max(variacoes) if variacoes else 0
+        velocidade_media = sum(variacoes) / len(variacoes) if variacoes else 0
+
+        # Timestamp do primeiro movimento significativo
+        primeiro_movimento = None
+        for m in movimentos:
+            if abs(m.get("variacao_pct", 0)) >= 3:
+                primeiro_movimento = m.get("timestamp")
+                break
+
+        ondas.append({
+            "mercado_id": mercado.get("id"),
+            "titulo": mercado.get("titulo", ""),
+            "velocidade_max": round(velocidade_max, 2),
+            "velocidade_media": round(velocidade_media, 2),
+            "primeiro_movimento_significativo": primeiro_movimento,
+            "score_sismico": round(velocidade_max * 10, 1)
+        })
+
+        if velocidade_max > maior_velocidade:
+            maior_velocidade = velocidade_max
+            epicentro = {
+                "mercado_id": mercado.get("id"),
+                "titulo": mercado.get("titulo", ""),
+                "velocidade_max": round(velocidade_max, 2),
+                "primeiro_movimento": primeiro_movimento
+            }
+
+    # Ordenar ondas por velocidade
+    ondas.sort(key=lambda x: x["velocidade_max"], reverse=True)
+
+    # Prever cascata
+    cascata = []
+    if epicentro and len(ondas) > 1:
+        for i, onda in enumerate(ondas[1:], 1):
+            cascata.append({
+                "ordem": i,
+                "mercado": onda["titulo"],
+                "previsao_movimento_horas": round(i * 1.5, 1),
+                "probabilidade_mover_pct": max(90 - i * 15, 20)
+            })
+
+    return {
+        "epicentro": epicentro,
+        "ondas_sismicas": ondas,
+        "cascata_prevista": cascata,
+        "total_mercados_analisados": len(mercados_com_historico),
+        "alerta": f"Epicentro detectado em '{epicentro['titulo']}' — cascata esperada em {len(cascata)} mercados" if epicentro else "Nenhum epicentro detectado"
+    }
+
+
+# ─── MOTOR #57 — COGNITIVE BIAS DETECTOR ─────────────────────
+
+BIAS_PATTERNS = {
+    "anchoring": {
+        "nome": "Viés de Ancoragem",
+        "descricao": "Mercado preso ao preço inicial mesmo com novas informações",
+        "trade": "Compre na direção da nova informação — o mercado vai corrigir",
+        "deteccao": "preco_estavel_com_noticias"
+    },
+    "recency_bias": {
+        "nome": "Viés de Recência",
+        "descricao": "Mercado supervaloriza eventos recentes ignorando base rate",
+        "trade": "Vá contra a tendência recente — regression to mean iminente",
+        "deteccao": "movimento_extremo_recente"
+    },
+    "availability_heuristic": {
+        "nome": "Heurística de Disponibilidade",
+        "descricao": "Eventos fáceis de lembrar (viral) superestimados vs base rate",
+        "trade": "Compre NO em eventos virais — probabilidade real é menor",
+        "deteccao": "volume_explosivo_sem_fundamento"
+    },
+    "bandwagon": {
+        "nome": "Efeito Manada",
+        "descricao": "Traders seguindo a multidão sem análise própria",
+        "trade": "Contrarie a multidão — smart money já saiu",
+        "deteccao": "muitos_traders_mesma_direcao"
+    },
+    "gamblers_fallacy": {
+        "nome": "Falácia do Jogador",
+        "descricao": "Crença que após eventos consecutivos, o oposto vai acontecer",
+        "trade": "Ignore sequências — cada evento é independente",
+        "deteccao": "reversao_esperada_sem_fundamento"
+    },
+    "overconfidence": {
+        "nome": "Excesso de Confiança",
+        "descricao": "Odds muito extremas (>90% ou <10%) geralmente são overconfident",
+        "trade": "Compre o lado negligenciado — mercado subestima incerteza",
+        "deteccao": "odds_extremas"
+    }
+}
+
+def detectar_cognitive_bias(
+    preco_atual: float,
+    preco_inicial: float,
+    variacao_24h_pct: float,
+    volume_atual: float,
+    volume_media: float,
+    num_traders: int,
+    num_noticias: int,
+    sequencia_direcao: list[str]  # ["YES", "YES", "YES", "NO"] últimas apostas
+) -> dict:
+    biases_detectados = []
+    score_total = 0
+
+    # Ancoragem — preço quase igual ao inicial com notícias chegando
+    variacao_do_inicial = abs((preco_atual - preco_inicial) / max(preco_inicial, 0.01)) * 100
+    if variacao_do_inicial < 5 and num_noticias >= 3:
+        biases_detectados.append({
+            **BIAS_PATTERNS["anchoring"],
+            "score": 75,
+            "evidencia": f"Preço variou só {variacao_do_inicial:.1f}% com {num_noticias} notícias"
+        })
+        score_total += 75
+
+    # Recência — movimento extremo recente
+    if abs(variacao_24h_pct) >= 25:
+        biases_detectados.append({
+            **BIAS_PATTERNS["recency_bias"],
+            "score": 80,
+            "evidencia": f"Variação de {variacao_24h_pct:.1f}% em 24h — mercado superestima evento recente"
+        })
+        score_total += 80
+
+    # Disponibilidade — volume explosivo sem fundamento (poucas notícias)
+    ratio_volume = volume_atual / max(volume_media, 1)
+    if ratio_volume >= 3 and num_noticias <= 1:
+        biases_detectados.append({
+            **BIAS_PATTERNS["availability_heuristic"],
+            "score": 70,
+            "evidencia": f"Volume {ratio_volume:.1f}x acima com apenas {num_noticias} notícia(s)"
+        })
+        score_total += 70
+
+    # Manada — muitos traders mesma direção
+    if num_traders >= 50 and abs(variacao_24h_pct) >= 15:
+        biases_detectados.append({
+            **BIAS_PATTERNS["bandwagon"],
+            "score": 65,
+            "evidencia": f"{num_traders} traders todos seguindo movimento de {variacao_24h_pct:.1f}%"
+        })
+        score_total += 65
+
+    # Odds extremas — overconfidence
+    if preco_atual >= 0.90 or preco_atual <= 0.10:
+        biases_detectados.append({
+            **BIAS_PATTERNS["overconfidence"],
+            "score": 85,
+            "evidencia": f"Odds em {preco_atual:.2f} — mercado extremamente confiante, raro ser correto"
+        })
+        score_total += 85
+
+    # Falácia do jogador — sequência longa
+    if len(sequencia_direcao) >= 4:
+        ultimos = sequencia_direcao[-4:]
+        if len(set(ultimos)) == 1:  # todos iguais
+            biases_detectados.append({
+                **BIAS_PATTERNS["gamblers_fallacy"],
+                "score": 60,
+                "evidencia": f"4 apostas consecutivas em {ultimos[0]} — traders esperando reversão sem fundamento"
+            })
+            score_total += 60
+
+    score_total = min(score_total, 100) if biases_detectados else 0
+    bias_dominante = max(biases_detectados, key=lambda x: x["score"]) if biases_detectados else None
+
+    return {
+        "score_bias_total": score_total,
+        "bias_dominante": bias_dominante,
+        "todos_biases": biases_detectados,
+        "total_detectados": len(biases_detectados),
+        "edge_disponivel": score_total >= 60,
+        "recomendacao": bias_dominante["trade"] if bias_dominante else "Nenhum viés dominante detectado"
+    }
+
+
+# ─── MOTOR #58 — NARRATIVE VELOCITY ──────────────────────────
+
+def calcular_narrative_velocity(
+    narrativa: str,
+    mencoes_por_hora: list[dict],  # [{"hora": "14:00", "mencoes": 45}, ...]
+    preco_odds_por_hora: list[dict]  # [{"hora": "14:00", "preco": 0.55}, ...]
+) -> dict:
+    if not mencoes_por_hora:
+        return {"erro": "Dados insuficientes"}
+
+    mencoes = [m.get("mencoes", 0) for m in mencoes_por_hora]
+    precos = [p.get("preco", 0) for p in preco_odds_por_hora] if preco_odds_por_hora else []
+
+    # Velocidade de espalhamento
+    if len(mencoes) >= 2:
+        aceleracao = mencoes[-1] - mencoes[0]
+        velocidade_atual = mencoes[-1]
+        velocidade_media = sum(mencoes) / len(mencoes)
+        pico = max(mencoes)
+        pos_pico = mencoes.index(pico)
+        ja_passou_pico = pos_pico < len(mencoes) - 1
+    else:
+        aceleracao = 0
+        velocidade_atual = mencoes[0] if mencoes else 0
+        velocidade_media = velocidade_atual
+        pico = velocidade_atual
+        ja_passou_pico = False
+
+    # Correlação narrativa → odds
+    correlacao = 0
+    if len(mencoes) >= 3 and len(precos) >= 3:
+        min_len = min(len(mencoes), len(precos))
+        m = mencoes[:min_len]
+        p = precos[:min_len]
+        media_m = sum(m) / len(m)
+        media_p = sum(p) / len(p)
+        num = sum((m[i] - media_m) * (p[i] - media_p) for i in range(min_len))
+        den_m = sum((x - media_m)**2 for x in m) ** 0.5
+        den_p = sum((x - media_p)**2 for x in p) ** 0.5
+        correlacao = round(num / max(den_m * den_p, 0.001), 2)
+
+    # Previsão de impacto nas odds
+    if aceleracao > 50 and not ja_passou_pico:
+        previsao_horas = 2
+        impacto_estimado = "ALTO"
+        recomendacao = f"Narrativa acelerando — odds vão mover em ~{previsao_horas}h. ENTRE AGORA"
+    elif aceleracao > 20 and not ja_passou_pico:
+        previsao_horas = 4
+        impacto_estimado = "MEDIO"
+        recomendacao = f"Narrativa crescendo — impacto em ~{previsao_horas}h"
+    elif ja_passou_pico:
+        previsao_horas = 0
+        impacto_estimado = "DECLINANDO"
+        recomendacao = "Narrativa já passou o pico — odds podem já ter precificado"
+    else:
+        previsao_horas = 8
+        impacto_estimado = "BAIXO"
+        recomendacao = "Narrativa fraca — pouco impacto esperado nas odds"
+
+    return {
+        "narrativa": narrativa,
+        "velocidade_atual_mencoes_hora": velocidade_atual,
+        "velocidade_media": round(velocidade_media, 1),
+        "aceleracao": aceleracao,
+        "ja_passou_pico": ja_passou_pico,
+        "correlacao_narrativa_odds": correlacao,
+        "impacto_estimado": impacto_estimado,
+        "previsao_impacto_horas": previsao_horas,
+        "recomendacao": recomendacao,
+        "metricas": {
+            "pico_mencoes": pico,
+            "total_horas_analisadas": len(mencoes_por_hora)
+        }
+    }
+
+
+# ─── MOTOR #59 — CROSS-MARKET CONTAGION ──────────────────────
+
+CONTAGION_MAP = {
+    # Se este mercado resolver YES → impacta estes mercados
+    "trump_wins": ["republican_senate", "crypto_up", "mexico_tariffs", "nato_weakening"],
+    "fed_rate_hike": ["recession_2025", "crypto_down", "gold_up", "dollar_up"],
+    "china_invades_taiwan": ["semiconductor_shortage", "oil_spike", "gold_up", "nato_response"],
+    "iran_nuclear": ["oil_spike", "israel_war", "gold_up", "strait_hormuz"],
+    "ukraine_ceasefire": ["gas_prices_drop", "europe_recovery", "russia_sanctions_ease"],
+    "bitcoin_100k": ["crypto_altcoins_up", "etf_approval", "institutional_adoption"],
+    "recession_usa": ["fed_rate_cut", "gold_up", "dollar_down", "crypto_down"],
+}
+
+def analisar_contagion(
+    mercado_resolvido: str,
+    resultado: str,  # "YES" ou "NO"
+    mercados_disponiveis: list[dict]
+) -> dict:
+    """
+    Quando um mercado resolve, detecta quais outros vão ser afetados.
+    mercados_disponiveis: [{"id": "...", "titulo": "...", "preco_yes": 0.55}]
+    """
+    chave = mercado_resolvido.lower().replace(" ", "_")
+
+    # Buscar no mapa de contágio
+    afetados_diretos = []
+    for key, impacts in CONTAGION_MAP.items():
+        if key in chave or any(k in chave for k in key.split("_")):
+            afetados_diretos = impacts
+            break
+
+    # Mapear para mercados disponíveis
+    impactos = []
+    for mercado in mercados_disponiveis:
+        titulo = mercado.get("titulo", "").lower()
+        preco = mercado.get("preco_yes", 0.5)
+
+        for afetado in afetados_diretos:
+            palavras = afetado.replace("_", " ").split()
+            if any(p in titulo for p in palavras):
+                # Calcular direção do impacto
+                if resultado == "YES":
+                    if "up" in afetado or "spike" in afetado:
+                        direcao = "SOBE"
+                        novo_preco_estimado = min(preco * 1.3, 0.95)
+                    elif "down" in afetado or "drop" in afetado:
+                        direcao = "CAI"
+                        novo_preco_estimado = max(preco * 0.7, 0.05)
+                    else:
+                        direcao = "AFETADO"
+                        novo_preco_estimado = preco * 1.15
+                else:
+                    direcao = "INVERSO"
+                    novo_preco_estimado = 1 - preco
+
+                impactos.append({
+                    "mercado_id": mercado.get("id"),
+                    "titulo": mercado.get("titulo"),
+                    "preco_atual": preco,
+                    "preco_estimado_pos_contagio": round(novo_preco_estimado, 3),
+                    "variacao_estimada_pct": round((novo_preco_estimado - preco) / max(preco, 0.01) * 100, 1),
+                    "direcao": direcao,
+                    "velocidade_contagio": "RAPIDA" if abs(novo_preco_estimado - preco) > 0.1 else "LENTA"
+                })
+
+    impactos.sort(key=lambda x: abs(x["variacao_estimada_pct"]), reverse=True)
+
+    return {
+        "mercado_gatilho": mercado_resolvido,
+        "resultado": resultado,
+        "total_mercados_afetados": len(impactos),
+        "impactos_em_cascata": impactos,
+        "alerta": f"{len(impactos)} mercados vão ser afetados em cascata!" if impactos else "Nenhum contágio mapeado para este mercado"
+    }
+
+
+# ─── MOTOR #60 — DEAD CAT BOUNCE ─────────────────────────────
+
+def detectar_dead_cat_bounce(
+    historico_precos: list[dict],
+    volume_historico: list[dict] = None
+) -> dict:
+    if len(historico_precos) < 5:
+        return {"erro": "Mínimo 5 pontos necessários"}
+
+    precos = [p["preco"] for p in historico_precos]
+
+    # Detectar padrão: queda forte → recuperação parcial → queda continua
+    queda_maxima = 0
+    ponto_queda = 0
+    recuperacao = 0
+    padrao_detectado = False
+    armadilha = False
+
+    for i in range(1, len(precos)):
+        variacao = (precos[i] - precos[i-1]) / max(precos[i-1], 0.01) * 100
+
+        # Encontrar queda forte
+        if variacao <= -10:
+            queda_maxima = variacao
+            ponto_queda = i
+
+        # Verificar recuperação após queda
+        if ponto_queda > 0 and i > ponto_queda:
+            recuperacao_atual = (precos[i] - precos[ponto_queda]) / max(abs(precos[ponto_queda]), 0.01) * 100
+
+            if 5 <= recuperacao_atual <= 40:  # Recuperação parcial (5-40% da queda)
+                recuperacao = recuperacao_atual
+                padrao_detectado = True
+
+                # Verificar se é armadilha (volume baixo na recuperação)
+                if volume_historico and len(volume_historico) > i:
+                    vol_queda = volume_historico[ponto_queda].get("volume", 1)
+                    vol_recuperacao = volume_historico[i].get("volume", 1)
+                    if vol_recuperacao < vol_queda * 0.5:
+                        armadilha = True
+
+    preco_atual = precos[-1]
+    preco_minimo = min(precos)
+    preco_maximo = max(precos)
+    distancia_do_fundo = (preco_atual - preco_minimo) / max(preco_minimo, 0.01) * 100
+
+    if padrao_detectado and armadilha:
+        classificacao = "DEAD_CAT_BOUNCE_CONFIRMADO"
+        recomendacao = "ARMADILHA DETECTADA — não entre no bounce! Odds vão continuar caindo"
+        score_risco = 90
+    elif padrao_detectado and not armadilha:
+        classificacao = "POSSIVEL_DEAD_CAT"
+        recomendacao = "Padrão suspeito — aguarde confirmação antes de entrar"
+        score_risco = 60
+    elif distancia_do_fundo >= 15:
+        classificacao = "RECUPERACAO_LEGITIMA"
+        recomendacao = "Recuperação parece legítima — pode ser boa entrada"
+        score_risco = 25
+    else:
+        classificacao = "SEM_PADRAO"
+        recomendacao = "Nenhum padrão de dead cat detectado"
+        score_risco = 10
+
+    return {
+        "classificacao": classificacao,
+        "score_risco": score_risco,
+        "recomendacao": recomendacao,
+        "padrao_detectado": padrao_detectado,
+        "armadilha_confirmada": armadilha,
+        "metricas": {
+            "queda_maxima_pct": round(queda_maxima, 2),
+            "recuperacao_pct": round(recuperacao, 2),
+            "preco_atual": preco_atual,
+            "preco_minimo": preco_minimo,
+            "preco_maximo": preco_maximo,
+            "distancia_do_fundo_pct": round(distancia_do_fundo, 2)
+        }
+    }
+
+
+# ─── ENDPOINTS ────────────────────────────────────────────────
+
+class SeismographRequest(BaseModel):
+    mercados_com_historico: list[dict]
+
+@app.post("/seismograph")
+async def endpoint_seismograph(body: SeismographRequest):
+    """
+    Motor #56 — Polymarket Seismograph.
+    Body: {"mercados_com_historico": [{"id": "m1", "titulo": "...", "movimentos": [{"timestamp": "...", "variacao_pct": 5.2}]}]}
+    """
+    try:
+        resultado = detectar_epicentro(body.mercados_com_historico)
+        return JSONResponse(content={"motor": "MOTOR_56_SEISMOGRAPH", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class CognitiveBiasRequest(BaseModel):
+    preco_atual: float
+    preco_inicial: float
+    variacao_24h_pct: float
+    volume_atual: float
+    volume_media: float
+    num_traders: int
+    num_noticias: int
+    sequencia_direcao: list[str] = []
+
+@app.post("/cognitive-bias")
+async def endpoint_cognitive_bias(body: CognitiveBiasRequest):
+    """
+    Motor #57 — Cognitive Bias Detector.
+    Body: {"preco_atual": 0.92, "preco_inicial": 0.90, "variacao_24h_pct": 35, "volume_atual": 50000, "volume_media": 10000, "num_traders": 80, "num_noticias": 1, "sequencia_direcao": ["YES","YES","YES","YES"]}
+    """
+    try:
+        resultado = detectar_cognitive_bias(
+            preco_atual=body.preco_atual,
+            preco_inicial=body.preco_inicial,
+            variacao_24h_pct=body.variacao_24h_pct,
+            volume_atual=body.volume_atual,
+            volume_media=body.volume_media,
+            num_traders=body.num_traders,
+            num_noticias=body.num_noticias,
+            sequencia_direcao=body.sequencia_direcao
+        )
+        return JSONResponse(content={"motor": "MOTOR_57_COGNITIVE_BIAS", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class NarrativeVelocityRequest(BaseModel):
+    narrativa: str
+    mencoes_por_hora: list[dict]
+    preco_odds_por_hora: list[dict] = []
+
+@app.post("/narrative-velocity")
+async def endpoint_narrative_velocity(body: NarrativeVelocityRequest):
+    """
+    Motor #58 — Narrative Velocity.
+    Body: {"narrativa": "Iran attack Israel", "mencoes_por_hora": [{"hora": "14:00", "mencoes": 45}, ...], "preco_odds_por_hora": [{"hora": "14:00", "preco": 0.55}]}
+    """
+    try:
+        resultado = calcular_narrative_velocity(
+            narrativa=body.narrativa,
+            mencoes_por_hora=body.mencoes_por_hora,
+            preco_odds_por_hora=body.preco_odds_por_hora
+        )
+        return JSONResponse(content={"motor": "MOTOR_58_NARRATIVE_VELOCITY", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class ContagionRequest(BaseModel):
+    mercado_resolvido: str
+    resultado: str
+    mercados_disponiveis: list[dict] = []
+
+@app.post("/cross-market-contagion")
+async def endpoint_contagion(body: ContagionRequest):
+    """
+    Motor #59 — Cross-Market Contagion.
+    Body: {"mercado_resolvido": "Fed rate hike March 2025", "resultado": "YES", "mercados_disponiveis": [{"id": "...", "titulo": "...", "preco_yes": 0.55}]}
+    """
+    try:
+        resultado = analisar_contagion(
+            mercado_resolvido=body.mercado_resolvido,
+            resultado=body.resultado,
+            mercados_disponiveis=body.mercados_disponiveis
+        )
+        return JSONResponse(content={"motor": "MOTOR_59_CONTAGION", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class DeadCatRequest(BaseModel):
+    historico_precos: list[dict]
+    volume_historico: list[dict] = []
+
+@app.post("/dead-cat-bounce")
+async def endpoint_dead_cat(body: DeadCatRequest):
+    """
+    Motor #60 — Dead Cat Bounce em Odds.
+    Body: {"historico_precos": [{"timestamp": "...", "preco": 0.70}, ...], "volume_historico": [{"timestamp": "...", "volume": 5000}]}
+    """
+    try:
+        resultado = detectar_dead_cat_bounce(
+            historico_precos=body.historico_precos,
+            volume_historico=body.volume_historico
+        )
+        return JSONResponse(content={"motor": "MOTOR_60_DEAD_CAT", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
     
+
