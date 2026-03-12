@@ -7611,3 +7611,360 @@ def politicians_list():
         "regioes": list({p["regiao"] for p in POLITICIANS}),
         "politicos": POLITICIANS,
     }
+
+# ══════════════════════════════════════════════════════════════
+# MOTOR #30 — ANALISADOR DE LINGUAGEM DE PRESS RELEASES
+# Mede escalada vs desescalada em comunicados oficiais
+# "Strongly condemns" vs "urges restraint" → sinal de mercado
+# ══════════════════════════════════════════════════════════════
+
+PRESS_RELEASE_SOURCES = [
+    # Governos / Ministérios
+    {"nome": "US State Dept",     "regiao": "EUA",     "url": "https://www.state.gov/press-releases/feed/"},
+    {"nome": "White House",       "regiao": "EUA",     "url": "https://www.whitehouse.gov/feed/"},
+    {"nome": "UN News",           "regiao": "GLOBAL",  "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml"},
+    {"nome": "NATO",              "regiao": "NATO",    "url": "https://www.nato.int/cps/en/natohq/news.htm?selectedLocale=en&type=topic_news&rss=1"},
+    {"nome": "Israel MFA",        "regiao": "ISRAEL",  "url": "https://www.gov.il/en/api/DynamicCollector?ListId=eb91cf55-27b9-45e1-a503-77a9ae8c4e38&Take=20"},
+    {"nome": "Iran PressTV",      "regiao": "IRAN",    "url": "https://www.presstv.ir/rssfeed/3.xml"},
+    {"nome": "Russia MFA",        "regiao": "RUSSIA",  "url": "https://mid.ru/en/press_service/spokesman/briefings/rss/"},
+    {"nome": "Reuters World",     "regiao": "GLOBAL",  "url": "https://feeds.reuters.com/reuters/worldNews"},
+    {"nome": "BBC World",         "regiao": "GLOBAL",  "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"nome": "Al Jazeera",        "regiao": "GLOBAL",  "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+]
+
+# Frases de escalada com peso
+ESCALADA_PHRASES = {
+    # Nível CRITICO (peso 40)
+    "military action":          40, "airstrikes":               40,
+    "ground invasion":          40, "declaration of war":       40,
+    "nuclear threat":           40, "ballistic missile":        40,
+    # Nível ALTO (peso 25)
+    "strongly condemns":        25, "unacceptable":             25,
+    "red line":                 25, "will not tolerate":        25,
+    "retaliation":              25, "retaliatory strike":       25,
+    "military operation":       25, "armed forces":             25,
+    "sanctions":                20, "embargo":                  20,
+    # Nível MEDIO (peso 15)
+    "condemns":                 15, "serious concern":          15,
+    "provocative":              15, "aggressive":               15,
+    "threatens":                15, "ultimatum":                15,
+    "expels ambassador":        15, "recalls ambassador":       15,
+    # Nível BAIXO (peso 8)
+    "concerned":                 8, "monitoring":                8,
+    "urges caution":             8, "calls for restraint":       8,
+}
+
+# Frases de desescalada com peso (negativo)
+DESESCALADA_PHRASES = {
+    # Nível CRITICO desescalada (peso -40)
+    "ceasefire agreement":     -40, "peace deal":              -40,
+    "withdrawal of troops":    -40, "end of hostilities":      -40,
+    # Nível ALTO desescalada (peso -25)
+    "ceasefire":               -25, "diplomatic solution":     -25,
+    "peace negotiations":      -25, "resuming talks":          -25,
+    "prisoner exchange":       -20, "humanitarian corridor":   -20,
+    # Nível MEDIO desescalada (peso -15)
+    "urges restraint":         -15, "calls for dialogue":      -15,
+    "de-escalation":           -15, "diplomatic channels":     -15,
+    "constructive talks":      -15, "meeting agreed":          -15,
+    # Nível BAIXO desescalada (peso -8)
+    "welcomes":                 -8, "positive steps":           -8,
+    "cooperation":              -8, "diplomatic":               -8,
+}
+
+_PRESS_SEEN: set = set()
+
+
+def _press_fetch(source: dict) -> list:
+    """Busca RSS de press releases."""
+    items = []
+    try:
+        resp = requests.get(source["url"], headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return []
+        root = ET.fromstring(resp.content)
+        for item in root.findall(".//item")[:8]:
+            title = (item.findtext("title") or "").strip()
+            link  = (item.findtext("link") or "").strip()
+            pub   = (item.findtext("pubDate") or "").strip()
+            desc  = (item.findtext("description") or "").strip()
+            # Limpa HTML do description
+            desc = re.sub(r"<[^>]+>", " ", desc).strip()
+            if not title:
+                continue
+            uid = f"press:{source['nome']}:{title[:50]}"
+            items.append({
+                "uid": uid,
+                "titulo": title,
+                "descricao": desc[:400],
+                "url": link,
+                "published": pub,
+                "fonte": source["nome"],
+                "regiao": source["regiao"],
+            })
+    except Exception as e:
+        print(f"[press] {source['nome']}: {e}")
+    return items
+
+
+def _press_score(texto: str) -> dict:
+    """Calcula score de escalada/desescalada por análise de frases."""
+    text_lower = texto.lower()
+    score = 0
+    frases_escalada = []
+    frases_desescalada = []
+
+    for frase, peso in ESCALADA_PHRASES.items():
+        if frase in text_lower:
+            score += peso
+            frases_escalada.append(frase)
+
+    for frase, peso in DESESCALADA_PHRASES.items():
+        if frase in text_lower:
+            score += peso  # já é negativo
+            frases_desescalada.append(frase)
+
+    score = max(-100, min(100, score))
+
+    if score >= 40:
+        nivel = "CRITICO"
+        direcao = "ESCALADA"
+    elif score >= 20:
+        nivel = "ALTO"
+        direcao = "ESCALADA"
+    elif score >= 8:
+        nivel = "MEDIO"
+        direcao = "ESCALADA"
+    elif score <= -30:
+        nivel = "ALTO"
+        direcao = "DESESCALADA"
+    elif score <= -15:
+        nivel = "MEDIO"
+        direcao = "DESESCALADA"
+    elif score <= -8:
+        nivel = "BAIXO"
+        direcao = "DESESCALADA"
+    else:
+        nivel = "BAIXO"
+        direcao = "NEUTRO"
+
+    return {
+        "score": score,
+        "nivel": nivel,
+        "direcao": direcao,
+        "frases_escalada": frases_escalada[:5],
+        "frases_desescalada": frases_desescalada[:5],
+    }
+
+
+def _press_ia_analysis(titulo: str, descricao: str, fonte: str, regiao: str, score_dict: dict) -> dict:
+    """Claude Haiku analisa linguagem diplomática e impacto no mercado."""
+    if not ANTHROPIC_KEY or abs(score_dict["score"]) < 10:
+        return {
+            "resumo": titulo[:100],
+            "direcao": score_dict["direcao"],
+            "impacto_mercado": score_dict["nivel"],
+            "acao": "MONITORAR",
+            "confianca": 0.4,
+            "mercados_keywords": [],
+            "linguagem": "NEUTRA",
+        }
+
+    prompt = f"""Você é especialista em linguagem diplomática e prediction markets.
+
+FONTE: {fonte} ({regiao})
+TÍTULO: {titulo}
+CONTEÚDO: {descricao[:350]}
+SCORE ESCALADA: {score_dict['score']} (positivo=escalada, negativo=desescalada)
+FRASES DETECTADAS: escalada={score_dict['frases_escalada']}, desescalada={score_dict['frases_desescalada']}
+
+Analise a linguagem diplomática e o impacto nos prediction markets.
+Responda SOMENTE com JSON válido:
+{{"resumo":"<max 80 chars PT-BR>","direcao":"ESCALADA|DESESCALADA|NEUTRO","intensidade":"FORTE|MODERADA|FRACA","impacto_mercado":"CRITICO|ALTO|MEDIO|BAIXO","acao":"COMPRAR_YES|COMPRAR_NO|MONITORAR|AGUARDAR","confianca":<0.0-1.0>,"mercados_keywords":["<kw1>","<kw2>"],"linguagem":"AMEACA|CONDENACAO|NEGOCIACAO|ACORDO|NEUTRO|PROVOCACAO"}}"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 250,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=12,
+        )
+        if resp.status_code == 200:
+            raw = resp.json()["content"][0]["text"].replace("```json", "").replace("```", "").strip()
+            return json.loads(raw)
+    except Exception as e:
+        print(f"[press_ia] {e}")
+
+    return {
+        "resumo": titulo[:100],
+        "direcao": score_dict["direcao"],
+        "impacto_mercado": score_dict["nivel"],
+        "acao": "MONITORAR",
+        "confianca": 0.4,
+        "mercados_keywords": [],
+        "linguagem": "NEUTRO",
+    }
+
+
+def _press_telegram(item: dict, score_dict: dict, ia: dict, markets: list) -> None:
+    direcao = ia.get("direcao", score_dict["direcao"])
+    nivel = ia.get("impacto_mercado", score_dict["nivel"])
+
+    direcao_emoji = {
+        "ESCALADA":    "📈🔴",
+        "DESESCALADA": "📉🟢",
+        "NEUTRO":      "➡️⚪",
+    }.get(direcao, "➡️")
+
+    nivel_emoji = {"CRITICO": "🚨🚨", "ALTO": "🚨", "MEDIO": "⚠️", "BAIXO": "ℹ️"}.get(nivel, "⚠️")
+    ling_emoji = {
+        "AMEACA":     "⚔️", "CONDENACAO": "🔥", "NEGOCIACAO": "🤝",
+        "ACORDO":     "✍️", "PROVOCACAO":  "💢", "NEUTRO":     "📄",
+    }.get(ia.get("linguagem", "NEUTRO"), "📄")
+
+    mercados_txt = ""
+    for m in markets[:3]:
+        price = f"{m['yes_price']}%" if m.get("yes_price") else "?"
+        mercados_txt += f"\n• <a href=\"{m['polymarket_url']}\">{m['question'][:65]}</a> @ {price}"
+
+    msg = (
+        f"{nivel_emoji} <b>PRESS RELEASE — {item['regiao']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{ling_emoji} <b>{item['fonte']}</b>\n"
+        f"📰 {item['titulo'][:100]}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{direcao_emoji} Direção: {direcao} | Score: {score_dict['score']:+d}\n"
+        f"🔑 Escalada: {', '.join(score_dict['frases_escalada'][:3]) or 'nenhuma'}\n"
+        f"🕊️ Desescalada: {', '.join(score_dict['frases_desescalada'][:3]) or 'nenhuma'}\n"
+        f"🎯 Ação: {ia.get('acao','MONITORAR')} | Confiança: {round(ia.get('confianca',0)*100)}%\n"
+    )
+    if markets:
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n🎯 <b>Mercados:</b>{mercados_txt}\n"
+    msg += (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <a href=\"{item['url']}\">Ver press release</a>\n"
+        f"⏰ {datetime.utcnow().strftime('%H:%M:%S')} UTC"
+    )
+    _telegram_send(msg)
+
+
+@app.get("/press/scan")
+def press_scan(
+    min_score: int = Query(8, description="Score mínimo absoluto para alertar"),
+    alertar: int = Query(1),
+    usar_ia: int = Query(1),
+    regioes: str = Query(None, description="EUA,ISRAEL,IRAN,RUSSIA,NATO,GLOBAL"),
+    db: Session = Depends(get_db),
+):
+    """
+    Motor #30 — Analisador de Linguagem de Press Releases
+    Mede escalada vs desescalada em comunicados diplomáticos.
+    'Strongly condemns' vs 'urges restraint' → sinal de mercado.
+    """
+    now = datetime.utcnow()
+
+    fontes_filtradas = PRESS_RELEASE_SOURCES
+    if regioes:
+        regioes_list = [r.strip().upper() for r in regioes.split(",")]
+        fontes_filtradas = [s for s in PRESS_RELEASE_SOURCES if s["regiao"] in regioes_list]
+
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    alertas = []
+    stats = {
+        "fontes_escaneadas": 0,
+        "items_novos": 0,
+        "alertas_gerados": 0,
+        "alertas_enviados": 0,
+        "escalada_count": 0,
+        "desescalada_count": 0,
+    }
+
+    for source in fontes_filtradas:
+        stats["fontes_escaneadas"] += 1
+        items = _press_fetch(source)
+        time.sleep(0.3)
+
+        for item in items:
+            uid = item["uid"]
+            if uid in _PRESS_SEEN:
+                continue
+
+            texto_completo = item["titulo"] + " " + item["descricao"]
+            score_dict = _press_score(texto_completo)
+
+            if abs(score_dict["score"]) < min_score:
+                _PRESS_SEEN.add(uid)
+                continue
+
+            stats["items_novos"] += 1
+            if score_dict["direcao"] == "ESCALADA":
+                stats["escalada_count"] += 1
+            elif score_dict["direcao"] == "DESESCALADA":
+                stats["desescalada_count"] += 1
+
+            ia = _press_ia_analysis(
+                item["titulo"], item["descricao"],
+                source["nome"], source["regiao"], score_dict
+            ) if usar_ia else {
+                "resumo": item["titulo"][:100],
+                "direcao": score_dict["direcao"],
+                "impacto_mercado": score_dict["nivel"],
+                "acao": "MONITORAR",
+                "confianca": 0.4,
+                "mercados_keywords": [],
+                "linguagem": "NEUTRO",
+            }
+
+            keywords_match = ia.get("mercados_keywords", [])
+            markets_match = _politician_match_markets(keywords_match, source["regiao"], markets)
+
+            alerta = {
+                "fonte": source["nome"],
+                "regiao": source["regiao"],
+                "titulo": item["titulo"],
+                "descricao": item["descricao"][:200],
+                "url": item["url"],
+                "published": item["published"],
+                "score": score_dict["score"],
+                "nivel": score_dict["nivel"],
+                "direcao": score_dict["direcao"],
+                "frases_escalada": score_dict["frases_escalada"],
+                "frases_desescalada": score_dict["frases_desescalada"],
+                "resumo_ia": ia.get("resumo", ""),
+                "linguagem": ia.get("linguagem", "NEUTRO"),
+                "intensidade": ia.get("intensidade", "FRACA"),
+                "acao": ia.get("acao", "MONITORAR"),
+                "confianca": ia.get("confianca", 0.4),
+                "mercados_afetados": markets_match,
+                "total_mercados": len(markets_match),
+                "detectado_em": now.isoformat(),
+            }
+            alertas.append(alerta)
+            stats["alertas_gerados"] += 1
+
+            if alertar and abs(score_dict["score"]) >= 20:
+                _press_telegram(item, score_dict, ia, markets_match)
+                stats["alertas_enviados"] += 1
+
+            _PRESS_SEEN.add(uid)
+            if len(_PRESS_SEEN) > 10000:
+                for old in list(_PRESS_SEEN)[:2000]:
+                    _PRESS_SEEN.discard(old)
+
+    alertas.sort(key=lambda x: abs(x["score"]), reverse=True)
+
+    return {
+        "status": "ok",
+        "fontes_monitoradas": len(fontes_filtradas),
+        "stats": stats,
+        "min_score": min_score,
+        "alertas": alertas,
+        "gerado_em": now.isoformat(),
+    }
