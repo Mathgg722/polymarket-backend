@@ -10568,25 +10568,15 @@ Se nenhum mercado for relevante: {{"mercado_encontrado": false, "match_score": 0
         return {"mercado_encontrado": False, "match_score": 0}
 
 async def buscar_mercados_polymarket_api(query: str) -> list[dict]:
-    """Busca mercados abertos no Polymarket."""
+    """Busca mercados abertos no Polymarket — sem filtro, deixa o Claude decidir."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            # Busca geral de mercados ativos
             resp = await client.get(
                 "https://gamma-api.polymarket.com/markets",
                 params={"active": "true", "closed": "false", "limit": 50}
             )
             if resp.status_code == 200:
-                mercados = resp.json()
-                # Filtra relevantes pelo título (simples, Claude decide depois)
-                query_lower = query.lower()
-                palavras = query_lower.split()[:3]
-                relevantes = [
-                    m for m in mercados
-                    if any(p in m.get("question", "").lower() for p in palavras)
-                ]
-                # Se não achou nada relevante, manda os 20 primeiros mesmo
-                return relevantes[:20] if relevantes else mercados[:20]
+                return resp.json()
     except Exception:
         pass
     return []
