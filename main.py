@@ -10754,3 +10754,434 @@ async def endpoint_mapear_manual(body: MapearManualRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
+    # ══════════════════════════════════════════════════════════════
+# MOTORES #52, #53, #54, #55 — GEOTRADE INTELLIGENCE
+# #52 GTI — Global Tension Index
+# #53 AI Signals por classe de ativo
+# #54 Trade Setup automático
+# #55 Geo Map — tensão por país + what-if scenarios
+# ══════════════════════════════════════════════════════════════
+
+# ─── DADOS BASE ───────────────────────────────────────────────
+
+ATIVOS_CONFIG = {
+    "XAUUSD": {"nome": "Gold", "classe": "Commodities", "atr_base": 0.018, "correlacao_tensao": "positiva"},
+    "WTI":    {"nome": "WTI Crude Oil", "classe": "Commodities", "atr_base": 0.022, "correlacao_tensao": "positiva"},
+    "BRENT":  {"nome": "Brent Oil", "classe": "Commodities", "atr_base": 0.021, "correlacao_tensao": "positiva"},
+    "COPPER": {"nome": "Copper", "classe": "Commodities", "atr_base": 0.015, "correlacao_tensao": "negativa"},
+    "SOYBEANS": {"nome": "Soybeans", "classe": "Commodities", "atr_base": 0.012, "correlacao_tensao": "negativa"},
+    "BTCUSD": {"nome": "Bitcoin", "classe": "Crypto", "atr_base": 0.045, "correlacao_tensao": "negativa"},
+    "ETHUSD": {"nome": "Ethereum", "classe": "Crypto", "atr_base": 0.05, "correlacao_tensao": "negativa"},
+    "EURUSD": {"nome": "EUR/USD", "classe": "Forex", "atr_base": 0.008, "correlacao_tensao": "negativa"},
+    "USDCNY": {"nome": "USD/CNY", "classe": "Forex", "atr_base": 0.006, "correlacao_tensao": "positiva"},
+    "USDJPY": {"nome": "USD/JPY", "classe": "Forex", "atr_base": 0.007, "correlacao_tensao": "positiva"},
+    "USDCHF": {"nome": "USD/CHF", "classe": "Forex", "atr_base": 0.007, "correlacao_tensao": "negativa"},
+    "GBPUSD": {"nome": "GBP/USD", "classe": "Forex", "atr_base": 0.009, "correlacao_tensao": "negativa"},
+    "SPX":    {"nome": "S&P 500", "classe": "Equity Indices", "atr_base": 0.012, "correlacao_tensao": "negativa"},
+    "NDX":    {"nome": "Nasdaq 100", "classe": "Equity Indices", "atr_base": 0.015, "correlacao_tensao": "negativa"},
+    "DJI":    {"nome": "Dow Jones", "classe": "Equity Indices", "atr_base": 0.011, "correlacao_tensao": "negativa"},
+    "DAX":    {"nome": "DAX", "classe": "Equity Indices", "atr_base": 0.013, "correlacao_tensao": "negativa"},
+    "HSI":    {"nome": "Hang Seng", "classe": "Equity Indices", "atr_base": 0.016, "correlacao_tensao": "negativa"},
+    "LMT":    {"nome": "Lockheed Martin", "classe": "Stocks", "atr_base": 0.018, "correlacao_tensao": "positiva"},
+    "NOC":    {"nome": "Northrop Grumman", "classe": "Stocks", "atr_base": 0.017, "correlacao_tensao": "positiva"},
+    "RTX":    {"nome": "Raytheon", "classe": "Stocks", "atr_base": 0.016, "correlacao_tensao": "positiva"},
+    "GD":     {"nome": "General Dynamics", "classe": "Stocks", "atr_base": 0.015, "correlacao_tensao": "positiva"},
+    "SHEL":   {"nome": "Shell", "classe": "Stocks", "atr_base": 0.014, "correlacao_tensao": "positiva"},
+    "GLD":    {"nome": "Gold ETF (GLD)", "classe": "ETFs", "atr_base": 0.017, "correlacao_tensao": "positiva"},
+    "ITA":    {"nome": "Defense ETF (ITA)", "classe": "ETFs", "atr_base": 0.016, "correlacao_tensao": "positiva"},
+    "XLE":    {"nome": "Energy Sector ETF", "classe": "ETFs", "atr_base": 0.014, "correlacao_tensao": "positiva"},
+    "TLT":    {"nome": "US 20Y Treasury", "classe": "Bonds", "atr_base": 0.010, "correlacao_tensao": "positiva"},
+}
+
+REGIOES_GTI = {
+    "middle_east": {"nome": "Middle East", "pais": ["Iran", "Israel", "Syria", "Iraq", "Yemen", "Lebanon"], "peso": 1.5},
+    "europe":      {"nome": "Europe", "pais": ["Russia", "Ukraine", "Belarus", "Poland"], "peso": 1.3},
+    "asia_pac":    {"nome": "Asia Pacific", "pais": ["China", "Taiwan", "North Korea", "Japan"], "peso": 1.2},
+    "n_america":   {"nome": "N. America", "pais": ["USA", "Mexico", "Canada"], "peso": 1.0},
+    "l_america":   {"nome": "L. America", "pais": ["Venezuela", "Colombia", "Brazil"], "peso": 0.8},
+    "africa":      {"nome": "Africa", "pais": ["Sudan", "Ethiopia", "DR Congo", "Somalia"], "peso": 0.7},
+}
+
+PAISES_TENSAO_BASE = {
+    "Russia": 85, "Ukraine": 90, "Iran": 80, "Israel": 78, "China": 65,
+    "Taiwan": 70, "North Korea": 75, "Syria": 72, "Yemen": 68, "Belarus": 60,
+    "Venezuela": 55, "Sudan": 65, "Ethiopia": 58, "USA": 35, "Germany": 25,
+    "France": 22, "UK": 28, "Japan": 30, "Brazil": 20, "India": 40,
+    "Pakistan": 55, "Afghanistan": 70, "Libya": 62, "Somalia": 65,
+    "Iraq": 60, "Lebanon": 65, "Myanmar": 58, "Niger": 55, "Mali": 52,
+}
+
+
+# ─── MOTOR #52 — GTI ──────────────────────────────────────────
+
+def calcular_gti(eventos_ativos: list[dict] = None) -> dict:
+    """
+    Calcula o Global Tension Index (0-100).
+    eventos_ativos: lista de eventos geopolíticos ativos
+    [{"regiao": "middle_east", "severidade": 80, "tipo": "military_escalation", "descricao": "..."}]
+    """
+    score_base = 45  # baseline histórico
+    contribuicoes = []
+
+    if eventos_ativos:
+        for ev in eventos_ativos:
+            regiao = ev.get("regiao", "")
+            severidade = ev.get("severidade", 50)
+            tipo = ev.get("tipo", "")
+            peso_regiao = REGIOES_GTI.get(regiao, {}).get("peso", 1.0)
+
+            pesos_tipo = {
+                "military_escalation": 1.5,
+                "nuclear_threat": 2.0,
+                "economic_war": 1.2,
+                "sanctions": 1.1,
+                "political_crisis": 1.0,
+                "terrorist_attack": 1.3,
+                "coup": 1.4,
+                "civil_war": 1.3,
+            }
+            peso_tipo = pesos_tipo.get(tipo, 1.0)
+            contribuicao = (severidade / 100) * peso_regiao * peso_tipo * 20
+            score_base += contribuicao
+            contribuicoes.append({
+                "evento": ev.get("descricao", tipo),
+                "regiao": regiao,
+                "contribuicao": round(contribuicao, 1)
+            })
+
+    gti = min(round(score_base), 100)
+
+    if gti >= 80:
+        nivel = "CRITICAL"
+        cor = "red"
+        descricao = "Tensão geopolítica crítica — mercados de risco sob pressão severa"
+    elif gti >= 65:
+        nivel = "ELEVATED"
+        cor = "orange"
+        descricao = "Tensão elevada — cautela com ativos de risco, ouro e defesa em alta"
+    elif gti >= 45:
+        nivel = "MODERATE"
+        cor = "yellow"
+        descricao = "Tensão moderada — mercados atentos mas sem pânico"
+    else:
+        nivel = "LOW"
+        cor = "green"
+        descricao = "Tensão baixa — ambiente favorável para ativos de risco"
+
+    return {
+        "gti": gti,
+        "nivel": nivel,
+        "cor": cor,
+        "descricao": descricao,
+        "variacao_24h": round(random.uniform(-3, 5), 1),  # simulado
+        "contribuicoes": contribuicoes,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+# ─── MOTOR #53 — AI SIGNALS ───────────────────────────────────
+
+def gerar_ai_signals(
+    gti: float,
+    eventos_ativos: list[dict] = None,
+    classe_filtro: str = None,
+    precos_atuais: dict = None
+) -> list[dict]:
+    """
+    Gera sinais BUY/SELL/HOLD para cada ativo baseado no GTI e eventos ativos.
+    precos_atuais: {"XAUUSD": 2341.0, "WTI": 80.1, ...}
+    """
+    sinais = []
+    evento_trigger = eventos_ativos[0] if eventos_ativos else None
+    trigger_descricao = evento_trigger.get("descricao", "Global tension elevated") if evento_trigger else "Global tension elevated"
+    trigger_severidade = evento_trigger.get("severidade", gti) if evento_trigger else gti
+
+    for ticker, config in ATIVOS_CONFIG.items():
+        if classe_filtro and config["classe"] != classe_filtro:
+            continue
+
+        correlacao = config["correlacao_tensao"]
+        atr = config["atr_base"]
+        preco_atual = (precos_atuais or {}).get(ticker, 0)
+
+        # Calcular confidence baseado no GTI e correlação
+        if correlacao == "positiva":
+            # Ativo sobe com tensão (ouro, petróleo, defesa)
+            if gti >= 65:
+                sinal = "BUY"
+                bull_pct = min(round((gti - 40) * 1.2), 80)
+                bear_pct = 0
+                confidence = min(round(50 + (gti - 50) * 0.8), 92)
+            elif gti >= 50:
+                sinal = "BUY"
+                bull_pct = round((gti - 40) * 0.8)
+                bear_pct = 0
+                confidence = round(50 + (gti - 50) * 0.5)
+            else:
+                sinal = "HOLD"
+                bull_pct = 0
+                bear_pct = 0
+                confidence = 50
+        else:
+            # Ativo cai com tensão (equity indices, crypto, forex risco)
+            if gti >= 65:
+                sinal = "SELL"
+                bull_pct = 0
+                bear_pct = min(round((gti - 40) * 1.0), 65)
+                confidence = min(round(45 + (gti - 50) * 0.7), 85)
+            elif gti >= 50:
+                sinal = "SELL"
+                bull_pct = 0
+                bear_pct = round((gti - 40) * 0.6)
+                confidence = round(42 + (gti - 50) * 0.4)
+            else:
+                sinal = "HOLD"
+                bull_pct = 0
+                bear_pct = 0
+                confidence = 50
+
+        # Volume baseado no GTI
+        if gti >= 75:
+            volume = "HIGH"
+            rr = "RR 2.0"
+        elif gti >= 55:
+            volume = "MEDIUM"
+            rr = "RR 1.8"
+        else:
+            volume = "LOW"
+            rr = "RR 1.5"
+
+        sinal_obj = {
+            "ticker": ticker,
+            "nome": config["nome"],
+            "classe": config["classe"],
+            "sinal": sinal,
+            "confidence_pct": confidence,
+            "bull_pct": bull_pct,
+            "bear_pct": bear_pct,
+            "volume": volume,
+            "rr": rr,
+            "horizonte": "short-term",
+            "trigger": trigger_descricao[:50],
+            "trigger_severidade": trigger_severidade,
+            "gti": gti,
+            "preco_atual": preco_atual
+        }
+        sinais.append(sinal_obj)
+
+    # Ordenar por confidence decrescente
+    sinais.sort(key=lambda x: x["confidence_pct"], reverse=True)
+    return sinais
+
+
+# ─── MOTOR #54 — TRADE SETUP ──────────────────────────────────
+
+def calcular_trade_setup(
+    ticker: str,
+    preco_atual: float,
+    sinal: str,
+    gti: float,
+    banca: float = 10000.0,
+    risco_pct: float = 0.02  # 2% da banca por trade
+) -> dict:
+    """Calcula entry, stop-loss, target, R:R, ATR e max position size."""
+    config = ATIVOS_CONFIG.get(ticker, {"atr_base": 0.015, "nome": ticker, "classe": "Unknown"})
+    atr_pct = config["atr_base"] * (1 + (gti - 50) / 100)  # ATR aumenta com tensão
+    atr_valor = preco_atual * atr_pct
+
+    if sinal == "BUY":
+        entry = preco_atual
+        stop_loss = round(entry - atr_valor * 1.5, 2)
+        target = round(entry + atr_valor * 3.0, 2)
+    elif sinal == "SELL":
+        entry = preco_atual
+        stop_loss = round(entry + atr_valor * 1.5, 2)
+        target = round(entry - atr_valor * 3.0, 2)
+    else:
+        return {"ticker": ticker, "sinal": "HOLD", "mensagem": "Sem trade setup para HOLD"}
+
+    risco_por_unidade = abs(entry - stop_loss)
+    rr = round(abs(target - entry) / max(risco_por_unidade, 0.01), 2)
+
+    # Max position size
+    risco_banca = banca * risco_pct
+    max_units = risco_banca / max(risco_por_unidade, 0.01)
+    max_pos_pct = round((max_units * preco_atual / banca) * 100, 1)
+
+    return {
+        "ticker": ticker,
+        "nome": config["nome"],
+        "sinal": sinal,
+        "trade_structure": {
+            "current_price": preco_atual,
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "target": target,
+            "risk_reward": rr,
+            "atr_daily_pct": round(atr_pct * 100, 2),
+            "atr_valor": round(atr_valor, 2),
+            "max_position_pct": max_pos_pct,
+            "risco_usd": round(risco_banca, 2),
+            "banca_utilizada": banca
+        },
+        "risk_vs_reward": {
+            "risk": round(risco_por_unidade, 4),
+            "reward": round(abs(target - entry), 4),
+            "ratio": rr
+        }
+    }
+
+
+# ─── MOTOR #55 — GEO MAP ──────────────────────────────────────
+
+def calcular_geo_map(
+    eventos_ativos: list[dict] = None,
+    what_if: dict = None
+) -> dict:
+    """
+    Calcula tensão por país/região e impacto de what-if scenarios.
+    what_if: {"oil_shock": 0.5, "rate_change": 0.0, "escalation": 0.5, "supply_chain": 0.3}
+    """
+    tensao_paises = dict(PAISES_TENSAO_BASE)
+
+    # Ajustar tensão por eventos ativos
+    if eventos_ativos:
+        for ev in eventos_ativos:
+            regiao = ev.get("regiao", "")
+            severidade = ev.get("severidade", 50)
+            paises_regiao = REGIOES_GTI.get(regiao, {}).get("pais", [])
+            for pais in paises_regiao:
+                if pais in tensao_paises:
+                    tensao_paises[pais] = min(100, tensao_paises[pais] + severidade * 0.2)
+
+    # Aplicar what-if scenarios
+    impacto_ativos = {}
+    if what_if:
+        oil_shock = what_if.get("oil_shock", 0)
+        escalation = what_if.get("escalation", 0)
+        rate_change = what_if.get("rate_change", 0)
+        supply_chain = what_if.get("supply_chain", 0)
+
+        impacto_ativos = {
+            "XAUUSD": round(oil_shock * 15 + escalation * 20, 1),
+            "WTI":    round(oil_shock * 30 + escalation * 10, 1),
+            "BRENT":  round(oil_shock * 28 + escalation * 10, 1),
+            "SPX":    round(-oil_shock * 10 - escalation * 15 - rate_change * 8, 1),
+            "BTCUSD": round(-escalation * 12 - supply_chain * 8, 1),
+            "EURUSD": round(-oil_shock * 5 - escalation * 8, 1),
+            "LMT":    round(escalation * 18, 1),
+            "RTX":    round(escalation * 17, 1),
+            "TLT":    round(escalation * 10 - rate_change * 15, 1),
+        }
+
+    # Agrupar por região
+    tensao_regioes = {}
+    for regiao_key, regiao_info in REGIOES_GTI.items():
+        paises = regiao_info["pais"]
+        scores = [tensao_paises.get(p, 30) for p in paises]
+        tensao_regioes[regiao_key] = {
+            "nome": regiao_info["nome"],
+            "score_medio": round(sum(scores) / len(scores), 1),
+            "score_max": max(scores),
+            "paises": {p: round(tensao_paises.get(p, 30)) for p in paises}
+        }
+
+    return {
+        "tensao_por_pais": {k: round(v) for k, v in sorted(tensao_paises.items(), key=lambda x: x[1], reverse=True)},
+        "tensao_por_regiao": tensao_regioes,
+        "what_if_impacto_ativos": impacto_ativos,
+        "top_5_paises_tensao": sorted(tensao_paises.items(), key=lambda x: x[1], reverse=True)[:5],
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+# ─── ENDPOINTS ────────────────────────────────────────────────
+
+class GTIRequest(BaseModel):
+    eventos_ativos: list[dict] = []
+
+@app.post("/gti")
+async def endpoint_gti(body: GTIRequest):
+    """
+    Motor #52 — Global Tension Index.
+    Body: {"eventos_ativos": [{"regiao": "middle_east", "severidade": 80, "tipo": "military_escalation", "descricao": "Iran-Israel Escalation"}]}
+    """
+    try:
+        resultado = calcular_gti(body.eventos_ativos)
+        return JSONResponse(content={"motor": "MOTOR_52_GTI", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class AISignalsRequest(BaseModel):
+    gti: float
+    eventos_ativos: list[dict] = []
+    classe_filtro: str = None
+    precos_atuais: dict = {}
+
+@app.post("/ai-signals")
+async def endpoint_ai_signals(body: AISignalsRequest):
+    """
+    Motor #53 — AI Signals por classe de ativo.
+    Body: {"gti": 71.4, "eventos_ativos": [...], "classe_filtro": "Commodities", "precos_atuais": {"XAUUSD": 2341.0}}
+    """
+    try:
+        sinais = gerar_ai_signals(
+            gti=body.gti,
+            eventos_ativos=body.eventos_ativos,
+            classe_filtro=body.classe_filtro,
+            precos_atuais=body.precos_atuais
+        )
+        return JSONResponse(content={"motor": "MOTOR_53_AI_SIGNALS", "total": len(sinais), "sinais": sinais})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class TradeSetupRequest(BaseModel):
+    ticker: str
+    preco_atual: float
+    sinal: str
+    gti: float
+    banca: float = 10000.0
+    risco_pct: float = 0.02
+
+@app.post("/trade-setup")
+async def endpoint_trade_setup(body: TradeSetupRequest):
+    """
+    Motor #54 — Trade Setup automático.
+    Body: {"ticker": "XAUUSD", "preco_atual": 2341.0, "sinal": "BUY", "gti": 71.4, "banca": 10000}
+    """
+    try:
+        resultado = calcular_trade_setup(
+            ticker=body.ticker,
+            preco_atual=body.preco_atual,
+            sinal=body.sinal,
+            gti=body.gti,
+            banca=body.banca,
+            risco_pct=body.risco_pct
+        )
+        return JSONResponse(content={"motor": "MOTOR_54_TRADE_SETUP", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class GeoMapRequest(BaseModel):
+    eventos_ativos: list[dict] = []
+    what_if: dict = {}
+
+@app.post("/geo-map")
+async def endpoint_geo_map(body: GeoMapRequest):
+    """
+    Motor #55 — Geo Map + What-If Scenarios.
+    Body: {"eventos_ativos": [...], "what_if": {"oil_shock": 0.5, "escalation": 0.5, "rate_change": 0.0, "supply_chain": 0.3}}
+    """
+    try:
+        resultado = calcular_geo_map(
+            eventos_ativos=body.eventos_ativos,
+            what_if=body.what_if
+        )
+        return JSONResponse(content={"motor": "MOTOR_55_GEO_MAP", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+    
+    
