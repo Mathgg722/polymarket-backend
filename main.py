@@ -8012,83 +8012,77 @@ def _smart_get_market_history(market_slug: str) -> list:
 
 
 def _smart_identify_winners(db: Session) -> dict:
-    """
-    Identifica wallets vencedoras analisando snapshots históricos.
-    Uma wallet é 'smart money' se:
-    - Comprou quando preço estava baixo (<35%) E mercado resolveu YES
-    - Ou vendeu quando preço estava alto (>65%) E mercado resolveu NO
-    """
     smart_wallets = {}
 
-    # Busca mercados já resolvidos no banco
-    resolved_markets = db.query(Market).filter(
-        Market.active == False,
-        Market.question != None,
-    ).limit(100).all()
+    try:
+        resolved_markets = db.query(Market).filter(
+            Market.end_date != None,
+            Market.end_date < datetime.utcnow(),
+            Market.question != None,
+        ).limit(50).all()
+    except Exception as e:
+        print(f"[smart_money] query error: {e}")
+        return {}
 
     for market in resolved_markets:
-        trades = _smart_get_market_trades(market.market_slug)
-        if not trades:
-            continue
-
-        # Detecta resultado do mercado (simplificado: último preço)
-        history = _smart_get_market_history(market.market_slug)
-        if not history:
-            continue
-
-        last_price = history[-1].get("p", 0.5) if history else 0.5
-        resolved_yes = last_price > 0.8  # Resolveu YES se último preço > 80%
-        resolved_no  = last_price < 0.2  # Resolveu NO se último preço < 20%
-
-        if not resolved_yes and not resolved_no:
-            continue  # Mercado ainda incerto
-
-        for trade in trades:
-            wallet = trade.get("maker", "") or trade.get("transactionHash", "")[:20]
-            if not wallet:
+        try:
+            trades = _smart_get_market_trades(market.market_slug)
+            if not trades:
                 continue
 
-            price_at_trade = float(trade.get("price", 0.5))
-            side = trade.get("side", "").upper()  # BUY ou SELL
-            size = float(trade.get("size", 0))
+            history = _smart_get_market_history(market.market_slug)
+            if not history:
+                continue
 
-            # Detecta acerto
-            acertou = False
-            lucro_estimado = 0
+            last_price = history[-1].get("p", 0.5) if history else 0.5
+            resolved_yes = last_price > 0.8
+            resolved_no  = last_price < 0.2
 
-            if resolved_yes and side == "BUY" and price_at_trade < 0.35:
-                acertou = True
-                lucro_estimado = size * (last_price - price_at_trade)
-            elif resolved_no and side == "SELL" and price_at_trade > 0.65:
-                acertou = True
-                lucro_estimado = size * (price_at_trade - last_price)
+            if not resolved_yes and not resolved_no:
+                continue
 
-            if acertou:
-                if wallet not in smart_wallets:
-                    smart_wallets[wallet] = {
-                        "wallet": wallet,
-                        "acertos": 0,
-                        "lucro_total_estimado": 0,
-                        "mercados_acertados": [],
-                    }
-                smart_wallets[wallet]["acertos"] += 1
-                smart_wallets[wallet]["lucro_total_estimado"] += lucro_estimado
-                smart_wallets[wallet]["mercados_acertados"].append({
-                    "market": market.question[:60],
-                    "slug": market.market_slug,
-                    "price_entry": round(price_at_trade, 3),
-                    "resolved": "YES" if resolved_yes else "NO",
-                    "lucro": round(lucro_estimado, 2),
-                })
+            for trade in trades:
+                wallet = trade.get("maker", "") or trade.get("transactionHash", "")[:20]
+                if not wallet:
+                    continue
 
-    # Filtra só wallets com 2+ acertos
-    smart_wallets = {
-        k: v for k, v in smart_wallets.items()
-        if v["acertos"] >= 2
-    }
+                price_at_trade = float(trade.get("price", 0.5))
+                side = trade.get("side", "").upper()
+                size = float(trade.get("size", 0))
 
+                acertou = False
+                lucro_estimado = 0
+
+                if resolved_yes and side == "BUY" and price_at_trade < 0.35:
+                    acertou = True
+                    lucro_estimado = size * (last_price - price_at_trade)
+                elif resolved_no and side == "SELL" and price_at_trade > 0.65:
+                    acertou = True
+                    lucro_estimado = size * (price_at_trade - last_price)
+
+                if acertou:
+                    if wallet not in smart_wallets:
+                        smart_wallets[wallet] = {
+                            "wallet": wallet,
+                            "acertos": 0,
+                            "lucro_total_estimado": 0,
+                            "mercados_acertados": [],
+                        }
+                    smart_wallets[wallet]["acertos"] += 1
+                    smart_wallets[wallet]["lucro_total_estimado"] += lucro_estimado
+                    smart_wallets[wallet]["mercados_acertados"].append({
+                        "market": market.question[:60],
+                        "slug": market.market_slug,
+                        "price_entry": round(price_at_trade, 3),
+                        "resolved": "YES" if resolved_yes else "NO",
+                        "lucro": round(lucro_estimado, 2),
+                    })
+        except Exception as e:
+            print(f"[smart_money] market {market.market_slug}: {e}")
+            continue
+
+    smart_wallets = {k: v for k, v in smart_wallets.items() if v["acertos"] >= 2}
     return smart_wallets
-
 
 def _smart_get_recent_moves(smart_wallets: dict, markets: list) -> list:
     """
