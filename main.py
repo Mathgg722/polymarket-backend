@@ -9756,3 +9756,556 @@ async def endpoint_liquidez_horario(body: LiquidezHorarioRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
+    # ══════════════════════════════════════════════════════════════
+# MOTORES #46, #47, #48, #49, #50 — IA DE PRÓXIMA GERAÇÃO
+# #46 Memória de Apostas Vencedoras
+# #47 Gerador de Tese Automático
+# #48 Detector de Resolução Errada
+# #49 Score de Convicção do Mercado
+# #50 Simulador de Banca Pessoal
+# ══════════════════════════════════════════════════════════════
+
+import sqlite3
+import math
+import random
+from pathlib import Path
+
+# ─── BANCO DE DADOS ───────────────────────────────────────────
+
+DB_PATH = Path("apostas_memoria.db")
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS apostas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            evento TEXT NOT NULL,
+            tipo_mercado TEXT,
+            direcao TEXT,
+            preco_entrada REAL,
+            resultado TEXT,  -- WIN, LOSS, PENDING
+            lucro_pct REAL,
+            motores_usados TEXT,
+            notas TEXT,
+            data_entrada TEXT,
+            data_resolucao TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Memória em cache (em memória)
+_apostas_cache: list[dict] = []
+
+def salvar_aposta_db(aposta: dict) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO apostas (evento, tipo_mercado, direcao, preco_entrada,
+            resultado, lucro_pct, motores_usados, notas, data_entrada, data_resolucao)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        aposta.get("evento"), aposta.get("tipo_mercado"), aposta.get("direcao"),
+        aposta.get("preco_entrada"), aposta.get("resultado", "PENDING"),
+        aposta.get("lucro_pct"), str(aposta.get("motores_usados", [])),
+        aposta.get("notas"), aposta.get("data_entrada"), aposta.get("data_resolucao")
+    ))
+    conn.commit()
+    id_inserido = c.lastrowid
+    conn.close()
+    return id_inserido
+
+def buscar_apostas_db(resultado: str = None, tipo_mercado: str = None) -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    query = "SELECT * FROM apostas WHERE 1=1"
+    params = []
+    if resultado:
+        query += " AND resultado = ?"
+        params.append(resultado)
+    if tipo_mercado:
+        query += " AND tipo_mercado = ?"
+        params.append(tipo_mercado)
+    c.execute(query, params)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+# ─── MOTOR #46 — MEMÓRIA DE APOSTAS ──────────────────────────
+
+def analisar_memoria_apostas(tipo_mercado: str = None) -> dict:
+    apostas = buscar_apostas_db(tipo_mercado=tipo_mercado)
+    cache = [a for a in _apostas_cache if not tipo_mercado or a.get("tipo_mercado") == tipo_mercado]
+    todas = apostas + cache
+
+    if not todas:
+        return {
+            "total_apostas": 0,
+            "mensagem": "Nenhuma aposta registrada ainda — comece a registrar para aprender padrões"
+        }
+
+    wins = [a for a in todas if a.get("resultado") == "WIN"]
+    losses = [a for a in todas if a.get("resultado") == "LOSS"]
+    pending = [a for a in todas if a.get("resultado") == "PENDING"]
+
+    winrate = len(wins) / max(len(wins) + len(losses), 1) * 100
+    lucro_total = sum(a.get("lucro_pct", 0) or 0 for a in todas)
+    lucro_medio = lucro_total / max(len(todas), 1)
+
+    # Padrões de vitória
+    padroes_win = {}
+    for a in wins:
+        tm = a.get("tipo_mercado", "desconhecido")
+        padroes_win[tm] = padroes_win.get(tm, 0) + 1
+
+    melhor_tipo = max(padroes_win, key=padroes_win.get) if padroes_win else None
+
+    # Motores mais eficazes
+    motores_win = {}
+    for a in wins:
+        motores = a.get("motores_usados", "")
+        if isinstance(motores, str):
+            motores = motores.strip("[]").replace("'", "").split(", ")
+        for m in motores:
+            if m:
+                motores_win[m] = motores_win.get(m, 0) + 1
+
+    top_motores = sorted(motores_win.items(), key=lambda x: x[1], reverse=True)[:3]
+
+    return {
+        "total_apostas": len(todas),
+        "wins": len(wins),
+        "losses": len(losses),
+        "pending": len(pending),
+        "winrate_pct": round(winrate, 1),
+        "lucro_medio_pct": round(lucro_medio, 2),
+        "lucro_total_pct": round(lucro_total, 2),
+        "melhor_tipo_mercado": melhor_tipo,
+        "top_motores_vencedores": [{"motor": m, "wins": c} for m, c in top_motores],
+        "recomendacao": f"Foque em '{melhor_tipo}' — seu melhor tipo de mercado com {padroes_win.get(melhor_tipo, 0)} wins" if melhor_tipo else "Continue registrando apostas para identificar padrões"
+    }
+
+
+# ─── MOTOR #47 — GERADOR DE TESE AUTOMÁTICO ──────────────────
+
+def gerar_tese(
+    evento: str,
+    preco_atual: float,
+    contexto: str = "",
+    historico_similares: list[dict] = None
+) -> dict:
+    prob_implicita = preco_atual * 100
+
+    # Argumentos a favor (YES)
+    args_favor = [
+        f"O mercado precifica {prob_implicita:.0f}% de chance — pode estar subestimando momentum recente",
+        "Eventos similares historicamente resolveram YES com frequência acima de 50%",
+        f"Preço de {preco_atual:.2f} oferece {'bom' if preco_atual < 0.4 else 'moderado'} risco/retorno para YES"
+    ]
+    if contexto:
+        args_favor.append(f"Contexto favorável: {contexto[:100]}")
+
+    # Argumentos contra (NO)
+    args_contra = [
+        f"Status quo tende a prevalecer — {100 - prob_implicita:.0f}% de chance de NO já precificada",
+        "Mercados de predição tendem a superestimar eventos dramáticos",
+        f"Preço de {1 - preco_atual:.2f} para NO {'barato' if preco_atual > 0.6 else 'caro'} relativamente"
+    ]
+
+    # Análise de histórico similar
+    analise_historica = None
+    if historico_similares:
+        wins_sim = [h for h in historico_similares if h.get("resultado") == "YES"]
+        taxa_yes = len(wins_sim) / max(len(historico_similares), 1) * 100
+        analise_historica = {
+            "total_similares": len(historico_similares),
+            "taxa_yes_historica": round(taxa_yes, 1),
+            "diferenca_vs_mercado": round(taxa_yes - prob_implicita, 1),
+            "edge_historico": "FAVOR YES" if taxa_yes > prob_implicita + 5 else "FAVOR NO" if taxa_yes < prob_implicita - 5 else "NEUTRO"
+        }
+
+    # Recomendação final
+    if analise_historica:
+        if analise_historica["diferenca_vs_mercado"] > 10:
+            recomendacao = "COMPRAR YES — histórico indica mercado subestimando probabilidade"
+            direcao = "YES"
+        elif analise_historica["diferenca_vs_mercado"] < -10:
+            recomendacao = "COMPRAR NO — histórico indica mercado superestimando probabilidade"
+            direcao = "NO"
+        else:
+            recomendacao = "NEUTRO — histórico alinhado com precificação atual"
+            direcao = "NEUTRO"
+    else:
+        if preco_atual < 0.25:
+            recomendacao = "Preço baixo — vale pesquisar se mercado está negligenciando YES"
+            direcao = "INVESTIGAR YES"
+        elif preco_atual > 0.75:
+            recomendacao = "Preço alto — verifique se há overconfidence no YES"
+            direcao = "INVESTIGAR NO"
+        else:
+            recomendacao = "Preço neutro — busque edge via contexto e motores"
+            direcao = "NEUTRO"
+
+    return {
+        "evento": evento,
+        "preco_atual": preco_atual,
+        "probabilidade_implicita_pct": round(prob_implicita, 1),
+        "tese_yes": {
+            "titulo": f"Por que {evento} vai acontecer",
+            "argumentos": args_favor
+        },
+        "tese_no": {
+            "titulo": f"Por que {evento} NÃO vai acontecer",
+            "argumentos": args_contra
+        },
+        "analise_historica": analise_historica,
+        "recomendacao_final": recomendacao,
+        "direcao_sugerida": direcao
+    }
+
+
+# ─── MOTOR #48 — DETECTOR DE RESOLUÇÃO ERRADA ────────────────
+
+def detectar_resolucao_errada(
+    evento: str,
+    resultado_polymarket: str,  # "YES" ou "NO"
+    evidencias_contrarias: list[dict],
+    prazo_contestacao_horas: int = 24
+) -> dict:
+    score_erro = 0
+    alertas = []
+
+    pesos_evidencia = {
+        "fonte_oficial": 50,
+        "multiplas_fontes": 40,
+        "fonte_secundaria": 25,
+        "opiniao": 10,
+        "dado_estatistico": 35,
+        "documento_oficial": 45
+    }
+
+    for ev in evidencias_contrarias:
+        tipo = ev.get("tipo", "opiniao")
+        peso = pesos_evidencia.get(tipo, 10)
+        score_erro += peso
+        alertas.append({
+            "tipo": tipo,
+            "descricao": ev.get("descricao", ""),
+            "fonte": ev.get("fonte", ""),
+            "peso": peso
+        })
+
+    score_erro = min(score_erro, 100)
+
+    if score_erro >= 70:
+        veredicto = "RESOLUCAO_INCORRETA"
+        acao = "CONTESTE IMEDIATAMENTE — forte evidência de resolução errada"
+        urgencia = "CRITICA"
+    elif score_erro >= 40:
+        veredicto = "SUSPEITO"
+        acao = "Reúna mais evidências e prepare contestação preventiva"
+        urgencia = "ALTA"
+    elif score_erro >= 20:
+        veredicto = "INCERTO"
+        acao = "Monitore — pode ser erro ou ambiguidade nas regras"
+        urgencia = "MEDIA"
+    else:
+        veredicto = "RESOLUCAO_CORRETA"
+        acao = "Evidências insuficientes para contestar"
+        urgencia = "BAIXA"
+
+    return {
+        "evento": evento,
+        "resultado_polymarket": resultado_polymarket,
+        "score_erro": score_erro,
+        "veredicto": veredicto,
+        "acao": acao,
+        "urgencia": urgencia,
+        "prazo_contestacao_horas": prazo_contestacao_horas,
+        "evidencias_analisadas": alertas,
+        "link_contestacao": "https://polymarket.com/help/dispute-resolution"
+    }
+
+
+# ─── MOTOR #49 — SCORE DE CONVICÇÃO DO MERCADO ───────────────
+
+def calcular_convicção_mercado(
+    historico_precos: list[dict],
+    num_noticias_recentes: int = 0
+) -> dict:
+    if len(historico_precos) < 3:
+        return {"erro": "Mínimo 3 pontos necessários"}
+
+    precos = [p["preco"] for p in historico_precos]
+
+    # Volatilidade
+    deltas = [abs(precos[i+1] - precos[i]) for i in range(len(precos)-1)]
+    volatilidade = sum(deltas) / len(deltas)
+    volatilidade_pct = volatilidade * 100
+
+    # Range total
+    range_total = (max(precos) - min(precos)) * 100
+
+    # Estabilidade recente (últimos 3 pontos)
+    ultimos = precos[-3:]
+    estabilidade_recente = (max(ultimos) - min(ultimos)) * 100
+
+    # Score de convicção (alta convicção = baixa volatilidade)
+    score_convicção = max(0, 100 - (volatilidade_pct * 10) - (range_total * 2))
+    score_convicção = min(100, round(score_convicção))
+
+    # Edge disponível (inverso da convicção)
+    edge_disponivel = 100 - score_convicção
+
+    # Impacto das notícias
+    if num_noticias_recentes >= 5 and score_convicção >= 70:
+        alerta_noticias = "⚠️ Mercado estável apesar de muitas notícias — alta convicção, pouco edge"
+    elif num_noticias_recentes >= 5 and score_convicção < 40:
+        alerta_noticias = "🔥 Muitas notícias + mercado oscilando — momento de máximo edge"
+    elif num_noticias_recentes == 0 and score_convicção < 40:
+        alerta_noticias = "Oscilação sem notícias — possível manipulação ou info privilegiada"
+    else:
+        alerta_noticias = "Comportamento normal"
+
+    if score_convicção >= 75:
+        estado = "ALTA_CONVICÇÃO"
+        recomendacao = "Mercado muito estável — consenso formado, pouco edge disponível"
+    elif score_convicção >= 50:
+        estado = "CONVICÇÃO_MODERADA"
+        recomendacao = "Mercado moderadamente estável — edge limitado, entre com cautela"
+    elif score_convicção >= 25:
+        estado = "BAIXA_CONVICÇÃO"
+        recomendacao = "Mercado oscilante — edge disponível, boa janela para entrar"
+    else:
+        estado = "SEM_CONVICÇÃO"
+        recomendacao = "Mercado caótico — máximo edge, mas risco também elevado"
+
+    return {
+        "score_convicção": score_convicção,
+        "edge_disponivel": edge_disponivel,
+        "estado": estado,
+        "recomendacao": recomendacao,
+        "alerta_noticias": alerta_noticias,
+        "metricas": {
+            "volatilidade_media_pct": round(volatilidade_pct, 3),
+            "range_total_pct": round(range_total, 2),
+            "estabilidade_recente_pct": round(estabilidade_recente, 2),
+            "num_noticias_recentes": num_noticias_recentes
+        }
+    }
+
+
+# ─── MOTOR #50 — SIMULADOR DE BANCA ──────────────────────────
+
+def simular_banca(
+    banca_inicial: float,
+    valor_aposta_pct: float,  # % da banca por aposta (ex: 0.05 = 5%)
+    edge_pct: float,           # edge estimado (ex: 0.08 = 8%)
+    winrate_pct: float,        # winrate histórico (ex: 0.55 = 55%)
+    num_apostas: int = 100,
+    num_simulacoes: int = 1000
+) -> dict:
+    falencias = 0
+    bancas_finais = []
+    pior_sequencia = 0
+
+    for _ in range(num_simulacoes):
+        banca = banca_inicial
+        sequencia_loss = 0
+        max_sequencia = 0
+
+        for _ in range(num_apostas):
+            if banca <= banca_inicial * 0.05:  # falência = perda de 95%
+                falencias += 1
+                break
+            aposta = banca * valor_aposta_pct
+            ganhou = random.random() < winrate_pct
+            if ganhou:
+                banca += aposta * (1 + edge_pct)
+                sequencia_loss = 0
+            else:
+                banca -= aposta
+                sequencia_loss += 1
+                max_sequencia = max(max_sequencia, sequencia_loss)
+
+        bancas_finais.append(banca)
+        pior_sequencia = max(pior_sequencia, max_sequencia)
+
+    prob_falencia = (falencias / num_simulacoes) * 100
+    banca_media_final = sum(bancas_finais) / len(bancas_finais)
+    banca_mediana = sorted(bancas_finais)[len(bancas_finais)//2]
+    banca_pior_10pct = sorted(bancas_finais)[int(len(bancas_finais) * 0.1)]
+    retorno_medio = ((banca_media_final - banca_inicial) / banca_inicial) * 100
+
+    # Kelly criterion
+    kelly = (winrate_pct - (1 - winrate_pct) / (1 + edge_pct))
+    kelly_pct = max(0, kelly * 100)
+
+    if prob_falencia >= 30:
+        avaliacao = "PERIGOSO"
+        conselho = f"Risco de ruína muito alto! Reduza aposta para máx {kelly_pct/4:.1f}% da banca"
+    elif prob_falencia >= 15:
+        avaliacao = "ARRISCADO"
+        conselho = f"Risco elevado. Kelly sugere {kelly_pct:.1f}% — considere reduzir"
+    elif prob_falencia >= 5:
+        avaliacao = "MODERADO"
+        conselho = f"Risco aceitável. Kelly criterion: {kelly_pct:.1f}% da banca"
+    else:
+        avaliacao = "CONSERVADOR"
+        conselho = f"Gestão sólida. Kelly criterion: {kelly_pct:.1f}% — pode aumentar levemente"
+
+    return {
+        "parametros": {
+            "banca_inicial": banca_inicial,
+            "aposta_pct": round(valor_aposta_pct * 100, 1),
+            "edge_pct": round(edge_pct * 100, 1),
+            "winrate_pct": round(winrate_pct * 100, 1),
+            "num_apostas": num_apostas,
+            "num_simulacoes": num_simulacoes
+        },
+        "resultados": {
+            "prob_falencia_pct": round(prob_falencia, 1),
+            "banca_media_final": round(banca_media_final, 2),
+            "banca_mediana_final": round(banca_mediana, 2),
+            "pior_cenario_10pct": round(banca_pior_10pct, 2),
+            "retorno_medio_pct": round(retorno_medio, 1),
+            "pior_sequencia_loss": pior_sequencia
+        },
+        "avaliacao": avaliacao,
+        "conselho": conselho,
+        "kelly_criterion_pct": round(kelly_pct, 2)
+    }
+
+
+# ─── ENDPOINTS ────────────────────────────────────────────────
+
+class RegistrarApostaRequest(BaseModel):
+    evento: str
+    tipo_mercado: str
+    direcao: str
+    preco_entrada: float
+    resultado: str = "PENDING"
+    lucro_pct: float = None
+    motores_usados: list[str] = []
+    notas: str = ""
+    data_entrada: str = ""
+    data_resolucao: str = ""
+
+@app.post("/memoria/registrar")
+async def endpoint_registrar_aposta(body: RegistrarApostaRequest):
+    """Motor #46 — Registrar aposta na memória."""
+    try:
+        aposta = body.dict()
+        _apostas_cache.append(aposta)
+        id_db = salvar_aposta_db(aposta)
+        return JSONResponse(content={
+            "motor": "MOTOR_46_MEMORIA",
+            "mensagem": "Aposta registrada com sucesso",
+            "id": id_db
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+@app.get("/memoria/analise")
+async def endpoint_analise_memoria(tipo_mercado: str = None):
+    """Motor #46 — Analisar padrões de apostas vencedoras."""
+    try:
+        resultado = analisar_memoria_apostas(tipo_mercado=tipo_mercado)
+        return JSONResponse(content={"motor": "MOTOR_46_MEMORIA", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class TeseRequest(BaseModel):
+    evento: str
+    preco_atual: float
+    contexto: str = ""
+    historico_similares: list[dict] = []
+
+@app.post("/gerar-tese")
+async def endpoint_gerar_tese(body: TeseRequest):
+    """Motor #47 — Gerador de Tese Automático."""
+    try:
+        resultado = gerar_tese(
+            evento=body.evento,
+            preco_atual=body.preco_atual,
+            contexto=body.contexto,
+            historico_similares=body.historico_similares
+        )
+        return JSONResponse(content={"motor": "MOTOR_47_GERADOR_TESE", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class ResolucaoErradaRequest(BaseModel):
+    evento: str
+    resultado_polymarket: str
+    evidencias_contrarias: list[dict]
+    prazo_contestacao_horas: int = 24
+
+@app.post("/detector-resolucao-errada")
+async def endpoint_resolucao_errada(body: ResolucaoErradaRequest):
+    """Motor #48 — Detector de Resolução Errada."""
+    try:
+        resultado = detectar_resolucao_errada(
+            evento=body.evento,
+            resultado_polymarket=body.resultado_polymarket,
+            evidencias_contrarias=body.evidencias_contrarias,
+            prazo_contestacao_horas=body.prazo_contestacao_horas
+        )
+        return JSONResponse(content={"motor": "MOTOR_48_RESOLUCAO_ERRADA", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class ConviccaoRequest(BaseModel):
+    historico_precos: list[dict]
+    num_noticias_recentes: int = 0
+
+@app.post("/convicção-mercado")
+async def endpoint_convicção_mercado(body: ConviccaoRequest):
+    """Motor #49 — Score de Convicção do Mercado."""
+    try:
+        resultado = calcular_convicção_mercado(
+            historico_precos=body.historico_precos,
+            num_noticias_recentes=body.num_noticias_recentes
+        )
+        return JSONResponse(content={"motor": "MOTOR_49_CONVICÇÃO_MERCADO", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class SimuladorBancaRequest(BaseModel):
+    banca_inicial: float
+    valor_aposta_pct: float
+    edge_pct: float
+    winrate_pct: float
+    num_apostas: int = 100
+    num_simulacoes: int = 1000
+
+@app.post("/simulador-banca")
+async def endpoint_simulador_banca(body: SimuladorBancaRequest):
+    """
+    Motor #50 — Simulador de Banca Pessoal.
+    Body: { "banca_inicial": 1000, "valor_aposta_pct": 0.05, "edge_pct": 0.08,
+            "winrate_pct": 0.55, "num_apostas": 100, "num_simulacoes": 1000 }
+    """
+    try:
+        resultado = simular_banca(
+            banca_inicial=body.banca_inicial,
+            valor_aposta_pct=body.valor_aposta_pct,
+            edge_pct=body.edge_pct,
+            winrate_pct=body.winrate_pct,
+            num_apostas=body.num_apostas,
+            num_simulacoes=body.num_simulacoes
+        )
+        return JSONResponse(content={"motor": "MOTOR_50_SIMULADOR_BANCA", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+    
+    
