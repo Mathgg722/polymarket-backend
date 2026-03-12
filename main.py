@@ -8413,3 +8413,191 @@ async def endpoint_detectar_manipulacao(body: ManipulacaoRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
+    # ══════════════════════════════════════════════════════════════
+# MOTOR #35 — SCORE DE TIMING PERFEITO
+# Analisa histórico de preços e diz "Entre agora" ou "Espera X horas"
+# baseado em padrões de correção de preço
+# ══════════════════════════════════════════════════════════════
+
+from datetime import datetime, timezone
+
+def calcular_timing(historico_precos: list[dict]) -> dict:
+    """
+    Analisa histórico de preços para identificar o melhor momento de entrada.
+
+    Espera lista de dicts:
+    [
+        {"timestamp": "2024-03-01T14:00:00Z", "preco": 0.65},
+        {"timestamp": "2024-03-01T15:00:00Z", "preco": 0.68},
+        ...
+    ]
+    """
+    if not historico_precos or len(historico_precos) < 3:
+        return {
+            "score_timing": 0,
+            "recomendacao": "DADOS_INSUFICIENTES",
+            "acao": "Histórico insuficiente para análise de timing",
+            "esperar_horas": None,
+            "janelas_ideais": [],
+            "motivo": "Mínimo de 3 pontos de preço necessários"
+        }
+
+    # --- Ordenar por timestamp ---
+    try:
+        historico_precos = sorted(
+            historico_precos,
+            key=lambda x: datetime.fromisoformat(x["timestamp"].replace("Z", "+00:00"))
+        )
+    except Exception:
+        pass
+
+    precos = [p["preco"] for p in historico_precos]
+    agora = datetime.now(timezone.utc)
+
+    # --- ANÁLISE 1: Tendência recente (últimos 3 pontos) ---
+    ultimos = precos[-3:]
+    tendencia = ultimos[-1] - ultimos[0]
+    tendencia_pct = (tendencia / max(ultimos[0], 0.01)) * 100
+
+    # --- ANÁLISE 2: Volatilidade (desvio entre pontos consecutivos) ---
+    deltas = [abs(precos[i+1] - precos[i]) for i in range(len(precos)-1)]
+    volatilidade_media = sum(deltas) / len(deltas) if deltas else 0
+    volatilidade_recente = deltas[-1] if deltas else 0
+
+    # --- ANÁLISE 3: Detectar padrão de correção ---
+    # Correção = preço caiu após alta (oportunidade de entrada)
+    correcao_detectada = False
+    magnitude_correcao = 0
+    if len(precos) >= 4:
+        pico = max(precos[-4:])
+        atual = precos[-1]
+        if pico > atual:
+            magnitude_correcao = ((pico - atual) / pico) * 100
+            if magnitude_correcao >= 5:
+                correcao_detectada = True
+
+    # --- ANÁLISE 4: Janelas de horário ideais ---
+    # Mapear horas com maior variação no histórico
+    horas_variacao = {}
+    for i in range(1, len(historico_precos)):
+        try:
+            ts = datetime.fromisoformat(
+                historico_precos[i]["timestamp"].replace("Z", "+00:00")
+            )
+            hora = ts.hour
+            variacao = abs(precos[i] - precos[i-1])
+            if hora not in horas_variacao:
+                horas_variacao[hora] = []
+            horas_variacao[hora].append(variacao)
+        except Exception:
+            continue
+
+    # Calcular média de variação por hora
+    media_por_hora = {
+        h: sum(v)/len(v) for h, v in horas_variacao.items()
+    }
+    janelas_ideais = sorted(media_por_hora.items(), key=lambda x: x[1], reverse=True)[:3]
+    janelas_formatadas = [
+        {"hora": f"{h:02d}:00 UTC", "variacao_media": round(v * 100, 2)}
+        for h, v in janelas_ideais
+    ]
+
+    # --- SCORE DE TIMING (0-100) ---
+    score = 50  # base neutra
+
+    # Bônus por correção detectada (oportunidade)
+    if correcao_detectada:
+        score += min(magnitude_correcao * 2, 30)
+
+    # Bônus por volatilidade baixa agora (estável = bom para entrar)
+    if volatilidade_recente < volatilidade_media * 0.7:
+        score += 15
+    elif volatilidade_recente > volatilidade_media * 1.5:
+        score -= 20  # muito agitado agora, espera
+
+    # Bônus por tendência favorável (preço caindo = oportunidade de compra barata)
+    if -20 <= tendencia_pct <= -3:
+        score += 10
+    elif tendencia_pct > 20:
+        score -= 15  # já subiu muito, tarde demais
+
+    score = max(0, min(score, 100))
+
+    # --- RECOMENDAÇÃO FINAL ---
+    hora_atual = agora.hour
+
+    # Verificar se hora atual é janela ideal
+    horas_ideais = [h for h, _ in janelas_ideais]
+    em_janela_ideal = hora_atual in horas_ideais or (hora_atual + 1) % 24 in horas_ideais
+
+    if score >= 70 and em_janela_ideal:
+        acao = "ENTRE AGORA"
+        recomendacao = "AGORA"
+        esperar_horas = 0
+    elif score >= 70 and not em_janela_ideal:
+        # Calcular horas até próxima janela ideal
+        if horas_ideais:
+            proxima_hora = min(
+                horas_ideais,
+                key=lambda h: (h - hora_atual) % 24
+            )
+            esperar = (proxima_hora - hora_atual) % 24
+        else:
+            esperar = 2
+        acao = f"ESPERE {esperar} HORA(S) — próxima janela ideal às {proxima_hora:02d}:00 UTC"
+        recomendacao = "AGUARDAR"
+        esperar_horas = esperar
+    elif score >= 40:
+        acao = "CONDIÇÕES NEUTRAS — monitore por 1-2 horas antes de entrar"
+        recomendacao = "AGUARDAR"
+        esperar_horas = 2
+    else:
+        acao = "NÃO É O MOMENTO — preço instável ou já corrigido demais"
+        recomendacao = "EVITAR"
+        esperar_horas = None
+
+    return {
+        "score_timing": round(score),
+        "recomendacao": recomendacao,
+        "acao": acao,
+        "esperar_horas": esperar_horas,
+        "janelas_ideais": janelas_formatadas,
+        "analise": {
+            "tendencia_pct": round(tendencia_pct, 2),
+            "volatilidade_media": round(volatilidade_media * 100, 2),
+            "volatilidade_recente": round(volatilidade_recente * 100, 2),
+            "correcao_detectada": correcao_detectada,
+            "magnitude_correcao_pct": round(magnitude_correcao, 2),
+            "em_janela_ideal": em_janela_ideal
+        }
+    }
+
+
+class TimingRequest(BaseModel):
+    historico_precos: list[dict]
+
+
+@app.post("/score-timing")
+async def endpoint_score_timing(body: TimingRequest):
+    """
+    Endpoint de timing perfeito.
+
+    Body JSON:
+    {
+        "historico_precos": [
+            {"timestamp": "2024-03-01T14:00:00Z", "preco": 0.65},
+            {"timestamp": "2024-03-01T15:00:00Z", "preco": 0.62},
+            {"timestamp": "2024-03-01T16:00:00Z", "preco": 0.58},
+            {"timestamp": "2024-03-01T17:00:00Z", "preco": 0.55}
+        ]
+    }
+    """
+    try:
+        resultado = calcular_timing(body.historico_precos)
+        return JSONResponse(content={
+            "motor": "MOTOR_35_SCORE_TIMING",
+            "resultado": resultado
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+    
