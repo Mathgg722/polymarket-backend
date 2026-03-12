@@ -7,3 +7,5 @@ anthropic>=0.34.0
 beautifulsoup4
 feedparser
 websockets
+apscheduler
+youtube-transcript-api
