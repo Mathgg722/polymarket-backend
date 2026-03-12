@@ -8601,3 +8601,305 @@ async def endpoint_score_timing(body: TimingRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
+    # ══════════════════════════════════════════════════════════════
+# MOTORES #36, #37, #38 — PSICOLOGIA DO MERCADO
+# #36 Pânico vs Euforia
+# #37 Velocidade de movimento
+# #38 Smart Money vs Varejo
+# ══════════════════════════════════════════════════════════════
+
+# ─── MOTOR #36 — PÂNICO VS EUFORIA ───────────────────────────
+
+def detectar_panico_euforia(
+    preco_atual: float,
+    preco_24h_atras: float,
+    volume_atual: float,
+    volume_media_7d: float,
+    num_trades_ultima_hora: int,
+    num_trades_media_hora: float
+) -> dict:
+    score = 0  # -100 = pânico extremo, +100 = euforia extrema
+    sinais = []
+
+    # Variação de preço
+    variacao_preco = ((preco_atual - preco_24h_atras) / max(preco_24h_atras, 0.01)) * 100
+    if variacao_preco > 30:
+        score += 40
+        sinais.append({"sinal": "PRECO_SUBIU_FORTE", "descricao": f"Preço +{variacao_preco:.1f}% em 24h — euforia"})
+    elif variacao_preco > 15:
+        score += 20
+        sinais.append({"sinal": "PRECO_SUBIU", "descricao": f"Preço +{variacao_preco:.1f}% em 24h — otimismo"})
+    elif variacao_preco < -30:
+        score -= 40
+        sinais.append({"sinal": "PRECO_DESPENCOU", "descricao": f"Preço {variacao_preco:.1f}% em 24h — pânico"})
+    elif variacao_preco < -15:
+        score -= 20
+        sinais.append({"sinal": "PRECO_CAIU", "descricao": f"Preço {variacao_preco:.1f}% em 24h — medo"})
+
+    # Volume vs média
+    ratio_volume = volume_atual / max(volume_media_7d, 1)
+    if ratio_volume > 3:
+        if score > 0:
+            score += 30
+            sinais.append({"sinal": "VOLUME_EXPLOSIVO_ALTA", "descricao": f"Volume {ratio_volume:.1f}x acima da média — euforia extrema"})
+        else:
+            score -= 30
+            sinais.append({"sinal": "VOLUME_EXPLOSIVO_BAIXA", "descricao": f"Volume {ratio_volume:.1f}x acima da média — pânico extremo"})
+    elif ratio_volume > 1.5:
+        score += 10 if score >= 0 else -10
+        sinais.append({"sinal": "VOLUME_ELEVADO", "descricao": f"Volume {ratio_volume:.1f}x acima da média"})
+
+    # Frequência de trades
+    ratio_trades = num_trades_ultima_hora / max(num_trades_media_hora, 1)
+    if ratio_trades > 3:
+        score += 20 if score >= 0 else -20
+        sinais.append({"sinal": "TRADES_FRENÉTICOS", "descricao": f"{ratio_trades:.1f}x mais trades que o normal — mercado agitado"})
+
+    score = max(-100, min(100, score))
+
+    if score >= 60:
+        estado = "EUFORIA_EXTREMA"
+        interpretacao = "Mercado em euforia — risco de reversão, considere ir CONTRA"
+    elif score >= 30:
+        estado = "OTIMISMO"
+        interpretacao = "Mercado otimista — tendência de alta mas cuidado com topo"
+    elif score >= -29:
+        estado = "NEUTRO"
+        interpretacao = "Mercado equilibrado — sem sinal claro de sentimento"
+    elif score >= -59:
+        estado = "MEDO"
+        interpretacao = "Mercado com medo — possível oportunidade de compra"
+    else:
+        estado = "PANICO_EXTREMO"
+        interpretacao = "Pânico no mercado — oportunidade contrária de alta qualidade"
+
+    return {
+        "score_sentimento": score,
+        "estado": estado,
+        "interpretacao": interpretacao,
+        "sinais": sinais,
+        "metricas": {
+            "variacao_preco_24h_pct": round(variacao_preco, 2),
+            "ratio_volume": round(ratio_volume, 2),
+            "ratio_trades": round(ratio_trades, 2)
+        }
+    }
+
+
+# ─── MOTOR #37 — VELOCIDADE DE MOVIMENTO ─────────────────────
+
+def analisar_velocidade_movimento(historico_precos: list[dict]) -> dict:
+    if len(historico_precos) < 2:
+        return {"erro": "Mínimo 2 pontos necessários"}
+
+    try:
+        historico_precos = sorted(
+            historico_precos,
+            key=lambda x: datetime.fromisoformat(x["timestamp"].replace("Z", "+00:00"))
+        )
+    except Exception:
+        pass
+
+    movimentos = []
+    for i in range(1, len(historico_precos)):
+        try:
+            t1 = datetime.fromisoformat(historico_precos[i-1]["timestamp"].replace("Z", "+00:00"))
+            t2 = datetime.fromisoformat(historico_precos[i]["timestamp"].replace("Z", "+00:00"))
+            p1 = historico_precos[i-1]["preco"]
+            p2 = historico_precos[i]["preco"]
+
+            minutos = max((t2 - t1).total_seconds() / 60, 0.1)
+            variacao_pct = abs((p2 - p1) / max(p1, 0.01)) * 100
+            velocidade = variacao_pct / minutos  # % por minuto
+
+            movimentos.append({
+                "de": historico_precos[i-1]["timestamp"],
+                "ate": historico_precos[i]["timestamp"],
+                "variacao_pct": round(variacao_pct, 2),
+                "minutos": round(minutos, 1),
+                "velocidade_pct_por_min": round(velocidade, 4)
+            })
+        except Exception:
+            continue
+
+    if not movimentos:
+        return {"erro": "Não foi possível calcular movimentos"}
+
+    velocidade_max = max(m["velocidade_pct_por_min"] for m in movimentos)
+    velocidade_media = sum(m["velocidade_pct_por_min"] for m in movimentos) / len(movimentos)
+    movimento_mais_rapido = max(movimentos, key=lambda x: x["velocidade_pct_por_min"])
+
+    # Classificação
+    if velocidade_max >= 5:  # 5% por minuto = explosivo
+        tipo = "INFO_PRIVILEGIADA"
+        descricao = "Movimento explosivo — possível vazamento de informação privilegiada"
+        risco = "ALTO"
+    elif velocidade_max >= 1:  # 1% por minuto = rápido
+        tipo = "REACAO_RAPIDA"
+        descricao = "Movimento rápido — reação a notícia ou evento inesperado"
+        risco = "MEDIO"
+    elif velocidade_max >= 0.1:  # lento
+        tipo = "REACAO_NORMAL"
+        descricao = "Movimento gradual — reação orgânica do mercado"
+        risco = "BAIXO"
+    else:
+        tipo = "MOVIMENTO_LENTO"
+        descricao = "Mercado quase parado — pouco interesse ou liquidez baixa"
+        risco = "BAIXO"
+
+    return {
+        "tipo_movimento": tipo,
+        "descricao": descricao,
+        "risco": risco,
+        "velocidade_maxima_pct_por_min": round(velocidade_max, 4),
+        "velocidade_media_pct_por_min": round(velocidade_media, 4),
+        "movimento_mais_rapido": movimento_mais_rapido,
+        "todos_movimentos": movimentos
+    }
+
+
+# ─── MOTOR #38 — SMART MONEY VS VAREJO ───────────────────────
+
+def detectar_smart_money(trades: list[dict]) -> dict:
+    """
+    Espera lista de trades:
+    [
+        {"valor_usd": 5000, "timestamp": "2024-03-01T14:00:00Z", "direcao": "YES"},
+        {"valor_usd": 50,   "timestamp": "2024-03-01T14:01:00Z", "direcao": "NO"},
+        ...
+    ]
+    """
+    if not trades:
+        return {"erro": "Nenhum trade fornecido"}
+
+    valores = [t["valor_usd"] for t in trades]
+    media_valor = sum(valores) / len(valores)
+
+    # Separar smart money (grandes) vs varejo (pequenos)
+    threshold_smart = media_valor * 3  # 3x acima da média = smart money
+    threshold_varejo = media_valor * 0.5  # abaixo de 50% da média = varejo
+
+    smart_money = [t for t in trades if t["valor_usd"] >= threshold_smart]
+    varejo = [t for t in trades if t["valor_usd"] <= threshold_varejo]
+
+    def calcular_direcao(lista):
+        if not lista:
+            return {"YES": 0, "NO": 0, "volume_yes": 0, "volume_no": 0}
+        yes = [t for t in lista if t.get("direcao", "").upper() == "YES"]
+        no = [t for t in lista if t.get("direcao", "").upper() == "NO"]
+        vol_yes = sum(t["valor_usd"] for t in yes)
+        vol_no = sum(t["valor_usd"] for t in no)
+        total = vol_yes + vol_no
+        return {
+            "YES": round((vol_yes / max(total, 1)) * 100, 1),
+            "NO": round((vol_no / max(total, 1)) * 100, 1),
+            "volume_yes": vol_yes,
+            "volume_no": vol_no
+        }
+
+    dir_smart = calcular_direcao(smart_money)
+    dir_varejo = calcular_direcao(varejo)
+
+    # Detectar divergência
+    divergencia = abs(dir_smart["YES"] - dir_varejo["YES"])
+    smart_domina_yes = dir_smart["YES"] > dir_varejo["YES"]
+
+    if divergencia >= 40:
+        nivel_divergencia = "EXTREMA"
+        edge = "MAXIMO"
+        recomendacao = f"Smart money apostando {'YES' if smart_domina_yes else 'NO'} enquanto varejo faz o oposto — SIGA O SMART MONEY"
+    elif divergencia >= 20:
+        nivel_divergencia = "ALTA"
+        edge = "ALTO"
+        recomendacao = f"Smart money prefere {'YES' if smart_domina_yes else 'NO'} — sinal relevante"
+    elif divergencia >= 10:
+        nivel_divergencia = "MODERADA"
+        edge = "MEDIO"
+        recomendacao = "Leve divergência — monitorar"
+    else:
+        nivel_divergencia = "BAIXA"
+        edge = "BAIXO"
+        recomendacao = "Smart money e varejo alinhados — sem edge claro"
+
+    return {
+        "divergencia_pct": round(divergencia, 1),
+        "nivel_divergencia": nivel_divergencia,
+        "edge": edge,
+        "recomendacao": recomendacao,
+        "smart_money": {
+            "num_trades": len(smart_money),
+            "volume_total": sum(t["valor_usd"] for t in smart_money),
+            "direcao": dir_smart
+        },
+        "varejo": {
+            "num_trades": len(varejo),
+            "volume_total": sum(t["valor_usd"] for t in varejo),
+            "direcao": dir_varejo
+        },
+        "threshold_smart_money_usd": round(threshold_smart, 2),
+        "media_trade_usd": round(media_valor, 2)
+    }
+
+
+# ─── ENDPOINTS ────────────────────────────────────────────────
+
+class PanicoEuforiaRequest(BaseModel):
+    preco_atual: float
+    preco_24h_atras: float
+    volume_atual: float
+    volume_media_7d: float
+    num_trades_ultima_hora: int
+    num_trades_media_hora: float
+
+@app.post("/panico-euforia")
+async def endpoint_panico_euforia(body: PanicoEuforiaRequest):
+    """
+    Motor #36 — Detector de Pânico vs Euforia.
+    Body: { "preco_atual": 0.75, "preco_24h_atras": 0.50, "volume_atual": 50000,
+            "volume_media_7d": 15000, "num_trades_ultima_hora": 120, "num_trades_media_hora": 30 }
+    """
+    try:
+        resultado = detectar_panico_euforia(
+            preco_atual=body.preco_atual,
+            preco_24h_atras=body.preco_24h_atras,
+            volume_atual=body.volume_atual,
+            volume_media_7d=body.volume_media_7d,
+            num_trades_ultima_hora=body.num_trades_ultima_hora,
+            num_trades_media_hora=body.num_trades_media_hora
+        )
+        return JSONResponse(content={"motor": "MOTOR_36_PANICO_EUFORIA", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class VelocidadeRequest(BaseModel):
+    historico_precos: list[dict]
+
+@app.post("/velocidade-movimento")
+async def endpoint_velocidade_movimento(body: VelocidadeRequest):
+    """
+    Motor #37 — Velocidade de Movimento.
+    Body: { "historico_precos": [{"timestamp": "2024-03-01T14:00:00Z", "preco": 0.50}, ...] }
+    """
+    try:
+        resultado = analisar_velocidade_movimento(body.historico_precos)
+        return JSONResponse(content={"motor": "MOTOR_37_VELOCIDADE_MOVIMENTO", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class SmartMoneyRequest(BaseModel):
+    trades: list[dict]
+
+@app.post("/smart-money")
+async def endpoint_smart_money(body: SmartMoneyRequest):
+    """
+    Motor #38 — Smart Money vs Varejo.
+    Body: { "trades": [{"valor_usd": 5000, "timestamp": "...", "direcao": "YES"}, ...] }
+    """
+    try:
+        resultado = detectar_smart_money(body.trades)
+        return JSONResponse(content={"motor": "MOTOR_38_SMART_MONEY", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+    
