@@ -10308,4 +10308,485 @@ async def endpoint_simulador_banca(body: SimuladorBancaRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
+    # ══════════════════════════════════════════════════════════════
+# MOTOR #51 — PIPELINE PROFESSOR JIANG
+# YouTube + Twitter(Nitter) + Substack + Podcast
+# → Claude Haiku extrai previsões
+# → Mapeia para mercados Polymarket
+# → Salva no banco automaticamente
+# ══════════════════════════════════════════════════════════════
+
+import feedparser
+import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from youtube_transcript_api import YouTubeTranscriptApi
+import anthropic
+
+# ─── CONFIG ──────────────────────────────────────────────────
+
+JIANG_SOURCES = {
+    "youtube": {
+        "rss": "https://www.youtube.com/feeds/videos.xml?channel_id=UCsQSXbgaduFPLs_EB8P1rYA",
+        "nome": "Predictive History YouTube"
+    },
+    "twitter_nitter": {
+        "url": "https://nitter.privacydev.net/PredictiveHistory/rss",
+        "nome": "Twitter via Nitter"
+    },
+    "substack": {
+        "url": "https://predictivehistory.substack.com/feed",
+        "nome": "Substack"
+    },
+    "podcast": {
+        "url": "https://feeds.buzzsprout.com/predictivehistory.rss",
+        "nome": "Podcast"
+    }
+}
+
+ANTHROPIC_CLIENT = anthropic.Anthropic()
+
+# ─── BANCO DE DADOS ───────────────────────────────────────────
+
+def init_db_jiang():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS jiang_previsoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fonte TEXT,
+            titulo_conteudo TEXT,
+            url_conteudo TEXT,
+            previsao TEXT,
+            evento_previsto TEXT,
+            direcao TEXT,
+            confianca_pct REAL,
+            prazo TEXT,
+            mercado_polymarket TEXT,
+            mercado_url TEXT,
+            match_score REAL,
+            data_extracao TEXT,
+            processado INTEGER DEFAULT 0
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS jiang_conteudos_processados (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE,
+            data_processado TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db_jiang()
+
+def ja_processado(url: str) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id FROM jiang_conteudos_processados WHERE url = ?", (url,))
+    resultado = c.fetchone()
+    conn.close()
+    return resultado is not None
+
+def marcar_processado(url: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR IGNORE INTO jiang_conteudos_processados (url, data_processado) VALUES (?, ?)",
+        (url, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+def salvar_previsao_jiang(previsao: dict):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO jiang_previsoes
+        (fonte, titulo_conteudo, url_conteudo, previsao, evento_previsto, direcao,
+         confianca_pct, prazo, mercado_polymarket, mercado_url, match_score, data_extracao)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        previsao.get("fonte"), previsao.get("titulo_conteudo"), previsao.get("url_conteudo"),
+        previsao.get("previsao"), previsao.get("evento_previsto"), previsao.get("direcao"),
+        previsao.get("confianca_pct"), previsao.get("prazo"), previsao.get("mercado_polymarket"),
+        previsao.get("mercado_url"), previsao.get("match_score"),
+        datetime.now(timezone.utc).isoformat()
+    ))
+    conn.commit()
+    conn.close()
+
+
+# ─── SCRAPERS ─────────────────────────────────────────────────
+
+async def buscar_youtube_transcricao(video_id: str) -> str | None:
+    """Busca transcrição de vídeo YouTube."""
+    try:
+        transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "pt"])
+        texto = " ".join([t["text"] for t in transcript])
+        return texto[:8000]  # Limitar para o Haiku
+    except Exception:
+        return None
+
+async def buscar_feed_rss(url: str) -> list[dict]:
+    """Busca itens de um feed RSS."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            feed = feedparser.parse(resp.text)
+            itens = []
+            for entry in feed.entries[:5]:  # Últimos 5 itens
+                itens.append({
+                    "titulo": entry.get("title", ""),
+                    "url": entry.get("link", ""),
+                    "resumo": entry.get("summary", "")[:500],
+                    "data": entry.get("published", ""),
+                    "video_id": entry.get("yt_videoid", None)
+                })
+            return itens
+    except Exception:
+        return []
+
+async def buscar_substack(url: str) -> list[dict]:
+    """Busca posts do Substack via RSS."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            feed = feedparser.parse(resp.text)
+            itens = []
+            for entry in feed.entries[:3]:
+                conteudo = entry.get("content", [{}])[0].get("value", "") if entry.get("content") else entry.get("summary", "")
+                soup = BeautifulSoup(conteudo, "html.parser")
+                texto = soup.get_text()[:3000]
+                itens.append({
+                    "titulo": entry.get("title", ""),
+                    "url": entry.get("link", ""),
+                    "texto": texto,
+                    "data": entry.get("published", "")
+                })
+            return itens
+    except Exception:
+        return []
+
+
+# ─── CLAUDE HAIKU — EXTRAÇÃO DE PREVISÕES ────────────────────
+
+async def extrair_previsoes_haiku(texto: str, fonte: str, titulo: str) -> list[dict]:
+    """Usa Claude Haiku para extrair previsões estruturadas do texto."""
+    try:
+        prompt = f"""Você é um extrator de previsões do Professor Jiang (Predictive History).
+
+Analise o seguinte texto e extraia TODAS as previsões específicas mencionadas.
+
+Fonte: {fonte}
+Título: {titulo}
+
+Texto:
+{texto[:4000]}
+
+Retorne APENAS um JSON válido com esta estrutura (sem texto extra, sem markdown):
+{{
+  "previsoes": [
+    {{
+      "previsao": "descrição clara da previsão",
+      "evento_previsto": "evento específico em uma frase curta",
+      "direcao": "YES ou NO",
+      "confianca_pct": 75,
+      "prazo": "data ou período estimado (ex: Q2 2025, antes de junho 2025)"
+    }}
+  ]
+}}
+
+Se não houver previsões claras, retorne {{"previsoes": []}}"""
+
+        response = ANTHROPIC_CLIENT.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        texto_resposta = response.content[0].text.strip()
+        texto_resposta = texto_resposta.replace("```json", "").replace("```", "").strip()
+        dados = json.loads(texto_resposta)
+        return dados.get("previsoes", [])
+    except Exception as e:
+        return []
+
+
+# ─── CLAUDE — MAPEAMENTO PARA POLYMARKET ─────────────────────
+
+async def mapear_para_polymarket(previsao: dict, mercados_disponiveis: list[dict] = None) -> dict:
+    """
+    Usa Claude para mapear uma previsão para o mercado Polymarket mais relevante.
+    Substitui busca por keyword — Claude analisa semanticamente.
+    """
+    try:
+        # Buscar mercados da API Polymarket se não fornecidos
+        if not mercados_disponiveis:
+            mercados_disponiveis = await buscar_mercados_polymarket_api(previsao["evento_previsto"])
+
+        contexto_mercados = ""
+        if mercados_disponiveis:
+            contexto_mercados = "Mercados disponíveis no Polymarket:\n"
+            for m in mercados_disponiveis[:20]:
+                contexto_mercados += f"- [{m.get('id','')}] {m.get('question', '')} (preço YES: {m.get('outcomePrices', ['?'])[0]})\n"
+
+        prompt = f"""Você é um especialista em Polymarket.
+
+Previsão do Professor Jiang:
+- Evento: {previsao['evento_previsto']}
+- Direção: {previsao['direcao']}
+- Prazo: {previsao.get('prazo', 'não especificado')}
+- Confiança: {previsao.get('confianca_pct', 50)}%
+
+{contexto_mercados}
+
+Tarefa: Identifique o mercado Polymarket que MELHOR corresponde a esta previsão.
+Analise semanticamente — não use apenas keywords, entenda o CONTEXTO e SIGNIFICADO.
+
+Retorne APENAS JSON válido (sem markdown):
+{{
+  "mercado_encontrado": true,
+  "mercado_titulo": "título do mercado",
+  "mercado_id": "id do mercado",
+  "mercado_url": "https://polymarket.com/event/...",
+  "match_score": 85,
+  "justificativa": "por que este mercado corresponde à previsão",
+  "recomendacao": "COMPRAR YES / COMPRAR NO / AGUARDAR"
+}}
+
+Se nenhum mercado for relevante: {{"mercado_encontrado": false, "match_score": 0}}"""
+
+        response = ANTHROPIC_CLIENT.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        texto_resposta = response.content[0].text.strip()
+        texto_resposta = texto_resposta.replace("```json", "").replace("```", "").strip()
+        return json.loads(texto_resposta)
+    except Exception:
+        return {"mercado_encontrado": False, "match_score": 0}
+
+async def buscar_mercados_polymarket_api(query: str) -> list[dict]:
+    """Busca mercados abertos no Polymarket relacionados à query."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"active": "true", "closed": "false", "limit": 30, "q": query}
+            )
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception:
+        pass
+    return []
+
+
+# ─── PIPELINE PRINCIPAL ───────────────────────────────────────
+
+async def rodar_pipeline_jiang(mercados_manuais: list[dict] = None) -> dict:
+    """Pipeline completo: coleta → transcrição → extração → mapeamento → salva."""
+    relatorio = {
+        "inicio": datetime.now(timezone.utc).isoformat(),
+        "fontes_processadas": [],
+        "total_previsoes": 0,
+        "total_mercados_mapeados": 0,
+        "erros": []
+    }
+
+    # ── YouTube ──
+    try:
+        itens_yt = await buscar_feed_rss(JIANG_SOURCES["youtube"]["rss"])
+        for item in itens_yt:
+            if ja_processado(item["url"]):
+                continue
+            texto = None
+            if item.get("video_id"):
+                texto = await buscar_youtube_transcricao(item["video_id"])
+            if not texto:
+                texto = item.get("resumo", "")
+            if texto:
+                previsoes = await extrair_previsoes_haiku(texto, "YouTube", item["titulo"])
+                for prev in previsoes:
+                    prev["fonte"] = "YouTube"
+                    prev["titulo_conteudo"] = item["titulo"]
+                    prev["url_conteudo"] = item["url"]
+                    mapeamento = await mapear_para_polymarket(prev, mercados_manuais)
+                    prev["mercado_polymarket"] = mapeamento.get("mercado_titulo", "")
+                    prev["mercado_url"] = mapeamento.get("mercado_url", "")
+                    prev["match_score"] = mapeamento.get("match_score", 0)
+                    salvar_previsao_jiang(prev)
+                    relatorio["total_previsoes"] += 1
+                    if mapeamento.get("mercado_encontrado"):
+                        relatorio["total_mercados_mapeados"] += 1
+            marcar_processado(item["url"])
+        relatorio["fontes_processadas"].append("YouTube")
+    except Exception as e:
+        relatorio["erros"].append(f"YouTube: {str(e)}")
+
+    # ── Twitter via Nitter ──
+    try:
+        nitter_instances = [
+            "https://nitter.privacydev.net",
+            "https://nitter.poast.org",
+            "https://nitter.1d4.us"
+        ]
+        itens_tw = []
+        for instance in nitter_instances:
+            itens_tw = await buscar_feed_rss(f"{instance}/PredictiveHistory/rss")
+            if itens_tw:
+                break
+        for item in itens_tw:
+            if ja_processado(item["url"]):
+                continue
+            texto = item.get("resumo", "")
+            if texto and len(texto) > 50:
+                previsoes = await extrair_previsoes_haiku(texto, "Twitter", item["titulo"])
+                for prev in previsoes:
+                    prev["fonte"] = "Twitter"
+                    prev["titulo_conteudo"] = item["titulo"]
+                    prev["url_conteudo"] = item["url"]
+                    mapeamento = await mapear_para_polymarket(prev, mercados_manuais)
+                    prev["mercado_polymarket"] = mapeamento.get("mercado_titulo", "")
+                    prev["mercado_url"] = mapeamento.get("mercado_url", "")
+                    prev["match_score"] = mapeamento.get("match_score", 0)
+                    salvar_previsao_jiang(prev)
+                    relatorio["total_previsoes"] += 1
+                    if mapeamento.get("mercado_encontrado"):
+                        relatorio["total_mercados_mapeados"] += 1
+            marcar_processado(item["url"])
+        relatorio["fontes_processadas"].append("Twitter/Nitter")
+    except Exception as e:
+        relatorio["erros"].append(f"Twitter: {str(e)}")
+
+    # ── Substack ──
+    try:
+        itens_sub = await buscar_substack(JIANG_SOURCES["substack"]["url"])
+        for item in itens_sub:
+            if ja_processado(item["url"]):
+                continue
+            texto = item.get("texto", "")
+            if texto:
+                previsoes = await extrair_previsoes_haiku(texto, "Substack", item["titulo"])
+                for prev in previsoes:
+                    prev["fonte"] = "Substack"
+                    prev["titulo_conteudo"] = item["titulo"]
+                    prev["url_conteudo"] = item["url"]
+                    mapeamento = await mapear_para_polymarket(prev, mercados_manuais)
+                    prev["mercado_polymarket"] = mapeamento.get("mercado_titulo", "")
+                    prev["mercado_url"] = mapeamento.get("mercado_url", "")
+                    prev["match_score"] = mapeamento.get("match_score", 0)
+                    salvar_previsao_jiang(prev)
+                    relatorio["total_previsoes"] += 1
+                    if mapeamento.get("mercado_encontrado"):
+                        relatorio["total_mercados_mapeados"] += 1
+            marcar_processado(item["url"])
+        relatorio["fontes_processadas"].append("Substack")
+    except Exception as e:
+        relatorio["erros"].append(f"Substack: {str(e)}")
+
+    # ── Podcast ──
+    try:
+        itens_pod = await buscar_feed_rss(JIANG_SOURCES["podcast"]["url"])
+        for item in itens_pod:
+            if ja_processado(item["url"]):
+                continue
+            texto = item.get("resumo", "")
+            if texto:
+                previsoes = await extrair_previsoes_haiku(texto, "Podcast", item["titulo"])
+                for prev in previsoes:
+                    prev["fonte"] = "Podcast"
+                    prev["titulo_conteudo"] = item["titulo"]
+                    prev["url_conteudo"] = item["url"]
+                    mapeamento = await mapear_para_polymarket(prev, mercados_manuais)
+                    prev["mercado_polymarket"] = mapeamento.get("mercado_titulo", "")
+                    prev["mercado_url"] = mapeamento.get("mercado_url", "")
+                    prev["match_score"] = mapeamento.get("match_score", 0)
+                    salvar_previsao_jiang(prev)
+                    relatorio["total_previsoes"] += 1
+                    if mapeamento.get("mercado_encontrado"):
+                        relatorio["total_mercados_mapeados"] += 1
+            marcar_processado(item["url"])
+        relatorio["fontes_processadas"].append("Podcast")
+    except Exception as e:
+        relatorio["erros"].append(f"Podcast: {str(e)}")
+
+    relatorio["fim"] = datetime.now(timezone.utc).isoformat()
+    return relatorio
+
+
+# ─── SCHEDULER AUTOMÁTICO ─────────────────────────────────────
+
+scheduler_jiang = AsyncIOScheduler()
+
+async def job_pipeline_jiang():
+    print(f"[{datetime.now()}] Rodando pipeline Jiang automático...")
+    await rodar_pipeline_jiang()
+
+scheduler_jiang.add_job(job_pipeline_jiang, "interval", hours=6)
+scheduler_jiang.start()
+
+
+# ─── ENDPOINTS ────────────────────────────────────────────────
+
+class PipelineJiangRequest(BaseModel):
+    mercados_manuais: list[dict] = []
+
+@app.post("/pipeline-jiang/rodar")
+async def endpoint_pipeline_jiang(body: PipelineJiangRequest = None):
+    """
+    Motor #51 — Dispara pipeline Professor Jiang manualmente.
+    Body opcional: { "mercados_manuais": [{"id": "...", "question": "...", "outcomePrices": ["0.6"]}] }
+    """
+    try:
+        mercados = body.mercados_manuais if body else []
+        relatorio = await rodar_pipeline_jiang(mercados_manuais=mercados if mercados else None)
+        return JSONResponse(content={"motor": "MOTOR_51_PIPELINE_JIANG", "relatorio": relatorio})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+@app.get("/pipeline-jiang/previsoes")
+async def endpoint_listar_previsoes(
+    fonte: str = None,
+    min_match_score: float = 0,
+    limit: int = 50
+):
+    """Lista previsões extraídas do Professor Jiang."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        query = "SELECT * FROM jiang_previsoes WHERE match_score >= ?"
+        params = [min_match_score]
+        if fonte:
+            query += " AND fonte = ?"
+            params.append(fonte)
+        query += " ORDER BY data_extracao DESC LIMIT ?"
+        params.append(limit)
+        c.execute(query, params)
+        previsoes = [dict(r) for r in c.fetchall()]
+        conn.close()
+        return JSONResponse(content={
+            "motor": "MOTOR_51_PIPELINE_JIANG",
+            "total": len(previsoes),
+            "previsoes": previsoes
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+@app.post("/pipeline-jiang/mapear-manual")
+async def endpoint_mapear_manual(request: Request):
+    """
+    Mapeia uma previsão manual para mercados Polymarket usando Claude.
+    Body: { "evento_previsto": "Trump wins 2024", "direcao": "YES", "confianca_pct": 80, "prazo": "Nov 2024" }
+    """
+    try:
+        body = await request.json()
+        mapeamento = await mapear_para_polymarket(body)
+        return JSONResponse(content={
+            "motor": "MOTOR_51_MAPEAMENTO_SEMANTICO",
+            "resultado": mapeamento
+        })
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
     
