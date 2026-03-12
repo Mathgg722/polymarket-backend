@@ -960,63 +960,19 @@ def cron_tick(db: Session = Depends(get_db)):
         except Exception as e:
             print(f"[cron] scan error: {e}")
 
-        whale_resp = None
-        try:
-            whale_resp = whale_scan(min_valor=10000, alertar=1, db=db)
-        except Exception as e:
-            print(f"[cron] whale scan error: {e}")
-
-        early_resp = {"status": "skipped_timeout"}
-
-        corr_resp = None
-        try:
-            corr_resp = correlations_divergencias(
-                min_corr=0.70,
-                min_move=3.0,
-                alertar=1,
-                db=db,
-            )
-        except Exception as e:
-            print(f"[cron] correlations error: {e}")
-
-        events_resp = None
-        try:
-            events_resp = get_events_upcoming(
-                horas=24,
-                alertar=1,
-                min_impacto="ALTO",
-                db=db,
-            )
-        except Exception as e:
-            print(f"[cron] events error: {e}")
-
-        military_resp = {"status": "skipped_timeout"}
-
-        contra_resp = None
-        try:
-            contra_resp = get_contradictions(
-                min_score=30.0,
-                alertar=1,
-                db=db,
-            )
-        except Exception as e:
-            print(f"[cron] contradictions error: {e}")
-
-        naval_resp = {"status": "skipped_timeout"}
-
         last = db.query(Snapshot).order_by(desc(Snapshot.timestamp)).first()
         return {
             "status": "ok",
             "tick_now": datetime.utcnow().isoformat(),
             "last_snapshot_timestamp": last.timestamp.isoformat() if last and last.timestamp else None,
             "scan": scan_resp if scan_resp else {"status": "error"},
-            "whales": whale_resp if whale_resp else {"status": "error"},
-            "early_alerts": early_resp if early_resp else {"status": "error"},
-            "correlations": corr_resp if corr_resp else {"status": "error"},
-            "events": events_resp if events_resp else {"status": "error"},
-            "military": military_resp if military_resp else {"status": "error"},
-            "contradictions": contra_resp if contra_resp else {"status": "error"},
-            "naval": naval_resp if naval_resp else {"status": "error"},
+            "whales": {"status": "skipped"},
+            "early_alerts": {"status": "skipped"},
+            "correlations": {"status": "skipped"},
+            "events": {"status": "skipped"},
+            "military": {"status": "skipped"},
+            "contradictions": {"status": "skipped"},
+            "naval": {"status": "skipped"},
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
