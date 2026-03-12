@@ -8380,9 +8380,14 @@ def detectar_manipulacao(
         }
     }
 
+class ManipulacaoRequest(BaseModel):
+    num_traders: int
+    volume_total: float
+    top_trader_percentual: float
+    odds_variacao_24h: float
 
 @app.post("/detectar-manipulacao")
-async def endpoint_detectar_manipulacao(request: Request):
+async def endpoint_detectar_manipulacao(body: ManipulacaoRequest):
     """
     Endpoint dedicado para detecção de manipulação de mercado.
 
@@ -8395,42 +8400,16 @@ async def endpoint_detectar_manipulacao(request: Request):
     }
     """
     try:
-        body = await request.json()
-
-        num_traders = body.get("num_traders")
-        volume_total = body.get("volume_total")
-        top_trader_percentual = body.get("top_trader_percentual")
-        odds_variacao_24h = body.get("odds_variacao_24h")
-
-        # Validação
-        campos_obrigatorios = {
-            "num_traders": num_traders,
-            "volume_total": volume_total,
-            "top_trader_percentual": top_trader_percentual,
-            "odds_variacao_24h": odds_variacao_24h
-        }
-        faltando = [k for k, v in campos_obrigatorios.items() if v is None]
-        if faltando:
-            return JSONResponse(
-                status_code=400,
-                content={"erro": f"Campos obrigatórios faltando: {faltando}"}
-            )
-
         resultado = detectar_manipulacao(
-            num_traders=int(num_traders),
-            volume_total=float(volume_total),
-            top_trader_percentual=float(top_trader_percentual),
-            odds_variacao_24h=float(odds_variacao_24h)
+            num_traders=body.num_traders,
+            volume_total=body.volume_total,
+            top_trader_percentual=body.top_trader_percentual,
+            odds_variacao_24h=body.odds_variacao_24h
         )
-
         return JSONResponse(content={
             "motor": "MOTOR_34_DETECTOR_MANIPULACAO",
             "resultado": resultado
         })
-
     except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"erro": str(e)}
-        )
+        return JSONResponse(status_code=500, content={"erro": str(e)})
     
