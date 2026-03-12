@@ -8322,7 +8322,7 @@ Responda SOMENTE com JSON válido:
             resp_ataque = requests.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": "claude-sonnet-4-6", "max_tokens": 500,
+                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 500,
                       "messages": [{"role": "user", "content": prompt_ataque}]},
                 timeout=20,
             )
@@ -8359,7 +8359,7 @@ Responda SOMENTE com JSON válido:
             resp_defesa = requests.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": "claude-sonnet-4-6", "max_tokens": 400,
+                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 400,
                       "messages": [{"role": "user", "content": prompt_defesa}]},
                 timeout=20,
             )
@@ -8424,7 +8424,7 @@ Responda SOMENTE com JSON: {{"sintese":"<resumo final>","recomendacao_tamanho_ap
         resp_sintese = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-sonnet-4-6", "max_tokens": 200,
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 200,
                   "messages": [{"role": "user", "content": prompt_sintese}]},
             timeout=15,
         )
