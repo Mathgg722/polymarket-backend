@@ -11,3 +11,4 @@ apscheduler
 youtube-transcript-api
 google-generativeai
 openai
+groq

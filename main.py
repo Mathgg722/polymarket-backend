@@ -10487,8 +10487,8 @@ async def buscar_mercados_polymarket_api(query: str) -> list[dict]:
 
 async def extrair_previsoes_haiku(texto: str, fonte: str, titulo: str) -> list[dict]:
     try:
-        from openai import OpenAI
-        client_ai = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        from groq import Groq
+        client_ai = Groq(api_key=os.environ.get("GROQ_API_KEY"))
         prompt = f"""Você é um extrator de previsões do Professor Jiang (Predictive History).
 Analise o texto e extraia TODAS as previsões específicas mencionadas.
 Fonte: {fonte} | Título: {titulo}
@@ -10497,7 +10497,7 @@ Retorne APENAS JSON válido sem markdown:
 {{"previsoes": [{{"previsao": "...", "evento_previsto": "...", "direcao": "YES ou NO", "confianca_pct": 75, "prazo": "Q2 2025"}}]}}
 Se não houver previsões: {{"previsoes": []}}"""
         response = client_ai.chat.completions.create(
-            model="gpt-4o-mini",
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}]
         )
         texto_resposta = response.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
@@ -10511,8 +10511,8 @@ Se não houver previsões: {{"previsoes": []}}"""
 
 async def mapear_para_polymarket(previsao: dict, mercados_disponiveis: list[dict] = None) -> dict:
     try:
-        from openai import OpenAI
-        client_ai = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        from groq import Groq
+        client_ai = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
         if not mercados_disponiveis:
             mercados_disponiveis = await buscar_mercados_polymarket_api(previsao.get("evento_previsto", ""))
@@ -10532,7 +10532,7 @@ Retorne APENAS JSON válido sem markdown:
 Se nenhum for relevante: {{"mercado_encontrado": false, "match_score": 0}}"""
 
         response = client_ai.chat.completions.create(
-            model="gpt-4o-mini",
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}]
         )
         texto_resposta = response.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
