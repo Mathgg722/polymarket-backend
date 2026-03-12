@@ -38,6 +38,7 @@ app.add_middleware(
 # ──────────────────────────────────────────────────────────────
 NEWSAPI_KEY        = os.environ.get("NEWSAPI_KEY", "")
 ANTHROPIC_KEY      = os.environ.get("ANTHROPIC_KEY", "")
+GEMINI_KEY = os.environ.get("GEMINI_KEY", "")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "") or os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 POLY_API_KEY       = os.environ.get("POLY_API_KEY", "")
@@ -131,6 +132,21 @@ def _polymarket_url(slug: str) -> str:
 # ──────────────────────────────────────────────────────────────
 # ROOT & STATUS
 # ──────────────────────────────────────────────────────────────
+
+def _ia_call(prompt: str, max_tokens: int = 400) -> str:
+    if not GEMINI_KEY:
+        return ""
+    try:
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+            headers={"content-type": "application/json"},
+            json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.3}},
+            timeout=15)
+        if resp.status_code == 200:
+            return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        print(f"[gemini] {e}")
+    return ""
 
 @app.get("/")
 def home():
