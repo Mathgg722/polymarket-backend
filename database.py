@@ -14,3 +14,4 @@ engine = create_engine(
     pool_timeout=30,
     pool_pre_ping=True
 )
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
