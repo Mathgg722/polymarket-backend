@@ -4,6 +4,7 @@
 # Reescrito do zero com motores limpos
 # ============================================================
 
+import httpx
 from fastapi.responses import JSONResponse, HTMLResponse  # o que já tiver
 import os
 import json
@@ -8900,6 +8901,464 @@ async def endpoint_smart_money(body: SmartMoneyRequest):
     try:
         resultado = detectar_smart_money(body.trades)
         return JSONResponse(content={"motor": "MOTOR_38_SMART_MONEY", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+    
+    # ══════════════════════════════════════════════════════════════
+# MOTORES #39, #40, #41, #42 — GEOPOLÍTICA PROFUNDA
+# #39 Saúde de Líderes Mundiais
+# #40 Rastreador de Aviões e Navios Militares
+# #41 Monitor de Sanções e Bloqueios
+# #42 Análise de Discursos de Bancos Centrais
+# ══════════════════════════════════════════════════════════════
+
+import httpx
+from bs4 import BeautifulSoup
+
+# ─── MOTOR #39 — SAÚDE DE LÍDERES ────────────────────────────
+
+LIDERES_MONITORADOS = {
+    "putin": "Vladimir Putin",
+    "xi": "Xi Jinping",
+    "khamenei": "Ali Khamenei",
+    "kim": "Kim Jong-un"
+}
+
+async def scrape_aparicoes_lider(nome: str) -> list[dict]:
+    """Busca aparições recentes do líder no Google News."""
+    try:
+        url = f"https://news.google.com/search?q={nome.replace(' ', '+')}&hl=en"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(resp.text, "html.parser")
+        artigos = soup.find_all("article")[:10]
+        resultados = []
+        for a in artigos:
+            titulo = a.get_text(strip=True)[:100]
+            if titulo:
+                resultados.append({"titulo": titulo})
+        return resultados
+    except Exception:
+        return []
+
+def analisar_saude_lider(
+    nome_lider: str,
+    dias_sem_aparecer: int,
+    ultima_aparicao_publica: str,
+    aparicoes_recentes: list[dict] = None,
+    sinais_manuais: list[str] = None
+) -> dict:
+    score_alerta = 0
+    sinais = []
+
+    # Dias sem aparecer
+    if dias_sem_aparecer >= 14:
+        score_alerta += 50
+        sinais.append({"sinal": "SUMICO_LONGO", "descricao": f"{dias_sem_aparecer} dias sem aparição pública — altamente suspeito"})
+    elif dias_sem_aparecer >= 7:
+        score_alerta += 30
+        sinais.append({"sinal": "SUMICO_MODERADO", "descricao": f"{dias_sem_aparecer} dias sem aparição — monitorar"})
+    elif dias_sem_aparecer >= 3:
+        score_alerta += 10
+        sinais.append({"sinal": "SUMICO_LEVE", "descricao": f"{dias_sem_aparecer} dias sem aparição"})
+
+    # Sinais manuais
+    palavras_criticas = ["hospital", "doente", "saúde", "médico", "cirurgia", "enfermo", "sick", "health", "hospital"]
+    if sinais_manuais:
+        for sinal in sinais_manuais:
+            if any(p in sinal.lower() for p in palavras_criticas):
+                score_alerta += 30
+                sinais.append({"sinal": "SINAL_SAUDE", "descricao": sinal})
+            else:
+                score_alerta += 10
+                sinais.append({"sinal": "SINAL_MANUAL", "descricao": sinal})
+
+    # Aparições recentes (scraping)
+    mencoes_saude = 0
+    if aparicoes_recentes:
+        for ap in aparicoes_recentes:
+            if any(p in ap.get("titulo", "").lower() for p in palavras_criticas):
+                mencoes_saude += 1
+        if mencoes_saude >= 3:
+            score_alerta += 40
+            sinais.append({"sinal": "MENCOES_SAUDE_MULTIPLAS", "descricao": f"{mencoes_saude} menções de saúde encontradas na mídia"})
+        elif mencoes_saude >= 1:
+            score_alerta += 20
+            sinais.append({"sinal": "MENCAO_SAUDE", "descricao": f"{mencoes_saude} menção de saúde na mídia"})
+
+    score_alerta = min(score_alerta, 100)
+
+    if score_alerta >= 70:
+        nivel = "CRITICO"
+        impacto = "ALTO risco de instabilidade política — mercados de geopolítica podem mover muito"
+    elif score_alerta >= 40:
+        nivel = "ATENCAO"
+        impacto = "Monitorar de perto — possível evento político em desenvolvimento"
+    elif score_alerta >= 20:
+        nivel = "OBSERVACAO"
+        impacto = "Sinal fraco — manter no radar"
+    else:
+        nivel = "NORMAL"
+        impacto = "Nenhum sinal anormal detectado"
+
+    return {
+        "lider": nome_lider,
+        "score_alerta": score_alerta,
+        "nivel": nivel,
+        "impacto_mercado": impacto,
+        "ultima_aparicao_publica": ultima_aparicao_publica,
+        "dias_sem_aparecer": dias_sem_aparecer,
+        "sinais_detectados": sinais,
+        "mencoes_saude_midia": mencoes_saude if aparicoes_recentes else "não verificado"
+    }
+
+
+# ─── MOTOR #40 — AVIÕES E NAVIOS MILITARES ───────────────────
+
+REGIOES_SENSIVEIS = {
+    "golfo_persico": {"lat_min": 23, "lat_max": 30, "lon_min": 48, "lon_max": 60, "descricao": "Golfo Pérsico"},
+    "mar_china": {"lat_min": 0, "lat_max": 25, "lon_min": 105, "lon_max": 125, "descricao": "Mar do Sul da China"},
+    "mar_negro": {"lat_min": 40, "lat_max": 47, "lon_min": 27, "lon_max": 42, "descricao": "Mar Negro"},
+    "estreito_taiwan": {"lat_min": 22, "lat_max": 26, "lon_min": 119, "lon_max": 122, "descricao": "Estreito de Taiwan"},
+    "baltico": {"lat_min": 53, "lat_max": 66, "lon_min": 10, "lon_max": 30, "descricao": "Mar Báltico"}
+}
+
+def analisar_movimentacao_militar(ativos: list[dict]) -> dict:
+    """
+    Espera lista de ativos militares:
+    [
+        {
+            "tipo": "porta_avioes",  # porta_avioes, submarino, aviao_reconhecimento, bombardeiro
+            "nome": "USS Gerald Ford",
+            "lat": 26.5,
+            "lon": 55.0,
+            "velocidade_nos": 18,
+            "destino_estimado": "Golfo Pérsico"
+        }
+    ]
+    """
+    alertas = []
+    score_tensao = 0
+
+    pesos_tipo = {
+        "porta_avioes": 40,
+        "submarino": 35,
+        "bombardeiro": 30,
+        "aviao_reconhecimento": 20,
+        "destroyer": 25,
+        "fragata": 15
+    }
+
+    for ativo in ativos:
+        lat = ativo.get("lat", 0)
+        lon = ativo.get("lon", 0)
+        tipo = ativo.get("tipo", "desconhecido").lower()
+        nome = ativo.get("nome", "Desconhecido")
+
+        # Verificar se está em região sensível
+        for regiao_key, regiao in REGIOES_SENSIVEIS.items():
+            if (regiao["lat_min"] <= lat <= regiao["lat_max"] and
+                    regiao["lon_min"] <= lon <= regiao["lon_max"]):
+                peso = pesos_tipo.get(tipo, 10)
+                score_tensao += peso
+                alertas.append({
+                    "ativo": nome,
+                    "tipo": tipo,
+                    "regiao": regiao["descricao"],
+                    "peso_tensao": peso,
+                    "coordenadas": {"lat": lat, "lon": lon}
+                })
+
+    score_tensao = min(score_tensao, 100)
+
+    if score_tensao >= 70:
+        nivel = "TENSAO_CRITICA"
+        previsao = "Concentração militar crítica — provável ação militar ou demonstração de força iminente"
+        mercados_afetados = ["Petróleo", "Ouro", "USD", "Mercados de conflito no Polymarket"]
+    elif score_tensao >= 40:
+        nivel = "TENSAO_ELEVADA"
+        previsao = "Movimentação significativa — monitorar mercados de geopolítica"
+        mercados_afetados = ["Petróleo", "Mercados de conflito no Polymarket"]
+    elif score_tensao >= 20:
+        nivel = "ATENCAO"
+        previsao = "Atividade acima do normal — possível exercício ou posicionamento estratégico"
+        mercados_afetados = ["Mercados de geopolítica no Polymarket"]
+    else:
+        nivel = "NORMAL"
+        previsao = "Nenhuma movimentação anormal detectada"
+        mercados_afetados = []
+
+    return {
+        "score_tensao_militar": score_tensao,
+        "nivel": nivel,
+        "previsao": previsao,
+        "mercados_afetados": mercados_afetados,
+        "ativos_em_regioes_sensiveis": alertas,
+        "total_ativos_analisados": len(ativos)
+    }
+
+
+# ─── MOTOR #41 — SANÇÕES E BLOQUEIOS ─────────────────────────
+
+async def scrape_noticias_sancoes(pais: str) -> list[str]:
+    """Busca notícias recentes de sanções para um país."""
+    try:
+        query = f"{pais} sanctions diplomatic meeting 2025"
+        url = f"https://news.google.com/search?q={query.replace(' ', '+')}&hl=en"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(resp.text, "html.parser")
+        artigos = soup.find_all("article")[:10]
+        return [a.get_text(strip=True)[:120] for a in artigos if a.get_text(strip=True)]
+    except Exception:
+        return []
+
+def analisar_sancoes(
+    pais_alvo: str,
+    eventos: list[dict],
+    noticias_scraped: list[str] = None
+) -> dict:
+    """
+    eventos: lista de eventos diplomáticos
+    [
+        {"tipo": "reuniao_diplomatica", "descricao": "Reunião G7 sobre Russia", "data": "2025-03-01"},
+        {"tipo": "votacao_onu", "descricao": "Votação no Conselho de Segurança", "data": "2025-03-02"},
+        {"tipo": "viagem_ministro", "descricao": "Secretário de Estado viaja para Genebra", "data": "2025-03-03"}
+    ]
+    """
+    score_risco = 0
+    sinais = []
+
+    pesos_eventos = {
+        "reuniao_diplomatica": 20,
+        "votacao_onu": 25,
+        "viagem_ministro": 15,
+        "declaracao_oficial": 20,
+        "exercicio_militar": 30,
+        "expulsao_diplomatica": 40,
+        "fechamento_embaixada": 50
+    }
+
+    for evento in eventos:
+        tipo = evento.get("tipo", "").lower()
+        peso = pesos_eventos.get(tipo, 10)
+        score_risco += peso
+        sinais.append({
+            "tipo": tipo,
+            "descricao": evento.get("descricao", ""),
+            "data": evento.get("data", ""),
+            "peso": peso
+        })
+
+    # Análise de notícias scraped
+    palavras_sancao = ["sanction", "embargo", "ban", "restrict", "freeze", "block", "penalt", "sanctioned"]
+    mencoes_sancao = 0
+    if noticias_scraped:
+        for noticia in noticias_scraped:
+            if any(p in noticia.lower() for p in palavras_sancao):
+                mencoes_sancao += 1
+        if mencoes_sancao >= 5:
+            score_risco += 35
+            sinais.append({"tipo": "MIDIA_SANCAO_INTENSA", "descricao": f"{mencoes_sancao} notícias sobre sanções encontradas", "peso": 35})
+        elif mencoes_sancao >= 2:
+            score_risco += 15
+            sinais.append({"tipo": "MIDIA_SANCAO_MODERADA", "descricao": f"{mencoes_sancao} notícias sobre sanções", "peso": 15})
+
+    score_risco = min(score_risco, 100)
+
+    if score_risco >= 70:
+        previsao = "SANCAO_IMINENTE"
+        descricao = "Múltiplos sinais fracos convergindo — anúncio de sanção provável em dias"
+    elif score_risco >= 40:
+        previsao = "RISCO_ELEVADO"
+        descricao = "Atividade diplomática intensa — monitorar de perto"
+    elif score_risco >= 20:
+        previsao = "OBSERVACAO"
+        descricao = "Sinais iniciais — pode não evoluir"
+    else:
+        previsao = "NORMAL"
+        descricao = "Nenhum sinal relevante detectado"
+
+    return {
+        "pais_alvo": pais_alvo,
+        "score_risco_sancao": score_risco,
+        "previsao": previsao,
+        "descricao": descricao,
+        "sinais_detectados": sinais,
+        "mencoes_midia": mencoes_sancao if noticias_scraped else "não verificado"
+    }
+
+
+# ─── MOTOR #42 — DISCURSOS DE BANCOS CENTRAIS ────────────────
+
+PALAVRAS_HAWKISH = [
+    "inflation", "tighten", "hike", "restrictive", "above target",
+    "persistent", "vigilant", "concerned", "overheat", "wage growth",
+    "inflação", "aperto", "alta", "restritivo", "acima da meta",
+    "persistente", "vigilante", "preocupado", "aquecimento"
+]
+
+PALAVRAS_DOVISH = [
+    "cut", "ease", "support", "below target", "slow", "weak",
+    "unemployment", "recession", "cautious", "pause", "flexible",
+    "corte", "afrouxamento", "suporte", "abaixo da meta", "fraco",
+    "desemprego", "recessão", "cauteloso", "pausa", "flexível"
+]
+
+PALAVRAS_NEUTRAS = [
+    "data dependent", "monitor", "assess", "evaluate", "balanced",
+    "dependente de dados", "monitorar", "avaliar", "equilibrado"
+]
+
+def analisar_discurso_banco_central(
+    banco: str,
+    texto_discurso: str,
+    discurso_anterior_tom: str = "NEUTRO"  # HAWKISH, DOVISH, NEUTRO
+) -> dict:
+    texto_lower = texto_discurso.lower()
+
+    # Contar ocorrências
+    count_hawkish = sum(1 for p in PALAVRAS_HAWKISH if p.lower() in texto_lower)
+    count_dovish = sum(1 for p in PALAVRAS_DOVISH if p.lower() in texto_lower)
+    count_neutro = sum(1 for p in PALAVRAS_NEUTRAS if p.lower() in texto_lower)
+
+    total = max(count_hawkish + count_dovish + count_neutro, 1)
+    score_hawkish = (count_hawkish / total) * 100
+    score_dovish = (count_dovish / total) * 100
+
+    # Tom atual
+    if count_hawkish > count_dovish * 1.5:
+        tom_atual = "HAWKISH"
+        previsao_taxa = "ALTA DE JUROS provável"
+        impacto = "Dólar sobe, bonds caem, mercados emergentes sob pressão"
+    elif count_dovish > count_hawkish * 1.5:
+        tom_atual = "DOVISH"
+        previsao_taxa = "CORTE DE JUROS ou pausa provável"
+        impacto = "Dólar cai, bonds sobem, mercados emergentes se beneficiam"
+    else:
+        tom_atual = "NEUTRO"
+        previsao_taxa = "Sem mudança clara — mercado aguarda próximos dados"
+        impacto = "Reação limitada esperada"
+
+    # Mudança de tom vs discurso anterior
+    mudanca_tom = tom_atual != discurso_anterior_tom
+    if mudanca_tom:
+        alerta_mudanca = f"⚠️ MUDANÇA DE TOM: {discurso_anterior_tom} → {tom_atual} — mercado pode não ter precificado ainda"
+    else:
+        alerta_mudanca = f"Tom consistente com discurso anterior ({discurso_anterior_tom})"
+
+    # Palavras encontradas
+    hawkish_encontradas = [p for p in PALAVRAS_HAWKISH if p.lower() in texto_lower]
+    dovish_encontradas = [p for p in PALAVRAS_DOVISH if p.lower() in texto_lower]
+
+    return {
+        "banco_central": banco,
+        "tom_atual": tom_atual,
+        "tom_anterior": discurso_anterior_tom,
+        "mudanca_tom": mudanca_tom,
+        "alerta": alerta_mudanca,
+        "previsao_taxa": previsao_taxa,
+        "impacto_mercado": impacto,
+        "scores": {
+            "hawkish_pct": round(score_hawkish, 1),
+            "dovish_pct": round(score_dovish, 1),
+            "palavras_hawkish_encontradas": hawkish_encontradas,
+            "palavras_dovish_encontradas": dovish_encontradas
+        }
+    }
+
+
+# ─── ENDPOINTS ────────────────────────────────────────────────
+
+class SaudeLiderRequest(BaseModel):
+    nome_lider: str
+    dias_sem_aparecer: int
+    ultima_aparicao_publica: str
+    sinais_manuais: list[str] = []
+    buscar_midia: bool = True
+
+@app.post("/saude-lider")
+async def endpoint_saude_lider(body: SaudeLiderRequest):
+    """
+    Motor #39 — Saúde de Líderes Mundiais.
+    Body: { "nome_lider": "Putin", "dias_sem_aparecer": 10,
+            "ultima_aparicao_publica": "2025-02-28", "sinais_manuais": ["cancelou reunião"], "buscar_midia": true }
+    """
+    try:
+        aparicoes = []
+        if body.buscar_midia:
+            aparicoes = await scrape_aparicoes_lider(body.nome_lider)
+        resultado = analisar_saude_lider(
+            nome_lider=body.nome_lider,
+            dias_sem_aparecer=body.dias_sem_aparecer,
+            ultima_aparicao_publica=body.ultima_aparicao_publica,
+            aparicoes_recentes=aparicoes,
+            sinais_manuais=body.sinais_manuais
+        )
+        return JSONResponse(content={"motor": "MOTOR_39_SAUDE_LIDER", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class MovimentacaoMilitarRequest(BaseModel):
+    ativos: list[dict]
+
+@app.post("/movimentacao-militar")
+async def endpoint_movimentacao_militar(body: MovimentacaoMilitarRequest):
+    """
+    Motor #40 — Rastreador de Aviões e Navios Militares.
+    Body: { "ativos": [{"tipo": "porta_avioes", "nome": "USS Gerald Ford", "lat": 26.5, "lon": 55.0}] }
+    """
+    try:
+        resultado = analisar_movimentacao_militar(body.ativos)
+        return JSONResponse(content={"motor": "MOTOR_40_MOVIMENTACAO_MILITAR", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class SancoesRequest(BaseModel):
+    pais_alvo: str
+    eventos: list[dict]
+    buscar_midia: bool = True
+
+@app.post("/monitor-sancoes")
+async def endpoint_monitor_sancoes(body: SancoesRequest):
+    """
+    Motor #41 — Monitor de Sanções e Bloqueios.
+    Body: { "pais_alvo": "Russia", "eventos": [{"tipo": "reuniao_diplomatica", "descricao": "...", "data": "2025-03-01"}], "buscar_midia": true }
+    """
+    try:
+        noticias = []
+        if body.buscar_midia:
+            noticias = await scrape_noticias_sancoes(body.pais_alvo)
+        resultado = analisar_sancoes(
+            pais_alvo=body.pais_alvo,
+            eventos=body.eventos,
+            noticias_scraped=noticias
+        )
+        return JSONResponse(content={"motor": "MOTOR_41_MONITOR_SANCOES", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class DiscursoBancoCentralRequest(BaseModel):
+    banco: str
+    texto_discurso: str
+    discurso_anterior_tom: str = "NEUTRO"
+
+@app.post("/analise-banco-central")
+async def endpoint_analise_banco_central(body: DiscursoBancoCentralRequest):
+    """
+    Motor #42 — Análise de Discursos de Bancos Centrais.
+    Body: { "banco": "Fed", "texto_discurso": "Inflation remains persistent above target...", "discurso_anterior_tom": "DOVISH" }
+    """
+    try:
+        resultado = analisar_discurso_banco_central(
+            banco=body.banco,
+            texto_discurso=body.texto_discurso,
+            discurso_anterior_tom=body.discurso_anterior_tom
+        )
+        return JSONResponse(content={"motor": "MOTOR_42_BANCO_CENTRAL", "resultado": resultado})
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
