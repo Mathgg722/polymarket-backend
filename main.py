@@ -977,6 +977,64 @@ def cron_tick(db: Session = Depends(get_db)):
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+@app.get("/cron/whales")
+def cron_whales(db: Session = Depends(get_db)):
+    try:
+        resp = whale_scan(min_valor=10000, alertar=1, db=db)
+        return {"status": "ok", "whales": resp}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/cron/alerts")
+def cron_alerts(db: Session = Depends(get_db)):
+    try:
+        early = None
+        try:
+            early = alerts_early(min_impact="ALTO", alertar=1, dry_run=0, db=db)
+        except Exception as e:
+            print(f"[cron/alerts] early: {e}")
+
+        military = None
+        try:
+            military = military_scan(min_impact="ALTO", alertar=1, usar_ia=0, db=db)
+        except Exception as e:
+            print(f"[cron/alerts] military: {e}")
+
+        naval = None
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            naval = loop.run_until_complete(naval_scan(alertar=1, db=db))
+            loop.close()
+        except Exception as e:
+            print(f"[cron/alerts] naval: {e}")
+
+        return {
+            "status": "ok",
+            "early_alerts": early if early else {"status": "error"},
+            "military": military if military else {"status": "error"},
+            "naval": naval if naval else {"status": "error"},
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/cron/correlations")
+def cron_correlations(db: Session = Depends(get_db)):
+    try:
+        corr = correlations_divergencias(min_corr=0.70, min_move=3.0, alertar=1, db=db)
+        contra = get_contradictions(min_score=30.0, alertar=1, db=db)
+        events = get_events_upcoming(horas=24, alertar=1, min_impacto="ALTO", db=db)
+        return {
+            "status": "ok",
+            "correlations": corr,
+            "contradictions": contra,
+            "events": events,
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+    
 # ══════════════════════════════════════════════════════════════
 # MOTOR 1 — SINAIS v4
 # Regras limpas:
