@@ -10487,9 +10487,8 @@ async def buscar_mercados_polymarket_api(query: str) -> list[dict]:
 
 async def extrair_previsoes_haiku(texto: str, fonte: str, titulo: str) -> list[dict]:
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=os.environ.get("GEMINI_KEY"))
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        from openai import OpenAI
+        client_ai = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
         prompt = f"""Você é um extrator de previsões do Professor Jiang (Predictive History).
 Analise o texto e extraia TODAS as previsões específicas mencionadas.
 Fonte: {fonte} | Título: {titulo}
@@ -10497,8 +10496,11 @@ Texto: {texto[:4000]}
 Retorne APENAS JSON válido sem markdown:
 {{"previsoes": [{{"previsao": "...", "evento_previsto": "...", "direcao": "YES ou NO", "confianca_pct": 75, "prazo": "Q2 2025"}}]}}
 Se não houver previsões: {{"previsoes": []}}"""
-        response = model.generate_content(prompt)
-        texto_resposta = response.text.strip().replace("```json", "").replace("```", "").strip()
+        response = client_ai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        texto_resposta = response.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         dados = json.loads(texto_resposta)
         return dados.get("previsoes", [])
     except Exception:
@@ -10509,9 +10511,8 @@ Se não houver previsões: {{"previsoes": []}}"""
 
 async def mapear_para_polymarket(previsao: dict, mercados_disponiveis: list[dict] = None) -> dict:
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=os.environ.get("GEMINI_KEY"))
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        from openai import OpenAI
+        client_ai = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
         if not mercados_disponiveis:
             mercados_disponiveis = await buscar_mercados_polymarket_api(previsao.get("evento_previsto", ""))
@@ -10530,8 +10531,11 @@ Retorne APENAS JSON válido sem markdown:
 {{"mercado_encontrado": true, "mercado_titulo": "...", "mercado_url": "https://polymarket.com/event/...", "match_score": 85, "justificativa": "...", "recomendacao": "COMPRAR YES"}}
 Se nenhum for relevante: {{"mercado_encontrado": false, "match_score": 0}}"""
 
-        response = model.generate_content(prompt)
-        texto_resposta = response.text.strip().replace("```json", "").replace("```", "").strip()
+        response = client_ai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        texto_resposta = response.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(texto_resposta)
     except Exception as e:
         return {"mercado_encontrado": False, "match_score": 0, "erro_debug": str(e)}
