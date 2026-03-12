@@ -9362,3 +9362,397 @@ async def endpoint_analise_banco_central(body: DiscursoBancoCentralRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
+# ══════════════════════════════════════════════════════════════
+# MOTORES #43, #44, #45 — EDGE DE MERCADO
+# #43 Arbitragem Polymarket vs Kalshi
+# #44 Detector de Mercados Órfãos
+# #45 Análise de Liquidez por Horário
+# ══════════════════════════════════════════════════════════════
+
+# ─── MOTOR #43 — ARBITRAGEM POLYMARKET VS KALSHI ─────────────
+
+KALSHI_API_BASE = "https://trading-api.kalshi.com/trade-api/v2"
+
+async def buscar_preco_kalshi(ticker: str) -> dict | None:
+    """Busca preço de um mercado na Kalshi via API pública."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{KALSHI_API_BASE}/markets/{ticker}",
+                headers={"Accept": "application/json"}
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                market = data.get("market", {})
+                return {
+                    "ticker": ticker,
+                    "yes_bid": market.get("yes_bid", 0) / 100,
+                    "yes_ask": market.get("yes_ask", 0) / 100,
+                    "no_bid": market.get("no_bid", 0) / 100,
+                    "no_ask": market.get("no_ask", 0) / 100,
+                    "volume": market.get("volume", 0),
+                    "titulo": market.get("title", ticker)
+                }
+    except Exception:
+        pass
+    return None
+
+def calcular_arbitragem(
+    evento: str,
+    poly_yes: float,
+    poly_no: float,
+    kalshi_yes: float,
+    kalshi_no: float,
+    valor_aposta: float = 100.0
+) -> dict:
+    oportunidades = []
+
+    # Cenário 1: Compra YES no mais barato, vende NO no mais caro
+    # Se poly_yes < kalshi_yes → compra YES na Poly, vende YES (= compra NO) na Kalshi
+    if poly_yes + kalshi_no < 0.98:  # margem de 2% para cobrir fees
+        lucro_pct = (1 - poly_yes - kalshi_no) * 100
+        lucro_usd = valor_aposta * (1 - poly_yes - kalshi_no)
+        oportunidades.append({
+            "estrategia": "Compra YES Polymarket + Compra NO Kalshi",
+            "custo_total": round((poly_yes + kalshi_no) * valor_aposta, 2),
+            "retorno_garantido": round(valor_aposta, 2),
+            "lucro_usd": round(lucro_usd, 2),
+            "lucro_pct": round(lucro_pct, 2),
+            "instrucoes": f"Compre YES na Polymarket a {poly_yes:.2f} + Compre NO na Kalshi a {kalshi_no:.2f}"
+        })
+
+    # Cenário 2: Inverso
+    if kalshi_yes + poly_no < 0.98:
+        lucro_pct = (1 - kalshi_yes - poly_no) * 100
+        lucro_usd = valor_aposta * (1 - kalshi_yes - poly_no)
+        oportunidades.append({
+            "estrategia": "Compra YES Kalshi + Compra NO Polymarket",
+            "custo_total": round((kalshi_yes + poly_no) * valor_aposta, 2),
+            "retorno_garantido": round(valor_aposta, 2),
+            "lucro_usd": round(lucro_usd, 2),
+            "lucro_pct": round(lucro_pct, 2),
+            "instrucoes": f"Compre YES na Kalshi a {kalshi_yes:.2f} + Compre NO na Polymarket a {poly_no:.2f}"
+        })
+
+    tem_arbitragem = len(oportunidades) > 0
+    melhor = max(oportunidades, key=lambda x: x["lucro_pct"]) if oportunidades else None
+
+    return {
+        "evento": evento,
+        "tem_arbitragem": tem_arbitragem,
+        "melhor_oportunidade": melhor,
+        "todas_oportunidades": oportunidades,
+        "precos": {
+            "polymarket": {"yes": poly_yes, "no": poly_no, "soma": round(poly_yes + poly_no, 3)},
+            "kalshi": {"yes": kalshi_yes, "no": kalshi_no, "soma": round(kalshi_yes + kalshi_no, 3)}
+        },
+        "diferenca_yes": round(abs(poly_yes - kalshi_yes) * 100, 2),
+        "alerta": f"Diferença de {abs(poly_yes - kalshi_yes)*100:.1f}% no YES entre plataformas" if tem_arbitragem else "Sem arbitragem detectada"
+    }
+
+
+# ─── MOTOR #44 — MERCADOS ÓRFÃOS ─────────────────────────────
+
+def detectar_mercado_orfao(
+    titulo_mercado: str,
+    volume_total: float,
+    num_traders: int,
+    dias_ate_resolucao: int,
+    importancia_evento: str,  # "ALTA", "MEDIA", "BAIXA"
+    volume_mercados_similares: float = None
+) -> dict:
+    score_edge = 0
+    sinais = []
+
+    # Volume baixo
+    if volume_total < 1000:
+        score_edge += 35
+        sinais.append({"sinal": "VOLUME_MUITO_BAIXO", "descricao": f"Volume ${volume_total:,.0f} — mercado negligenciado"})
+    elif volume_total < 5000:
+        score_edge += 20
+        sinais.append({"sinal": "VOLUME_BAIXO", "descricao": f"Volume ${volume_total:,.0f} — pouca atenção"})
+
+    # Poucos traders
+    if num_traders < 5:
+        score_edge += 30
+        sinais.append({"sinal": "TRADERS_ESCASSOS", "descricao": f"Apenas {num_traders} traders — mercado órfão"})
+    elif num_traders < 15:
+        score_edge += 15
+        sinais.append({"sinal": "TRADERS_POUCOS", "descricao": f"{num_traders} traders — baixa competição"})
+
+    # Evento importante chegando
+    pesos_importancia = {"ALTA": 25, "MEDIA": 15, "BAIXA": 5}
+    peso_imp = pesos_importancia.get(importancia_evento.upper(), 5)
+    if importancia_evento.upper() == "ALTA" and dias_ate_resolucao <= 7:
+        score_edge += peso_imp + 10
+        sinais.append({"sinal": "EVENTO_IMPORTANTE_PROXIMO", "descricao": f"Evento de alta importância em {dias_ate_resolucao} dias — ineficiência máxima"})
+    else:
+        score_edge += peso_imp
+
+    # Comparação com mercados similares
+    if volume_mercados_similares and volume_total < volume_mercados_similares * 0.1:
+        score_edge += 20
+        sinais.append({"sinal": "SUBVALORIZADO_VS_SIMILARES", "descricao": f"Volume {volume_mercados_similares/volume_total:.0f}x menor que mercados similares"})
+
+    score_edge = min(score_edge, 100)
+
+    if score_edge >= 70:
+        classificacao = "ORFAO_PERFEITO"
+        recomendacao = "Edge máximo — mercado negligenciado com evento importante. PRIORIDADE ALTA"
+    elif score_edge >= 45:
+        classificacao = "ORFAO_PARCIAL"
+        recomendacao = "Bom edge — pouca competição, vale analisar a fundo"
+    elif score_edge >= 25:
+        classificacao = "SUBATENDIDO"
+        recomendacao = "Edge moderado — monitorar e esperar mais ineficiência"
+    else:
+        classificacao = "NORMAL"
+        recomendacao = "Mercado com liquidez normal — edge limitado"
+
+    return {
+        "titulo": titulo_mercado,
+        "score_edge": score_edge,
+        "classificacao": classificacao,
+        "recomendacao": recomendacao,
+        "sinais": sinais,
+        "metricas": {
+            "volume_total": volume_total,
+            "num_traders": num_traders,
+            "dias_ate_resolucao": dias_ate_resolucao,
+            "importancia_evento": importancia_evento
+        }
+    }
+
+
+# ─── MOTOR #45 — LIQUIDEZ POR HORÁRIO ────────────────────────
+
+PERFIL_HORARIO = {
+    # UTC hour: {"liquidez": 0-100, "traders_ativos": "descrição", "edge_multiplier": float}
+    0:  {"liquidez": 20, "traders_ativos": "Apenas Ásia ativa", "edge_multiplier": 1.8},
+    1:  {"liquidez": 15, "traders_ativos": "Ásia early morning", "edge_multiplier": 2.0},
+    2:  {"liquidez": 15, "traders_ativos": "Ásia early morning", "edge_multiplier": 2.0},
+    3:  {"liquidez": 20, "traders_ativos": "Ásia peak", "edge_multiplier": 1.7},
+    4:  {"liquidez": 25, "traders_ativos": "Ásia peak + Europa acordando", "edge_multiplier": 1.6},
+    5:  {"liquidez": 30, "traders_ativos": "Europa early", "edge_multiplier": 1.5},
+    6:  {"liquidez": 40, "traders_ativos": "Europa abrindo", "edge_multiplier": 1.4},
+    7:  {"liquidez": 50, "traders_ativos": "Europa ativa", "edge_multiplier": 1.3},
+    8:  {"liquidez": 60, "traders_ativos": "Europa peak", "edge_multiplier": 1.2},
+    9:  {"liquidez": 65, "traders_ativos": "Europa peak", "edge_multiplier": 1.15},
+    10: {"liquidez": 70, "traders_ativos": "Europa + EUA early", "edge_multiplier": 1.1},
+    11: {"liquidez": 75, "traders_ativos": "EUA acordando", "edge_multiplier": 1.05},
+    12: {"liquidez": 80, "traders_ativos": "EUA + Europa overlap", "edge_multiplier": 1.0},
+    13: {"liquidez": 90, "traders_ativos": "EUA peak", "edge_multiplier": 0.9},
+    14: {"liquidez": 95, "traders_ativos": "EUA peak máximo", "edge_multiplier": 0.85},
+    15: {"liquidez": 100, "traders_ativos": "EUA peak máximo", "edge_multiplier": 0.8},
+    16: {"liquidez": 95, "traders_ativos": "EUA peak", "edge_multiplier": 0.85},
+    17: {"liquidez": 90, "traders_ativos": "EUA tarde", "edge_multiplier": 0.9},
+    18: {"liquidez": 80, "traders_ativos": "EUA tarde + Europa fechando", "edge_multiplier": 1.0},
+    19: {"liquidez": 70, "traders_ativos": "EUA noite", "edge_multiplier": 1.1},
+    20: {"liquidez": 55, "traders_ativos": "EUA noite", "edge_multiplier": 1.2},
+    21: {"liquidez": 40, "traders_ativos": "EUA late night", "edge_multiplier": 1.4},
+    22: {"liquidez": 30, "traders_ativos": "EUA dormindo", "edge_multiplier": 1.6},
+    23: {"liquidez": 25, "traders_ativos": "Madrugada global", "edge_multiplier": 1.7},
+}
+
+def analisar_liquidez_horario(
+    tipo_mercado: str,  # "politica_eua", "geopolitica", "crypto", "esportes", "economia"
+    hora_utc_atual: int = None
+) -> dict:
+    if hora_utc_atual is None:
+        hora_utc_atual = datetime.now(timezone.utc).hour
+
+    perfil_atual = PERFIL_HORARIO[hora_utc_atual % 24]
+
+    # Edge por tipo de mercado varia por horário
+    bonus_tipo = {
+        "politica_eua": {
+            "melhor_horario": [1, 2, 3, 22, 23],
+            "pior_horario": [13, 14, 15, 16],
+            "descricao": "Americanos dominam — madrugada UTC tem mais ineficiência"
+        },
+        "geopolitica": {
+            "melhor_horario": [0, 1, 2, 3, 4],
+            "pior_horario": [12, 13, 14],
+            "descricao": "Global — madrugada americana e europeia tem mais edge"
+        },
+        "crypto": {
+            "melhor_horario": [3, 4, 5],
+            "pior_horario": [14, 15, 16],
+            "descricao": "24/7 mas EUA dormindo = menos bots ativos = mais edge"
+        },
+        "esportes": {
+            "melhor_horario": [6, 7, 8],
+            "pior_horario": [19, 20, 21],
+            "descricao": "Antes dos jogos europeus = menos liquidez = mais edge"
+        },
+        "economia": {
+            "melhor_horario": [0, 1, 2, 22, 23],
+            "pior_horario": [13, 14, 15],
+            "descricao": "Dados econômicos saem durante dia EUA — madrugada tem mais edge"
+        }
+    }
+
+    info_tipo = bonus_tipo.get(tipo_mercado.lower(), {
+        "melhor_horario": [1, 2, 3],
+        "pior_horario": [14, 15, 16],
+        "descricao": "Horário padrão"
+    })
+
+    em_melhor_horario = hora_utc_atual in info_tipo["melhor_horario"]
+    em_pior_horario = hora_utc_atual in info_tipo["pior_horario"]
+
+    edge_score = perfil_atual["edge_multiplier"] * 50
+    if em_melhor_horario:
+        edge_score *= 1.3
+    if em_pior_horario:
+        edge_score *= 0.7
+    edge_score = min(round(edge_score), 100)
+
+    # Próximo melhor horário
+    horas_ate_melhor = None
+    proximo_melhor = None
+    for h in info_tipo["melhor_horario"]:
+        diff = (h - hora_utc_atual) % 24
+        if horas_ate_melhor is None or diff < horas_ate_melhor:
+            horas_ate_melhor = diff
+            proximo_melhor = h
+
+    # Ranking das 24h
+    ranking = []
+    for h in range(24):
+        p = PERFIL_HORARIO[h]
+        e = p["edge_multiplier"] * 50
+        if h in info_tipo["melhor_horario"]:
+            e *= 1.3
+        if h in info_tipo["pior_horario"]:
+            e *= 0.7
+        ranking.append({"hora_utc": f"{h:02d}:00", "edge_score": min(round(e), 100), "liquidez": p["liquidez"]})
+
+    ranking_sorted = sorted(ranking, key=lambda x: x["edge_score"], reverse=True)
+
+    if em_melhor_horario:
+        recomendacao = "AGORA É O MOMENTO — você está na janela de maior edge para este tipo de mercado"
+    elif em_pior_horario:
+        recomendacao = f"EVITE AGORA — liquidez máxima, pouco edge. Próxima janela ideal: {proximo_melhor:02d}:00 UTC ({horas_ate_melhor}h)"
+    elif edge_score >= 70:
+        recomendacao = f"BOM MOMENTO — edge elevado agora"
+    else:
+        recomendacao = f"Momento neutro. Melhor janela em {horas_ate_melhor}h ({proximo_melhor:02d}:00 UTC)"
+
+    return {
+        "tipo_mercado": tipo_mercado,
+        "hora_utc_atual": f"{hora_utc_atual:02d}:00",
+        "edge_score_atual": edge_score,
+        "recomendacao": recomendacao,
+        "liquidez_atual": perfil_atual["liquidez"],
+        "traders_ativos_agora": perfil_atual["traders_ativos"],
+        "em_melhor_horario": em_melhor_horario,
+        "proximo_melhor_horario": f"{proximo_melhor:02d}:00 UTC" if proximo_melhor else None,
+        "horas_ate_proximo_melhor": horas_ate_melhor,
+        "top_5_horarios_edge": ranking_sorted[:5],
+        "info_tipo_mercado": info_tipo["descricao"]
+    }
+
+
+# ─── ENDPOINTS ────────────────────────────────────────────────
+
+class ArbitragemRequest(BaseModel):
+    evento: str
+    poly_yes: float
+    poly_no: float
+    kalshi_yes: float = None
+    kalshi_no: float = None
+    kalshi_ticker: str = None
+    valor_aposta: float = 100.0
+
+@app.post("/arbitragem")
+async def endpoint_arbitragem(body: ArbitragemRequest):
+    """
+    Motor #43 — Arbitragem Polymarket vs Kalshi.
+    Body: { "evento": "Trump wins 2024", "poly_yes": 0.54, "poly_no": 0.48,
+            "kalshi_yes": 0.61, "kalshi_no": 0.41, "valor_aposta": 100 }
+    Ou use kalshi_ticker para buscar automaticamente da API Kalshi.
+    """
+    try:
+        kalshi_yes = body.kalshi_yes
+        kalshi_no = body.kalshi_no
+
+        # Tentar buscar da API Kalshi se ticker fornecido
+        kalshi_data = None
+        if body.kalshi_ticker:
+            kalshi_data = await buscar_preco_kalshi(body.kalshi_ticker)
+            if kalshi_data:
+                kalshi_yes = kalshi_data["yes_ask"]
+                kalshi_no = kalshi_data["no_ask"]
+
+        if kalshi_yes is None or kalshi_no is None:
+            return JSONResponse(status_code=400, content={
+                "erro": "Forneça kalshi_yes + kalshi_no ou um kalshi_ticker válido"
+            })
+
+        resultado = calcular_arbitragem(
+            evento=body.evento,
+            poly_yes=body.poly_yes,
+            poly_no=body.poly_no,
+            kalshi_yes=kalshi_yes,
+            kalshi_no=kalshi_no,
+            valor_aposta=body.valor_aposta
+        )
+
+        if kalshi_data:
+            resultado["kalshi_api_data"] = kalshi_data
+
+        return JSONResponse(content={"motor": "MOTOR_43_ARBITRAGEM", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class MercadoOrfaoRequest(BaseModel):
+    titulo_mercado: str
+    volume_total: float
+    num_traders: int
+    dias_ate_resolucao: int
+    importancia_evento: str
+    volume_mercados_similares: float = None
+
+@app.post("/mercado-orfao")
+async def endpoint_mercado_orfao(body: MercadoOrfaoRequest):
+    """
+    Motor #44 — Detector de Mercados Órfãos.
+    Body: { "titulo_mercado": "...", "volume_total": 800, "num_traders": 4,
+            "dias_ate_resolucao": 5, "importancia_evento": "ALTA" }
+    """
+    try:
+        resultado = detectar_mercado_orfao(
+            titulo_mercado=body.titulo_mercado,
+            volume_total=body.volume_total,
+            num_traders=body.num_traders,
+            dias_ate_resolucao=body.dias_ate_resolucao,
+            importancia_evento=body.importancia_evento,
+            volume_mercados_similares=body.volume_mercados_similares
+        )
+        return JSONResponse(content={"motor": "MOTOR_44_MERCADO_ORFAO", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
+
+class LiquidezHorarioRequest(BaseModel):
+    tipo_mercado: str
+    hora_utc_atual: int = None
+
+@app.post("/liquidez-horario")
+async def endpoint_liquidez_horario(body: LiquidezHorarioRequest):
+    """
+    Motor #45 — Análise de Liquidez por Horário.
+    Body: { "tipo_mercado": "politica_eua", "hora_utc_atual": 2 }
+    Tipos: politica_eua, geopolitica, crypto, esportes, economia
+    """
+    try:
+        resultado = analisar_liquidez_horario(
+            tipo_mercado=body.tipo_mercado,
+            hora_utc_atual=body.hora_utc_atual
+        )
+        return JSONResponse(content={"motor": "MOTOR_45_LIQUIDEZ_HORARIO", "resultado": resultado})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+    
