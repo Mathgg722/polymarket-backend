@@ -10774,19 +10774,25 @@ async def endpoint_listar_previsoes(
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
 
+class MapearManualRequest(BaseModel):
+    evento_previsto: str
+    direcao: str = "YES"
+    confianca_pct: float = 50
+    prazo: str = ""
+
 @app.post("/pipeline-jiang/mapear-manual")
-async def endpoint_mapear_manual(request: Request):
+async def endpoint_mapear_manual(body: MapearManualRequest):
     """
     Mapeia uma previsão manual para mercados Polymarket usando Claude.
     Body: { "evento_previsto": "Trump wins 2024", "direcao": "YES", "confianca_pct": 80, "prazo": "Nov 2024" }
     """
     try:
-        body = await request.json()
-        mapeamento = await mapear_para_polymarket(body)
+        mapeamento = await mapear_para_polymarket(body.dict())
         return JSONResponse(content={
             "motor": "MOTOR_51_MAPEAMENTO_SEMANTICO",
             "resultado": mapeamento
         })
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
+    
     
