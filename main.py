@@ -7968,3 +7968,285 @@ def press_scan(
         "alertas": alertas,
         "gerado_em": now.isoformat(),
     }
+# ══════════════════════════════════════════════════════════════
+# MOTOR #31 — MAPA DE CARTEIRAS VENCEDORAS
+# Identifica wallets que apostaram certo antes de eventos grandes
+# Quando essas wallets movem → você move junto
+# ══════════════════════════════════════════════════════════════
+
+_SMART_MONEY_CACHE: dict = {}  # wallet -> historico de acertos
+_SMART_MONEY_SEEN: set = set()
+
+
+def _smart_get_market_trades(market_slug: str) -> list:
+    """Busca trades recentes de um mercado via Polymarket API."""
+    try:
+        resp = requests.get(
+            f"https://data-api.polymarket.com/trades",
+            params={"market": market_slug, "limit": 100},
+            headers=HEADERS,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json() or []
+    except Exception as e:
+        print(f"[smart_money] trades {market_slug}: {e}")
+    return []
+
+
+def _smart_get_market_history(market_slug: str) -> list:
+    """Busca histórico de preços de um mercado."""
+    try:
+        resp = requests.get(
+            f"https://data-api.polymarket.com/prices-history",
+            params={"market": market_slug, "interval": "1d", "fidelity": 10},
+            headers=HEADERS,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("history", []) or []
+    except Exception as e:
+        print(f"[smart_money] history {market_slug}: {e}")
+    return []
+
+
+def _smart_identify_winners(db: Session) -> dict:
+    """
+    Identifica wallets vencedoras analisando snapshots históricos.
+    Uma wallet é 'smart money' se:
+    - Comprou quando preço estava baixo (<35%) E mercado resolveu YES
+    - Ou vendeu quando preço estava alto (>65%) E mercado resolveu NO
+    """
+    smart_wallets = {}
+
+    # Busca mercados já resolvidos no banco
+    resolved_markets = db.query(Market).filter(
+        Market.active == False,
+        Market.question != None,
+    ).limit(100).all()
+
+    for market in resolved_markets:
+        trades = _smart_get_market_trades(market.market_slug)
+        if not trades:
+            continue
+
+        # Detecta resultado do mercado (simplificado: último preço)
+        history = _smart_get_market_history(market.market_slug)
+        if not history:
+            continue
+
+        last_price = history[-1].get("p", 0.5) if history else 0.5
+        resolved_yes = last_price > 0.8  # Resolveu YES se último preço > 80%
+        resolved_no  = last_price < 0.2  # Resolveu NO se último preço < 20%
+
+        if not resolved_yes and not resolved_no:
+            continue  # Mercado ainda incerto
+
+        for trade in trades:
+            wallet = trade.get("maker", "") or trade.get("transactionHash", "")[:20]
+            if not wallet:
+                continue
+
+            price_at_trade = float(trade.get("price", 0.5))
+            side = trade.get("side", "").upper()  # BUY ou SELL
+            size = float(trade.get("size", 0))
+
+            # Detecta acerto
+            acertou = False
+            lucro_estimado = 0
+
+            if resolved_yes and side == "BUY" and price_at_trade < 0.35:
+                acertou = True
+                lucro_estimado = size * (last_price - price_at_trade)
+            elif resolved_no and side == "SELL" and price_at_trade > 0.65:
+                acertou = True
+                lucro_estimado = size * (price_at_trade - last_price)
+
+            if acertou:
+                if wallet not in smart_wallets:
+                    smart_wallets[wallet] = {
+                        "wallet": wallet,
+                        "acertos": 0,
+                        "lucro_total_estimado": 0,
+                        "mercados_acertados": [],
+                    }
+                smart_wallets[wallet]["acertos"] += 1
+                smart_wallets[wallet]["lucro_total_estimado"] += lucro_estimado
+                smart_wallets[wallet]["mercados_acertados"].append({
+                    "market": market.question[:60],
+                    "slug": market.market_slug,
+                    "price_entry": round(price_at_trade, 3),
+                    "resolved": "YES" if resolved_yes else "NO",
+                    "lucro": round(lucro_estimado, 2),
+                })
+
+    # Filtra só wallets com 2+ acertos
+    smart_wallets = {
+        k: v for k, v in smart_wallets.items()
+        if v["acertos"] >= 2
+    }
+
+    return smart_wallets
+
+
+def _smart_get_recent_moves(smart_wallets: dict, markets: list) -> list:
+    """
+    Detecta movimentos recentes das smart wallets em mercados ativos.
+    """
+    alertas = []
+    market_slugs = [m.market_slug for m in markets[:50]]  # Top 50 mercados
+
+    for slug in market_slugs:
+        trades = _smart_get_market_trades(slug)
+        if not trades:
+            continue
+
+        market_obj = next((m for m in markets if m.market_slug == slug), None)
+        if not market_obj:
+            continue
+
+        # Preço atual
+        yes_price, _ = _get_yes_no_prices(market_obj)
+
+        for trade in trades[:20]:  # Últimos 20 trades
+            wallet = trade.get("maker", "") or trade.get("transactionHash", "")[:20]
+            if wallet not in smart_wallets:
+                continue
+
+            uid = f"smart:{wallet[:15]}:{slug}:{trade.get('transactionHash','')[:10]}"
+            if uid in _SMART_MONEY_SEEN:
+                continue
+
+            price_trade = float(trade.get("price", 0.5))
+            side = trade.get("side", "").upper()
+            size = float(trade.get("size", 0))
+            timestamp = trade.get("timestamp", "")
+
+            wallet_info = smart_wallets[wallet]
+            score_confianca = min(wallet_info["acertos"] * 20, 100)
+
+            alertas.append({
+                "uid": uid,
+                "wallet": wallet[:20] + "...",
+                "wallet_acertos": wallet_info["acertos"],
+                "wallet_lucro_estimado": round(wallet_info["lucro_total_estimado"], 2),
+                "mercado": market_obj.question,
+                "slug": slug,
+                "side": side,
+                "price": round(price_trade, 3),
+                "yes_price_atual": yes_price,
+                "size_usdc": round(size, 2),
+                "score_confianca": score_confianca,
+                "nivel": "ALTO" if score_confianca >= 60 else "MEDIO",
+                "acao": f"COMPRAR_{'YES' if side == 'BUY' else 'NO'}",
+                "polymarket_url": _polymarket_url(slug),
+                "timestamp": timestamp,
+            })
+            _SMART_MONEY_SEEN.add(uid)
+
+    alertas.sort(key=lambda x: x["score_confianca"], reverse=True)
+    return alertas
+
+
+def _smart_telegram(alerta: dict) -> None:
+    nivel_emoji = "🚨" if alerta["nivel"] == "ALTO" else "⚠️"
+    side_emoji = "💚 COMPROU YES" if alerta["side"] == "BUY" else "🔴 COMPROU NO"
+
+    msg = (
+        f"{nivel_emoji} <b>SMART MONEY DETECTADO</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 Wallet com {alerta['wallet_acertos']} acertos históricos\n"
+        f"💰 Lucro estimado histórico: ${alerta['wallet_lucro_estimado']:,.0f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{side_emoji} @ {round(alerta['price']*100, 1)}%\n"
+        f"📊 Preço atual YES: {alerta['yes_price_atual']}%\n"
+        f"💵 Tamanho: ${alerta['size_usdc']:,.0f} USDC\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 Mercado: {alerta['mercado'][:80]}\n"
+        f"🎯 Confiança: {alerta['score_confianca']}%\n"
+        f"▶️ Ação: {alerta['acao']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <a href=\"{alerta['polymarket_url']}\">Ver mercado</a>"
+    )
+    _telegram_send(msg)
+
+
+@app.get("/smart-money/scan")
+def smart_money_scan(
+    min_acertos: int = Query(2, description="Mínimo de acertos históricos da wallet"),
+    alertar: int = Query(1),
+    db: Session = Depends(get_db),
+):
+    """
+    Motor #31 — Mapa de Carteiras Vencedoras (Smart Money)
+    Identifica wallets que apostaram certo antes de eventos grandes.
+    Quando essas wallets movem novamente → gera sinal.
+    """
+    now = datetime.utcnow()
+
+    # Identifica smart wallets pelo histórico
+    smart_wallets = _smart_identify_winners(db)
+
+    if not smart_wallets:
+        return {
+            "status": "ok",
+            "smart_wallets_encontradas": 0,
+            "alertas": [],
+            "msg": "Sem mercados resolvidos suficientes no banco ainda. Rode o cron por alguns dias.",
+            "gerado_em": now.isoformat(),
+        }
+
+    # Filtra por min_acertos
+    smart_wallets = {k: v for k, v in smart_wallets.items() if v["acertos"] >= min_acertos}
+
+    # Mercados ativos para monitorar
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(200).all()
+    )
+
+    # Detecta movimentos recentes
+    alertas = _smart_get_recent_moves(smart_wallets, markets)
+
+    # Envia alertas
+    alertas_enviados = 0
+    for alerta in alertas:
+        if alertar and alerta["score_confianca"] >= 40:
+            _smart_telegram(alerta)
+            alertas_enviados += 1
+
+    return {
+        "status": "ok",
+        "smart_wallets_encontradas": len(smart_wallets),
+        "top_wallets": sorted(
+            list(smart_wallets.values()),
+            key=lambda x: x["acertos"],
+            reverse=True
+        )[:10],
+        "alertas": alertas,
+        "alertas_enviados": alertas_enviados,
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/smart-money/wallets")
+def smart_money_wallets(
+    min_acertos: int = Query(2),
+    db: Session = Depends(get_db),
+):
+    """Lista as smart wallets identificadas e seus históricos."""
+    smart_wallets = _smart_identify_winners(db)
+    smart_wallets = {k: v for k, v in smart_wallets.items() if v["acertos"] >= min_acertos}
+
+    return {
+        "status": "ok",
+        "total": len(smart_wallets),
+        "wallets": sorted(
+            list(smart_wallets.values()),
+            key=lambda x: x["lucro_total_estimado"],
+            reverse=True
+        )[:20],
+    }
