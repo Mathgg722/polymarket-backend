@@ -1009,12 +1009,19 @@ def cron_alerts(db: Session = Depends(get_db)):
             loop.close()
         except Exception as e:
             print(f"[cron/alerts] naval: {e}")
+        
+        politicians_resp = None
+        try:
+            politicians_resp = politicians_scan(min_impact="ALTO", alertar=1, usar_ia=1, db=db)
+        except Exception as e:
+            print(f"[cron/alerts] politicians: {e}")
 
         return {
             "status": "ok",
             "early_alerts": early if early else {"status": "error"},
             "military": military if military else {"status": "error"},
             "naval": naval if naval else {"status": "error"},
+            "politicians": politicians_resp if politicians_resp else {"status": "error"},
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -7238,3 +7245,369 @@ async def naval_scan(alertar: int = 0, db=None) -> dict:
 @app.get("/naval/scan")
 async def naval_scan_endpoint(alertar: int = Query(0), db: Session = Depends(get_db)):
     return await naval_scan(alertar=alertar, db=db)
+
+# ══════════════════════════════════════════════════════════════
+# MOTOR #29 — RASTREADOR DE POLÍTICOS (X/Twitter + Google News)
+# Monitora senadores EUA, ministros Israel, generais Iran
+# Nitter RSS com fallback para Google News
+# ══════════════════════════════════════════════════════════════
+
+POLITICIANS = [
+    # EUA — Senadores chave
+    {"id": "senatemajldr",     "nome": "Mitch McConnell",   "cargo": "Senador EUA",        "regiao": "EUA",    "twitter": "senatemajldr"},
+    {"id": "chuckschumer",     "nome": "Chuck Schumer",     "cargo": "Senador EUA",        "regiao": "EUA",    "twitter": "SenSchumer"},
+    {"id": "marcorubio",       "nome": "Marco Rubio",       "cargo": "Sec. Estado EUA",    "regiao": "EUA",    "twitter": "marcorubio"},
+    {"id": "lindseygrahamsc",  "nome": "Lindsey Graham",    "cargo": "Senador EUA",        "regiao": "EUA",    "twitter": "LindseyGrahamSC"},
+    {"id": "realdonaldtrump",  "nome": "Donald Trump",      "cargo": "Presidente EUA",     "regiao": "EUA",    "twitter": "realDonaldTrump"},
+    {"id": "jd_vance",         "nome": "JD Vance",          "cargo": "VP EUA",             "regiao": "EUA",    "twitter": "JDVance"},
+    # Israel
+    {"id": "netanyahu",        "nome": "Benjamin Netanyahu","cargo": "PM Israel",          "regiao": "ISRAEL", "twitter": "netanyahu"},
+    {"id": "israelipm",        "nome": "Israel PM Office",  "cargo": "Gabinete Israel",    "regiao": "ISRAEL", "twitter": "IsraeliPM"},
+    {"id": "idfspokesperson",  "nome": "IDF Spokesperson",  "cargo": "Forças Israel",      "regiao": "ISRAEL", "twitter": "IDFSpokesperson"},
+    # Irã
+    {"id": "khamenei_ir",      "nome": "Ali Khamenei",      "cargo": "Líder Supremo Irã",  "regiao": "IRAN",   "twitter": "khamenei_ir"},
+    {"id": "irandiplomacy",    "nome": "Iran MFA",          "cargo": "Diplomacia Irã",     "regiao": "IRAN",   "twitter": "IranMFA"},
+    # Rússia/Ucrânia
+    {"id": "mfa_russia",       "nome": "MFA Russia",        "cargo": "Diplomacia Rússia",  "regiao": "RUSSIA", "twitter": "mfa_russia"},
+    {"id": "ukraine_mfa",      "nome": "Ukraine MFA",       "cargo": "Diplomacia Ucrânia", "regiao": "UKRAINE","twitter": "Ukraine_MFA"},
+    {"id": "zelenskyyua",      "nome": "Zelensky",          "cargo": "Presidente Ucrânia", "regiao": "UKRAINE","twitter": "ZelenskyyUa"},
+]
+
+NITTER_INSTANCES = [
+    "https://nitter.poast.org",
+    "https://nitter.privacydev.net",
+    "https://nitter.lucabased.xyz",
+]
+
+POLITICIAN_IMPACT_KEYWORDS = {
+    "GUERRA": ["war", "attack", "strike", "military", "troops", "invasion", "bomb", "missile", "weapon"],
+    "NUCLEAR": ["nuclear", "uranium", "warhead", "atomic", "enrichment", "bomb"],
+    "CEASEFIRE": ["ceasefire", "peace", "truce", "negotiations", "deal", "agreement", "withdraw"],
+    "SANCAO": ["sanction", "embargo", "ban", "freeze", "penalty", "restrict"],
+    "ESCALADA": ["escalate", "escalation", "retaliate", "retaliation", "warn", "threat", "ultimatum"],
+    "DESESCALADA": ["diplomacy", "dialogue", "talks", "meeting", "discuss", "cooperate"],
+}
+
+_POLITICIAN_SEEN: set = set()
+
+
+def _politician_fetch_nitter(politician: dict) -> list:
+    """Tenta buscar RSS do Nitter de múltiplas instâncias."""
+    posts = []
+    twitter_id = politician.get("twitter", "")
+    if not twitter_id:
+        return []
+
+    for instance in NITTER_INSTANCES:
+        try:
+            url = f"{instance}/{twitter_id}/rss"
+            resp = requests.get(url, headers=HEADERS, timeout=8)
+            if resp.status_code != 200:
+                continue
+            root = ET.fromstring(resp.content)
+            for item in root.findall(".//item")[:5]:
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                pub = (item.findtext("pubDate") or "").strip()
+                desc = (item.findtext("description") or "").strip()
+                if not title or not link:
+                    continue
+                uid = f"nitter:{twitter_id}:{link[-20:]}"
+                posts.append({
+                    "uid": uid,
+                    "texto": title + " " + desc[:200],
+                    "url": link,
+                    "published": pub,
+                    "fonte": "nitter",
+                    "instancia": instance,
+                })
+            if posts:
+                break  # Achou em uma instância, para
+        except Exception as e:
+            print(f"[politician] nitter {instance}/{twitter_id}: {e}")
+            continue
+
+    return posts
+
+
+def _politician_fetch_googlenews(politician: dict) -> list:
+    """Fallback: busca nome do político no Google News RSS."""
+    posts = []
+    nome = politician["nome"]
+    query = nome.replace(" ", "+")
+    try:
+        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        if resp.status_code != 200:
+            return []
+        root = ET.fromstring(resp.content)
+        for item in root.findall(".//item")[:5]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            pub = (item.findtext("pubDate") or "").strip()
+            if not title:
+                continue
+            uid = f"gnews:{politician['id']}:{title[:40]}"
+            posts.append({
+                "uid": uid,
+                "texto": title,
+                "url": link,
+                "published": pub,
+                "fonte": "google_news",
+                "instancia": "news.google.com",
+            })
+    except Exception as e:
+        print(f"[politician] gnews {nome}: {e}")
+    return posts
+
+
+def _politician_classify(texto: str) -> dict:
+    """Classifica impacto do post por keywords."""
+    text_lower = texto.lower()
+    categorias = []
+    keywords_found = []
+    max_score = 0
+
+    for cat, kws in POLITICIAN_IMPACT_KEYWORDS.items():
+        hits = [kw for kw in kws if kw in text_lower]
+        if hits:
+            categorias.append(cat)
+            keywords_found.extend(hits)
+            score = len(hits) * 15
+            if score > max_score:
+                max_score = score
+
+    max_score = min(max_score, 100)
+    nivel = (
+        "CRITICO" if max_score >= 60 else
+        "ALTO"    if max_score >= 40 else
+        "MEDIO"   if max_score >= 20 else
+        "BAIXO"
+    )
+
+    return {
+        "score": max_score,
+        "nivel": nivel,
+        "categorias": list(set(categorias)),
+        "keywords": list(set(keywords_found))[:6],
+    }
+
+
+def _politician_ia_analysis(texto: str, politician: dict, impact: dict) -> dict:
+    """Claude Haiku avalia impacto geopolítico do post."""
+    if not ANTHROPIC_KEY or impact["score"] < 20:
+        return {
+            "resumo": texto[:100],
+            "impacto_mercado": impact["nivel"],
+            "acao": "MONITORAR",
+            "confianca": 0.4,
+            "mercados_keywords": impact["keywords"],
+        }
+
+    prompt = f"""Você é analista de prediction markets e geopolítica.
+
+POLÍTICO: {politician['nome']} ({politician['cargo']}) — {politician['regiao']}
+POST/NOTÍCIA: {texto[:400]}
+KEYWORDS DETECTADAS: {', '.join(impact['keywords'])}
+
+Avalie o impacto nos prediction markets.
+Responda SOMENTE com JSON válido:
+{{"resumo":"<max 80 chars PT-BR>","impacto_mercado":"CRITICO|ALTO|MEDIO|BAIXO","acao":"COMPRAR_YES|COMPRAR_NO|MONITORAR|AGUARDAR","confianca":<0.0-1.0>,"mercados_keywords":["<kw1>","<kw2>"],"escalada":"SOBE|CAI|NEUTRO"}}"""
+
+    try:
+        resp = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 250,
+                  "messages": [{"role": "user", "content": prompt}]},
+            timeout=12,
+        )
+        if resp.status_code == 200:
+            raw = resp.json()["content"][0]["text"].replace("```json", "").replace("```", "").strip()
+            return json.loads(raw)
+    except Exception as e:
+        print(f"[politician_ia] {e}")
+
+    return {
+        "resumo": texto[:100],
+        "impacto_mercado": impact["nivel"],
+        "acao": "MONITORAR",
+        "confianca": 0.4,
+        "mercados_keywords": impact["keywords"],
+        "escalada": "NEUTRO",
+    }
+
+
+def _politician_match_markets(keywords: list, regiao: str, markets: list) -> list:
+    """Cruza keywords do post com mercados ativos."""
+    region_map = {
+        "EUA":     ["trump", "fed", "election", "congress", "senate", "tariff", "iran", "israel"],
+        "ISRAEL":  ["israel", "gaza", "hamas", "idf", "iran", "hezbollah", "netanyahu"],
+        "IRAN":    ["iran", "nuclear", "hormuz", "sanction", "oil", "irgc"],
+        "RUSSIA":  ["russia", "ukraine", "ceasefire", "putin", "nato"],
+        "UKRAINE": ["ukraine", "russia", "zelensky", "ceasefire", "nato", "war"],
+    }
+    all_kws = set(kw.lower() for kw in keywords + region_map.get(regiao, []))
+    matches = []
+    for m in markets:
+        q_lower = (m.question or "").lower()
+        hits = sum(1 for kw in all_kws if kw in q_lower)
+        if hits >= 2:
+            yes_price, _ = _get_yes_no_prices(m)
+            matches.append({"question": m.question, "slug": m.market_slug,
+                            "yes_price": yes_price, "polymarket_url": _polymarket_url(m.market_slug)})
+    matches.sort(key=lambda x: x.get("yes_price") or 0, reverse=True)
+    return matches[:3]
+
+
+def _politician_telegram(politician: dict, post: dict, impact: dict, ia: dict, markets: list) -> None:
+    nivel_emoji = {"CRITICO": "🚨🚨", "ALTO": "🚨", "MEDIO": "⚠️", "BAIXO": "ℹ️"}.get(ia.get("impacto_mercado", "MEDIO"), "⚠️")
+    escalada_emoji = {"SOBE": "📈", "CAI": "📉", "NEUTRO": "➡️"}.get(ia.get("escalada", "NEUTRO"), "➡️")
+    fonte_emoji = "🐦" if post["fonte"] == "nitter" else "📰"
+
+    mercados_txt = ""
+    for m in markets[:3]:
+        price = f"{m['yes_price']}%" if m.get("yes_price") else "?"
+        mercados_txt += f"\n• <a href=\"{m['polymarket_url']}\">{m['question'][:65]}</a> @ {price}"
+
+    msg = (
+        f"{nivel_emoji} <b>POLÍTICO DETECTADO — {politician['regiao']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{fonte_emoji} <b>{politician['nome']}</b> ({politician['cargo']})\n"
+        f"💬 {ia.get('resumo', post['texto'][:100])}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{escalada_emoji} Escalada: {ia.get('escalada','NEUTRO')} | Impacto: {ia.get('impacto_mercado','?')}\n"
+        f"🎯 Ação: {ia.get('acao','MONITORAR')} | Confiança: {round(ia.get('confianca',0)*100)}%\n"
+        f"🔑 Keywords: {', '.join(impact.get('keywords',[])[:5])}\n"
+    )
+    if markets:
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━\n🎯 <b>Mercados:</b>{mercados_txt}\n"
+    msg += (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <a href=\"{post['url']}\">Ver post original</a>\n"
+        f"⏰ {datetime.utcnow().strftime('%H:%M:%S')} UTC"
+    )
+    _telegram_send(msg)
+
+
+@app.get("/politicians/scan")
+def politicians_scan(
+    min_impact: str = Query("MEDIO", description="BAIXO, MEDIO, ALTO, CRITICO"),
+    alertar: int = Query(1),
+    usar_ia: int = Query(1),
+    regioes: str = Query(None, description="EUA,ISRAEL,IRAN,RUSSIA,UKRAINE"),
+    db: Session = Depends(get_db),
+):
+    """
+    Motor #29 — Rastreador de Políticos
+    Monitora X/Twitter via Nitter RSS + fallback Google News.
+    Avalia impacto geopolítico via Claude Haiku.
+    Cruza com mercados ativos do banco.
+    """
+    now = datetime.utcnow()
+    impact_rank = {"BAIXO": 1, "MEDIO": 2, "ALTO": 3, "CRITICO": 4}
+    min_rank = impact_rank.get(min_impact.upper(), 2)
+
+    pols_filtrados = POLITICIANS
+    if regioes:
+        regioes_list = [r.strip().upper() for r in regioes.split(",")]
+        pols_filtrados = [p for p in POLITICIANS if p["regiao"] in regioes_list]
+
+    markets = (
+        db.query(Market).join(Token)
+        .filter(Token.price > FILTER_MIN_PRICE, Token.price < FILTER_MAX_PRICE)
+        .filter((Market.end_date == None) | (Market.end_date > now))
+        .distinct().limit(500).all()
+    )
+
+    alertas = []
+    stats = {"politicos_escaneados": 0, "posts_novos": 0, "alertas_enviados": 0, "nitter_ok": 0, "gnews_ok": 0}
+
+    for politician in pols_filtrados:
+        stats["politicos_escaneados"] += 1
+
+        # Tenta Nitter primeiro
+        posts = _politician_fetch_nitter(politician)
+        if posts:
+            stats["nitter_ok"] += 1
+        else:
+            # Fallback Google News
+            posts = _politician_fetch_googlenews(politician)
+            if posts:
+                stats["gnews_ok"] += 1
+
+        time.sleep(0.3)
+
+        for post in posts:
+            uid = post["uid"]
+            if uid in _POLITICIAN_SEEN:
+                continue
+
+            impact = _politician_classify(post["texto"])
+            if impact_rank.get(impact["nivel"], 1) < min_rank:
+                _POLITICIAN_SEEN.add(uid)
+                continue
+
+            stats["posts_novos"] += 1
+
+            ia = _politician_ia_analysis(post["texto"], politician, impact) if usar_ia else {
+                "resumo": post["texto"][:100],
+                "impacto_mercado": impact["nivel"],
+                "acao": "MONITORAR",
+                "confianca": 0.4,
+                "mercados_keywords": impact["keywords"],
+                "escalada": "NEUTRO",
+            }
+
+            keywords_match = ia.get("mercados_keywords", []) + impact["keywords"]
+            markets_match = _politician_match_markets(keywords_match, politician["regiao"], markets)
+
+            alerta = {
+                "politico": politician["nome"],
+                "cargo": politician["cargo"],
+                "regiao": politician["regiao"],
+                "fonte": post["fonte"],
+                "texto": post["texto"][:300],
+                "url": post["url"],
+                "published": post["published"],
+                "impacto": impact["nivel"],
+                "impacto_score": impact["score"],
+                "keywords": impact["keywords"],
+                "resumo_ia": ia.get("resumo", ""),
+                "escalada": ia.get("escalada", "NEUTRO"),
+                "acao": ia.get("acao", "MONITORAR"),
+                "confianca": ia.get("confianca", 0.4),
+                "mercados_afetados": markets_match,
+                "total_mercados": len(markets_match),
+                "detectado_em": now.isoformat(),
+            }
+            alertas.append(alerta)
+
+            if alertar:
+                _politician_telegram(politician, post, impact, ia, markets_match)
+                stats["alertas_enviados"] += 1
+
+            _POLITICIAN_SEEN.add(uid)
+            if len(_POLITICIAN_SEEN) > 20000:
+                for old in list(_POLITICIAN_SEEN)[:3000]:
+                    _POLITICIAN_SEEN.discard(old)
+
+    alertas.sort(key=lambda x: x["impacto_score"], reverse=True)
+
+    return {
+        "status": "ok",
+        "politicos_monitorados": len(pols_filtrados),
+        "stats": stats,
+        "min_impact": min_impact,
+        "alertas": alertas,
+        "gerado_em": now.isoformat(),
+    }
+
+
+@app.get("/politicians/list")
+def politicians_list():
+    return {
+        "total": len(POLITICIANS),
+        "regioes": list({p["regiao"] for p in POLITICIANS}),
+        "politicos": POLITICIANS,
+    }
