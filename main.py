@@ -140,7 +140,7 @@ def _ia_call(prompt: str, max_tokens: int = 400) -> str:
         return ""
     try:
         resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
             headers={"content-type": "application/json"},
             json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.3}},
             timeout=15)
@@ -10489,7 +10489,7 @@ async def extrair_previsoes_haiku(texto: str, fonte: str, titulo: str) -> list[d
     try:
         import google.generativeai as genai
         genai.configure(api_key=os.environ.get("GEMINI_KEY"))
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         prompt = f"""Você é um extrator de previsões do Professor Jiang (Predictive History).
 Analise o texto e extraia TODAS as previsões específicas mencionadas.
 Fonte: {fonte} | Título: {titulo}
@@ -10511,7 +10511,7 @@ async def mapear_para_polymarket(previsao: dict, mercados_disponiveis: list[dict
     try:
         import google.generativeai as genai
         genai.configure(api_key=os.environ.get("GEMINI_KEY"))
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
 
         if not mercados_disponiveis:
             mercados_disponiveis = await buscar_mercados_polymarket_api(previsao.get("evento_previsto", ""))
