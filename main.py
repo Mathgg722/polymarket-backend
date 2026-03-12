@@ -10471,104 +10471,8 @@ async def buscar_substack(url: str) -> list[dict]:
 
 # ─── CLAUDE HAIKU — EXTRAÇÃO DE PREVISÕES ────────────────────
 
-async def extrair_previsoes_haiku(texto: str, fonte: str, titulo: str) -> list[dict]:
-    """Usa Claude Haiku para extrair previsões estruturadas do texto."""
-    try:
-        prompt = f"""Você é um extrator de previsões do Professor Jiang (Predictive History).
-
-Analise o seguinte texto e extraia TODAS as previsões específicas mencionadas.
-
-Fonte: {fonte}
-Título: {titulo}
-
-Texto:
-{texto[:4000]}
-
-Retorne APENAS um JSON válido com esta estrutura (sem texto extra, sem markdown):
-{{
-  "previsoes": [
-    {{
-      "previsao": "descrição clara da previsão",
-      "evento_previsto": "evento específico em uma frase curta",
-      "direcao": "YES ou NO",
-      "confianca_pct": 75,
-      "prazo": "data ou período estimado (ex: Q2 2025, antes de junho 2025)"
-    }}
-  ]
-}}
-
-Se não houver previsões claras, retorne {{"previsoes": []}}"""
-
-        response = ANTHROPIC_CLIENT.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        texto_resposta = response.content[0].text.strip()
-        texto_resposta = texto_resposta.replace("```json", "").replace("```", "").strip()
-        dados = json.loads(texto_resposta)
-        return dados.get("previsoes", [])
-    except Exception as e:
-        return []
-
-
-# ─── CLAUDE — MAPEAMENTO PARA POLYMARKET ─────────────────────
-
-async def mapear_para_polymarket(previsao: dict, mercados_disponiveis: list[dict] = None) -> dict:
-    """
-    Usa Claude para mapear uma previsão para o mercado Polymarket mais relevante.
-    Substitui busca por keyword — Claude analisa semanticamente.
-    """
-    try:
-        # Buscar mercados da API Polymarket se não fornecidos
-        if not mercados_disponiveis:
-            mercados_disponiveis = await buscar_mercados_polymarket_api(previsao["evento_previsto"])
-
-        contexto_mercados = ""
-        if mercados_disponiveis:
-            contexto_mercados = "Mercados disponíveis no Polymarket:\n"
-            for m in mercados_disponiveis[:20]:
-                contexto_mercados += f"- [{m.get('id','')}] {m.get('question', '')} (preço YES: {m.get('outcomePrices', ['?'])[0]})\n"
-
-        prompt = f"""Você é um especialista em Polymarket.
-
-Previsão do Professor Jiang:
-- Evento: {previsao['evento_previsto']}
-- Direção: {previsao['direcao']}
-- Prazo: {previsao.get('prazo', 'não especificado')}
-- Confiança: {previsao.get('confianca_pct', 50)}%
-
-{contexto_mercados}
-
-Tarefa: Identifique o mercado Polymarket que MELHOR corresponde a esta previsão.
-Analise semanticamente — não use apenas keywords, entenda o CONTEXTO e SIGNIFICADO.
-
-Retorne APENAS JSON válido (sem markdown):
-{{
-  "mercado_encontrado": true,
-  "mercado_titulo": "título do mercado",
-  "mercado_id": "id do mercado",
-  "mercado_url": "https://polymarket.com/event/...",
-  "match_score": 85,
-  "justificativa": "por que este mercado corresponde à previsão",
-  "recomendacao": "COMPRAR YES / COMPRAR NO / AGUARDAR"
-}}
-
-Se nenhum mercado for relevante: {{"mercado_encontrado": false, "match_score": 0}}"""
-
-        response = ANTHROPIC_CLIENT.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        texto_resposta = response.content[0].text.strip()
-        texto_resposta = texto_resposta.replace("```json", "").replace("```", "").strip()
-        return json.loads(texto_resposta)
-    except Exception:
-        return {"mercado_encontrado": False, "match_score": 0}
-
 async def buscar_mercados_polymarket_api(query: str) -> list[dict]:
-    """Busca mercados abertos no Polymarket — sem filtro, deixa o Claude decidir."""
+    """Busca mercados abertos no Polymarket."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
@@ -10580,6 +10484,57 @@ async def buscar_mercados_polymarket_api(query: str) -> list[dict]:
     except Exception:
         pass
     return []
+
+async def extrair_previsoes_haiku(texto: str, fonte: str, titulo: str) -> list[dict]:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = f"""Você é um extrator de previsões do Professor Jiang (Predictive History).
+Analise o texto e extraia TODAS as previsões específicas mencionadas.
+Fonte: {fonte} | Título: {titulo}
+Texto: {texto[:4000]}
+Retorne APENAS JSON válido sem markdown:
+{{"previsoes": [{{"previsao": "...", "evento_previsto": "...", "direcao": "YES ou NO", "confianca_pct": 75, "prazo": "Q2 2025"}}]}}
+Se não houver previsões: {{"previsoes": []}}"""
+        response = model.generate_content(prompt)
+        texto_resposta = response.text.strip().replace("```json", "").replace("```", "").strip()
+        dados = json.loads(texto_resposta)
+        return dados.get("previsoes", [])
+    except Exception:
+        return []
+
+
+# ─── CLAUDE — MAPEAMENTO PARA POLYMARKET ─────────────────────
+
+async def mapear_para_polymarket(previsao: dict, mercados_disponiveis: list[dict] = None) -> dict:
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        if not mercados_disponiveis:
+            mercados_disponiveis = await buscar_mercados_polymarket_api(previsao.get("evento_previsto", ""))
+
+        contexto_mercados = ""
+        if mercados_disponiveis:
+            contexto_mercados = "Mercados disponíveis no Polymarket:\n"
+            for m in mercados_disponiveis[:30]:
+                contexto_mercados += f"- {m.get('question', '')}\n"
+
+        prompt = f"""Você é um especialista em Polymarket.
+Previsão: {previsao.get('evento_previsto')} | Direção: {previsao.get('direcao')} | Prazo: {previsao.get('prazo')}
+{contexto_mercados}
+Identifique o mercado que MELHOR corresponde semanticamente.
+Retorne APENAS JSON válido sem markdown:
+{{"mercado_encontrado": true, "mercado_titulo": "...", "mercado_url": "https://polymarket.com/event/...", "match_score": 85, "justificativa": "...", "recomendacao": "COMPRAR YES"}}
+Se nenhum for relevante: {{"mercado_encontrado": false, "match_score": 0}}"""
+
+        response = model.generate_content(prompt)
+        texto_resposta = response.text.strip().replace("```json", "").replace("```", "").strip()
+        return json.loads(texto_resposta)
+    except Exception as e:
+        return {"mercado_encontrado": False, "match_score": 0, "erro_debug": str(e)}
 
 
 # ─── PIPELINE PRINCIPAL ───────────────────────────────────────
