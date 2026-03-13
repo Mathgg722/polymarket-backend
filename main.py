@@ -25,6 +25,9 @@ from models import Base, Market, Token, Snapshot, Trade, Signal
 
 Base.metadata.create_all(bind=engine)
 
+import asyncio
+_db_semaphore = asyncio.Semaphore(2)  # max 2 requests com banco ao mesmo tempo
+
 app = FastAPI(title="PolySignal API", version="4.0")
 
 app.add_middleware(
@@ -77,6 +80,7 @@ _LAST_ALERT_SENT_AT = None
 def get_db():
     db = SessionLocal()
     try:
+        db.execute(text("SET statement_timeout = '15s'"))
         yield db
     finally:
         db.close()
