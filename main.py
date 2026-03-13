@@ -1116,6 +1116,8 @@ def _last_signal_cooldown(db: Session, slug: str, tipo_prefix: str, cooldown_min
     )
 
 
+_signals_scan_cache = {"result": None, "at": None}
+
 @app.api_route("/signals/scan", methods=["GET", "POST"])
 def signals_scan(
     limit_markets: int = 300,
@@ -1128,6 +1130,11 @@ def signals_scan(
     Movimento mínimo: 3% em 10min.
     Filtros: volume > $10k, preço 10%-90%, direção consistente.
     """
+    # Cache de 60 segundos para evitar hammer no banco
+    global _signals_scan_cache
+    now = datetime.utcnow()
+    if _signals_scan_cache["at"] and (now - _signals_scan_cache["at"]).total_seconds() < 60:
+        return _signals_scan_cache["result"]
     now = datetime.utcnow()
     created = errors = scanned = skipped_filters = 0
     preview = []
@@ -1258,7 +1265,7 @@ def signals_scan(
             continue
 
     db.commit()
-    return {
+    result = {
         "status": "ok",
         "scanned_markets": scanned,
         "created_signals": created,
@@ -1267,6 +1274,9 @@ def signals_scan(
         "preview": preview,
         "atualizado_em": now.isoformat(),
     }
+    _signals_scan_cache["result"] = result
+    _signals_scan_cache["at"] = now
+    return result
 
 
 @app.get("/signals")
@@ -3702,6 +3712,7 @@ def alerts_test():
 
 @app.get("/alerts/run")
 def alerts_run(minutes: int = 15, limit: int = 10, dry_run: int = 0, db: Session = Depends(get_db)):
+    return {"status": "disabled", "reason": "temporariamente desabilitado para estabilizar o banco"}
     global _LAST_ALERT_SENT_AT
     now = datetime.utcnow()
     cutoff = now - timedelta(minutes=max(int(minutes), 1))
@@ -11745,4 +11756,4 @@ async def endpoint_dead_cat(body: DeadCatRequest):
         return JSONResponse(content={"motor": "MOTOR_60_DEAD_CAT", "resultado": resultado})
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
-    
+        
