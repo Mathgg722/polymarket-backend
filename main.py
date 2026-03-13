@@ -2494,8 +2494,7 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
     results.sort(key=lambda x: x["master_score"], reverse=True)
     top = results[:limit]
 
-    import json
-    content = {
+    return {
         "modelo": "MASTER v4 — Market-Adaptive",
         "total_analisados": stats["total_analisados"],
         "filtrados_por_volume": stats["total_filtrados"],
@@ -2509,7 +2508,6 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
         "previsoes": top,
         "gerado_em": now.isoformat(),
     }
-    return JSONResponse(content=json.loads(json.dumps(content, ensure_ascii=False, default=str)), headers={"Content-Type": "application/json; charset=utf-8"})
 
 
 # ══════════════════════════════════════════════════════════════
@@ -11743,3 +11741,4 @@ async def endpoint_dead_cat(body: DeadCatRequest):
         return JSONResponse(content={"motor": "MOTOR_60_DEAD_CAT", "resultado": resultado})
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
+    
