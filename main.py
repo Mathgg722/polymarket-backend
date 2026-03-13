@@ -2439,7 +2439,7 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
                 stats["total_analisados"] += 1
 
                 # FILTRO: confiança mínima elevada para 0.45
-                if analysis["confidence"] < 0.45:
+                if analysis["confidence"] < 0.25:
                     continue
                 if analysis["signal"] in ("NEUTRAL", "INSUFFICIENT_DATA", "NO_CORRELATION"):
                     continue
@@ -2447,8 +2447,8 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
                 predicted = analysis.get("predicted_price", current * 100)
                 edge = round(predicted - current * 100, 1)
 
-                # FILTRO: edge mínimo de 3%
-                if abs(edge) < 3.0:
+                # FILTRO: edge mínimo de 1%
+                if abs(edge) < 1.0:
                     continue
 
                 master_score = round(
@@ -2458,7 +2458,7 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
                     1
                 )
 
-                if master_score < 45:
+                if master_score < 30:
                     continue
 
                 conviction = (
@@ -2778,16 +2778,16 @@ async def get_recomendacoes(
                     else _master_inter_analysis(token_prices, token.token_id, price)
                 )
 
-                if analysis["confidence"] < 0.45 or analysis["signal"] in ("NEUTRAL", "INSUFFICIENT_DATA", "NO_CORRELATION"):
+                if analysis["confidence"] < 0.25 or analysis["signal"] in ("NEUTRAL", "INSUFFICIENT_DATA", "NO_CORRELATION"):
                     continue
 
                 predicted = analysis.get("predicted_price", price * 100)
                 edge = round(predicted - price * 100, 1)
-                if abs(edge) < 3:
+                if abs(edge) < 1:
                     continue
 
                 master_score = round(analysis["confidence"] * 50 + min(abs(edge) * 2.5, 35) + (15 if mode == "INTER" else 5), 1)
-                if master_score < 45:
+                if master_score < 30:
                     continue
 
                 slug = market.market_slug or market.question[:40]
