@@ -60,10 +60,10 @@ HEADERS   = {
 # ──────────────────────────────────────────────────────────────
 # FILTROS UNIVERSAIS — aplicados em TODOS os motores
 # ──────────────────────────────────────────────────────────────
-FILTER_MIN_PRICE    = 0.10   # 10% — abaixo disso mercado quase morto
-FILTER_MAX_PRICE    = 0.90   # 90% — acima disso mercado quase resolvido
-FILTER_MIN_VOLUME   = 10000  # $10k mínimo de volume total apostado
-FILTER_MIN_SNAPS    = 20     # mínimo de snapshots para análise confiável
+FILTER_MIN_PRICE    = 0.05   # 10% — abaixo disso mercado quase morto
+FILTER_MAX_PRICE    = 0.95   # 90% — acima disso mercado quase resolvido
+FILTER_MIN_VOLUME   = 1000  # $10k mínimo de volume total apostado
+FILTER_MIN_SNAPS    = 5     # mínimo de snapshots para análise confiável
 
 # ──────────────────────────────────────────────────────────────
 # ESTADO GLOBAL
@@ -11742,4 +11742,3 @@ async def endpoint_dead_cat(body: DeadCatRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
     
-
