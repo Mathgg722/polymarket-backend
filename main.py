@@ -26,9 +26,16 @@ from models import Base, Market, Token, Snapshot, Trade, Signal
 Base.metadata.create_all(bind=engine)
 
 import asyncio
+import json as _json
 _db_semaphore = asyncio.Semaphore(2)  # max 2 requests com banco ao mesmo tempo
 
-app = FastAPI(title="PolySignal API", version="4.0")
+from fastapi.responses import ORJSONResponse
+
+class UTF8JSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return _json.dumps(content, ensure_ascii=False, default=str).encode("utf-8")
+
+app = FastAPI(title="PolySignal API", version="4.0", default_response_class=UTF8JSONResponse)
 
 app.add_middleware(
     CORSMiddleware,
@@ -11756,4 +11763,4 @@ async def endpoint_dead_cat(body: DeadCatRequest):
         return JSONResponse(content={"motor": "MOTOR_60_DEAD_CAT", "resultado": resultado})
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
-        
+    
