@@ -10682,8 +10682,8 @@ async def job_pipeline_jiang():
     print(f"[{datetime.now()}] Rodando pipeline Jiang automático...")
     await rodar_pipeline_jiang()
 
-scheduler_jiang.add_job(job_pipeline_jiang, "interval", hours=6)
-scheduler_jiang.start()
+# scheduler_jiang.add_job(job_pipeline_jiang, "interval", hours=6)
+# scheduler_jiang.start()  # desabilitado temporariamente para liberar conexoes
 
 
 # ─── ENDPOINTS ────────────────────────────────────────────────
