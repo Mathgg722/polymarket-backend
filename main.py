@@ -29,9 +29,14 @@ import asyncio
 import json as _json
 _db_semaphore = asyncio.Semaphore(2)  # max 2 requests com banco ao mesmo tempo
 
-from fastapi.responses import ORJSONResponse
+# Fix encoding UTF-8
+import fastapi.encoders as _enc
+_orig_jsonable = _enc.jsonable_encoder
+def _jsonable_encoder_utf8(obj, **kwargs):
+    return _orig_jsonable(obj, **kwargs)
 
 class UTF8JSONResponse(JSONResponse):
+    media_type = "application/json; charset=utf-8"
     def render(self, content) -> bytes:
         return _json.dumps(content, ensure_ascii=False, default=str).encode("utf-8")
 
@@ -2483,10 +2488,10 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
                     continue
 
                 conviction = (
-                    "🟢 FORTE" if master_score >= 80 else
-                    "🟡 ALTA" if master_score >= 65 else
-                    "🟠 MÉDIA" if master_score >= 45 else
-                    "⚪ FRACA"
+                    "[FORTE]" if master_score >= 80 else
+                    "[ALTA]" if master_score >= 65 else
+                    "[MEDIA]" if master_score >= 45 else
+                    "[FRACA]"
                 )
 
                 results.append({
@@ -2516,7 +2521,7 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
     top = results[:limit]
 
     return {
-        "modelo": "MASTER v4 — Market-Adaptive",
+        "modelo": "MASTER v4 - Market-Adaptive",
         "total_analisados": stats["total_analisados"],
         "filtrados_por_volume": stats["total_filtrados"],
         "mercados_calmos": stats["total_calmo"],
