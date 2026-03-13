@@ -27,20 +27,9 @@ Base.metadata.create_all(bind=engine)
 
 import asyncio
 import json as _json
-_db_semaphore = asyncio.Semaphore(2)  # max 2 requests com banco ao mesmo tempo
+_db_semaphore = asyncio.Semaphore(2)
 
-# Fix encoding UTF-8
-import fastapi.encoders as _enc
-_orig_jsonable = _enc.jsonable_encoder
-def _jsonable_encoder_utf8(obj, **kwargs):
-    return _orig_jsonable(obj, **kwargs)
-
-class UTF8JSONResponse(JSONResponse):
-    media_type = "application/json; charset=utf-8"
-    def render(self, content) -> bytes:
-        return _json.dumps(content, ensure_ascii=False, default=str).encode("utf-8")
-
-app = FastAPI(title="PolySignal API", version="4.0", default_response_class=UTF8JSONResponse)
+app = FastAPI(title="PolySignal API", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -11768,4 +11757,3 @@ async def endpoint_dead_cat(body: DeadCatRequest):
         return JSONResponse(content={"motor": "MOTOR_60_DEAD_CAT", "resultado": resultado})
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
-    
