@@ -25,7 +25,12 @@ from models import Base, Market, Token, Snapshot, Trade, Signal
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="PolySignal API", version="4.0")
+class UTF8JSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        import json
+        return json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+app = FastAPI(title="PolySignal API", version="4.0", default_response_class=UTF8JSONResponse)
 
 app.add_middleware(
     CORSMiddleware,
