@@ -28,7 +28,7 @@ Base.metadata.create_all(bind=engine)
 class UTF8JSONResponse(JSONResponse):
     def render(self, content) -> bytes:
         import json
-        return json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return json.dumps(content, ensure_ascii=False, allow_nan=True).encode("utf-8")
 
 app = FastAPI(title="PolySignal API", version="4.0", default_response_class=UTF8JSONResponse)
 
