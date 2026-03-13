@@ -25,12 +25,7 @@ from models import Base, Market, Token, Snapshot, Trade, Signal
 
 Base.metadata.create_all(bind=engine)
 
-class UTF8JSONResponse(JSONResponse):
-    def render(self, content) -> bytes:
-        import json
-        return json.dumps(content, ensure_ascii=False, allow_nan=True).encode("utf-8")
-
-app = FastAPI(title="PolySignal API", version="4.0", default_response_class=UTF8JSONResponse)
+app = FastAPI(title="PolySignal API", version="4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -2499,7 +2494,8 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
     results.sort(key=lambda x: x["master_score"], reverse=True)
     top = results[:limit]
 
-    return {
+    import json
+    content = {
         "modelo": "MASTER v4 — Market-Adaptive",
         "total_analisados": stats["total_analisados"],
         "filtrados_por_volume": stats["total_filtrados"],
@@ -2513,6 +2509,7 @@ def get_master_predictions(limit: int = Query(15, ge=1, le=50), db: Session = De
         "previsoes": top,
         "gerado_em": now.isoformat(),
     }
+    return JSONResponse(content=json.loads(json.dumps(content, ensure_ascii=False, default=str)), headers={"Content-Type": "application/json; charset=utf-8"})
 
 
 # ══════════════════════════════════════════════════════════════
@@ -11746,4 +11743,3 @@ async def endpoint_dead_cat(body: DeadCatRequest):
         return JSONResponse(content={"motor": "MOTOR_60_DEAD_CAT", "resultado": resultado})
     except Exception as e:
         return JSONResponse(status_code=500, content={"erro": str(e)})
-    
